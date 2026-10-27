@@ -4,7 +4,7 @@
 Парсеры форматов берутся из MIT-проекта WoWee (https://github.com/Kelsidavis/WoWee).
 Ассеты только из своего легального клиента 1.12. Игра на частном сервере без Warden.
 
-**К новому чату приложить:** этот файл + `wow3ds-stage5t.zip` (весь код) + `w3dconv-win25.zip` +
+**К новому чату приложить:** этот файл + `wow3ds-stage5z.zip` (весь код; ветка `claude/water` репозитория) + `w3dconv-win31.zip` +
 результаты проверки (log_region.txt, placements.txt, preview/region.png, preview/coll_32_48.png, preview/creature_*.png, preview/player_*.png,
 report.txt, фото/описание HUD с консоли, при сетевых вопросах — session.w3dl; с этапа 5.12 — survey_log.txt).
 
