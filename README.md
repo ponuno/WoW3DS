@@ -27,13 +27,7 @@ server).
 - **Sound:** interface sounds, footsteps, world sounds, zone music and ambience (from your client's files, DSP firmware
   dump required on the console).
 
-## Verified on hardware
 
-Run on a New 3DS against a private 1.12 server: rendering of one tile (60 FPS), world streaming (59 FPS), login and
-entering the world, movement and world objects. Everything from stage 5.0 onward that is not in that list (buildings,
-creature models, UI windows, dungeons, loading screens, map switching, ...) is tested on the PC and still needs a
-console run. The most recent additions (dungeons, loading screens, the loading gate) have not been run on a console at
-all.
 
 ## Repository layout
 
