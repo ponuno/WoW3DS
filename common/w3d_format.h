@@ -37,7 +37,31 @@ enum W3dEntryType {
     W3D_ENTRY_CHARIMG   = W3D_FOURCC('C', 'I', 'M', 'G'),   // stage 5.5: body texture layer (id = path hash)
     W3D_ENTRY_ITEM      = W3D_FOURCC('I', 'T', 'E', 'M'),   // stage 5.19: worn item look (id = ItemDisplayInfo id)
     W3D_ENTRY_LIQUID    = W3D_FOURCC('L', 'I', 'Q', 'D'),   // stage 5.26: where the liquids of a tile are (swimming, id = tile)
+    W3D_ENTRY_PACKINFO  = W3D_FOURCC('P', 'I', 'N', 'F'),   // stage 5.27: what this file is in a set of packs (id 0)
 };
+
+// ---------------------------------------------------------------- pack sets (stage 5.27)
+// One conversion of everything (w3dconv --all) writes a shared asset pool and a small pack per map:
+//   common.w3dp, common1.w3dp, ...  every entry that is not a tile (textures, models, buildings, creatures, players,
+//                                   items); several parts because FAT32 holds no file of 4 GB or more
+//   map<ID>.w3dp                    the map's tiles only: TERR, PLCM, WATR, LIQD, COLL
+// Each file carries a PINF entry; the client opening a map pack opens the pool parts next to it and checks that every
+// file comes from the same conversion (buildId). A pack without PINF (older converters) stands alone.
+enum W3dPackKind { W3D_PACK_STANDALONE = 0, W3D_PACK_POOL = 1, W3D_PACK_MAP = 2 };
+typedef struct {
+    uint32_t buildId;             // the same in every file of one conversion
+    uint16_t kind;                // W3dPackKind
+    uint16_t part;                // pool: this part's number (0 = common.w3dp, k = common<k>.w3dp)
+    uint16_t partCount;           // pool: parts in the set (a map pack: 0, the pool says)
+    uint16_t pad;
+    uint32_t mapId;               // map: Map.dbc id
+    uint32_t reserved[3];
+} W3dPackInfo;                    // 28 bytes
+// Entry types that belong to a map (by tile id); everything else goes to the pool.
+static inline int w3d_is_tile_entry(uint32_t type) {
+    return type == W3D_ENTRY_TERRAIN || type == W3D_ENTRY_PLACEMENT || type == W3D_ENTRY_WATER || type == W3D_ENTRY_LIQUID ||
+           type == W3D_ENTRY_COLLISION;
+}
 
 typedef struct {
     uint32_t magic;        // W3DP_MAGIC

@@ -98,8 +98,8 @@ bool convertItems(const Options& o, const DataDir& data, PackWriter& pack, ConvS
     const int A = W3D_CHAR_ATLAS;
     auto addLayer = [&](const std::string& path, int region) -> uint32_t {
         const Rect& rg = kRegion[region];
-        uint32_t id = w3d_fnv1a(path.c_str()) ^ (uint32_t)(rg.x * 7919 + rg.y * 104729 + rg.w * 31 + rg.h);
-        if (id == 0) id = 1;
+        uint32_t id = pack.keyId(W3D_ENTRY_CHARIMG, DataDir::normalize(path) + "@" + std::to_string(rg.x) + "," + std::to_string(rg.y) + "," +
+                                                     std::to_string(rg.w) + "," + std::to_string(rg.h));
         if (pack.has(W3D_ENTRY_CHARIMG, id)) return id;
         std::vector<uint8_t> bytes;
         Image im;

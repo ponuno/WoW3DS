@@ -151,8 +151,8 @@ static void convertCharactersImpl(const Options& o, const DataDir& data, PackWri
     // CIMG id: the layer's path hash mixed with its region, so one file in two places stays two entries.
     auto addLayer = [&](const std::string& path, const Region& rg) -> uint32_t {
         if (path.empty()) return 0;
-        uint32_t id = w3d_fnv1a(path.c_str()) ^ (uint32_t)(rg.x * 7919 + rg.y * 104729 + rg.w * 31 + rg.h);
-        if (id == 0) id = 1;
+        uint32_t id = pack.keyId(W3D_ENTRY_CHARIMG, DataDir::normalize(path) + "@" + std::to_string(rg.x) + "," + std::to_string(rg.y) + "," +
+                                                     std::to_string(rg.w) + "," + std::to_string(rg.h));
         if (pack.has(W3D_ENTRY_CHARIMG, id)) return id;
         std::vector<uint8_t> bytes;
         Image im;
@@ -422,7 +422,7 @@ bool convertCreatures(const Options& o, const DataDir& data, PackWriter& pack, C
             if (o.verbose) std::fprintf(stderr, "  creature model failed: %s (%s)\n", m2.c_str(), mi.info.error.c_str());
             return mi;
         }
-        mi.id = w3d_fnv1a(key.c_str());
+        mi.id = pack.keyId(W3D_ENTRY_CREATURE, key);
         pack.add(W3D_ENTRY_CREATURE, mi.id, std::move(blob));
         mi.ok = true;
         ++st.creatureModelsOk;

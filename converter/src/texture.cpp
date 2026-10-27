@@ -243,7 +243,9 @@ std::vector<uint8_t> encodeTextureLevel(const Image& im, uint8_t fmt) {
 
 uint32_t addTextureFromGame(PackWriter& pack, const DataDir& data, const std::string& gamePath,
                             int maxSize, uint8_t fmt, bool alphaCapable, bool verbose) {
-    uint32_t id = w3d_fnv1a(DataDir::normalize(gamePath).c_str());
+    // one entry per BLP for the whole pack (and the whole pool of --all): the first conversion of it is the one kept,
+    // so the id is the plain path hash (keyId only salts it if two paths collide)
+    uint32_t id = pack.keyId(W3D_ENTRY_TEXTURE, DataDir::normalize(gamePath));
     if (pack.has(W3D_ENTRY_TEXTURE, id)) return id;
     std::vector<uint8_t> bytes;
     Image img;

@@ -229,7 +229,8 @@ static void buildMarkers(w3n::GameSession& g, uint32_t nowMs, const float camPos
 }
 
 static const char* findPack() {
-    static const char* candidates[] = {"sdmc:/3ds/w3dproto/test.w3dp", "sdmc:/3ds/w3dproto/synth.w3dp",
+    // map0.w3dp: the Eastern Kingdoms of 'w3dconv --all' (stage 5.27, with the shared pool common*.w3dp); test.w3dp: a region
+    static const char* candidates[] = {"sdmc:/3ds/w3dproto/map0.w3dp", "sdmc:/3ds/w3dproto/test.w3dp", "sdmc:/3ds/w3dproto/synth.w3dp",
                                        "romfs:/synth.w3dp"};
     for (const char* p : candidates) {
         FILE* f = fopen(p, "rb");

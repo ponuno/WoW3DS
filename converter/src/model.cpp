@@ -172,7 +172,7 @@ static uint8_t mapBlend(uint16_t m2Blend) {
 uint32_t addModelFromGame(PackWriter& pack, const DataDir& data, const std::string& m2PathIn,
                           const Options& o, ConvStats& st) {
     std::string m2Path = wowee::pipeline::modelPathToM2(m2PathIn);
-    uint32_t id = w3d_fnv1a(DataDir::normalize(m2Path).c_str());
+    uint32_t id = pack.keyId(W3D_ENTRY_MODEL, DataDir::normalize(m2Path));
     if (pack.has(W3D_ENTRY_MODEL, id)) return id;
 
     progress(false, "tile %d_%d: models %zu, buildings %zu, textures %zu", o.tileX, o.tileY, st.modelsOk, st.wmoOk,
@@ -297,7 +297,7 @@ uint32_t addItemModel(PackWriter& pack, const DataDir& data, const std::string& 
     using wowee::pipeline::M2Model;
     std::string m2Path = wowee::pipeline::modelPathToM2(m2PathIn);
     const std::string key = DataDir::normalize(m2Path) + "|" + DataDir::normalize(texPath);
-    uint32_t id = w3d_fnv1a(key.c_str());
+    uint32_t id = pack.keyId(W3D_ENTRY_MODEL, key);
     if (pack.has(W3D_ENTRY_MODEL, id)) return id;
     std::vector<uint8_t> bytes;
     if (!data.read(m2Path, bytes)) {

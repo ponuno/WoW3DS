@@ -250,6 +250,57 @@ struct Canvas {
 
 // Collision of one tile seen from above, 2 px per yard (north up, like region.png):
 // floors blue, building walls red, doodad walls orange; grid cells faint.
+// Stage 5.27: a map pack of 'w3dconv --all' keeps its models and textures in the pool next to it (common*.w3dp); their
+// blobs are read from there when a picture needs them.
+struct PoolFiles {
+    std::vector<std::string> files;
+    std::map<std::pair<uint32_t, uint32_t>, std::pair<int, W3dEntry>> index;
+    std::map<std::pair<uint32_t, uint32_t>, std::vector<uint8_t>> cache;
+    void open(const std::string& mapPack, const std::vector<uint8_t>& b, const W3dEntry* e, uint32_t n) {
+        W3dPackInfo pi{};
+        bool have = false;
+        for (uint32_t i = 0; i < n; ++i)
+            if (e[i].type == W3D_ENTRY_PACKINFO) { std::memcpy(&pi, b.data() + e[i].offset, std::min<size_t>(sizeof pi, e[i].size)); have = true; }
+        if (!have || pi.kind != W3D_PACK_MAP) return;
+        std::string dir = mapPack;
+        size_t cut = dir.find_last_of("/\\");
+        dir = cut == std::string::npos ? std::string() : dir.substr(0, cut + 1);
+        int parts = 1;
+        for (int k = 0; k < parts; ++k) {
+            std::string p = dir + (k ? "common" + std::to_string(k) + ".w3dp" : std::string("common.w3dp"));
+            std::ifstream g(p, std::ios::binary);
+            W3dPackHeader gh;
+            if (!g.read(reinterpret_cast<char*>(&gh), sizeof gh) || gh.magic != W3DP_MAGIC) { std::printf("note: %s missing\n", p.c_str()); return; }
+            std::vector<W3dEntry> idx(gh.entryCount);
+            g.seekg(gh.indexOffset);
+            g.read(reinterpret_cast<char*>(idx.data()), (std::streamsize)(idx.size() * sizeof(W3dEntry)));
+            for (const W3dEntry& x : idx) {
+                if (x.type == W3D_ENTRY_PACKINFO && k == 0) {
+                    W3dPackInfo ci{};
+                    g.seekg(x.offset);
+                    g.read(reinterpret_cast<char*>(&ci), std::min<size_t>(sizeof ci, x.size));
+                    parts = std::max<int>(1, ci.partCount);
+                }
+                index[{x.type, x.id}] = {(int)files.size(), x};
+            }
+            files.push_back(p);
+        }
+        std::printf("pool: %zu parts, %zu entries\n", files.size(), index.size());
+    }
+    const uint8_t* blob(uint32_t type, uint32_t id) {
+        auto c = cache.find({type, id});
+        if (c != cache.end()) return c->second.data();
+        auto it = index.find({type, id});
+        if (it == index.end()) return nullptr;
+        std::ifstream g(files[it->second.first], std::ios::binary);
+        std::vector<uint8_t> v(it->second.second.size);
+        g.seekg(it->second.second.offset);
+        if (!g.read(reinterpret_cast<char*>(v.data()), (std::streamsize)v.size())) return nullptr;
+        return cache.emplace(std::make_pair(type, id), std::move(v)).first->second.data();
+    }
+};
+static PoolFiles g_pool;
+
 // Stage 5.26: the liquid query grid of one tile, 4 px per cell, north up like region.png: water blue, sea dark blue,
 // lava orange, slime green; deep cells darker, cells from buildings striped. Brightness follows the surface height.
 static int previewLiquid(const std::vector<uint8_t>& b, const W3dEntry& e, const std::string& outDir) {
@@ -479,6 +530,7 @@ int main(int argc, char** argv) {
         return bad ? 1 : 0;
     }
     const float TS = 533.33333f;
+    g_pool.open(argv[1], b, e, h.entryCount);
 
     FILE* texList = std::fopen((outDir + "/textures.txt").c_str(), "w");   // id, size, format of every texture in the pack
     // Region bounds from terrain headers.
@@ -527,6 +579,15 @@ int main(int argc, char** argv) {
                 for (size_t k = 0; k < n; ++k) for (int c = 0; c < 3; ++c) acc[c] += rgba[k * 4 + c];
                 if (n) for (int c = 0; c < 3; ++c) m[c] = (float)(acc[c] / n);
                 break;
+            }
+            if (const uint8_t* pb = m[0] == 200 && m[1] == 200 && m[2] == 200 ? g_pool.blob(W3D_ENTRY_TEXTURE, id) : nullptr) {
+                W3dTexHeader t;
+                std::memcpy(&t, pb, sizeof t);
+                auto rgba = decodeLevel0(t, pb + W3D_TEX_DATA_OFFSET);
+                double acc[3] = {0, 0, 0};
+                const size_t n = rgba.size() / 4;
+                for (size_t k = 0; k < n; ++k) for (int c = 0; c < 3; ++c) acc[c] += rgba[k * 4 + c];
+                if (n) for (int c = 0; c < 3; ++c) m[c] = (float)(acc[c] / n);
             }
             it = means.emplace(id, m).first;
         }
@@ -589,7 +650,8 @@ int main(int argc, char** argv) {
                     const W3dEntry* me = nullptr;
                     for (uint32_t j = 0; j < h.entryCount; ++j)
                         if (e[j].type == W3D_ENTRY_MODEL && e[j].id == pl[k].modelId) { me = &e[j]; break; }
-                    if (!me) {   // unresolved model: magenta dot
+                    const uint8_t* poolModel = me ? nullptr : g_pool.blob(W3D_ENTRY_MODEL, pl[k].modelId);
+                    if (!me && !poolModel) {   // unresolved model: magenta dot
                         float q[2];
                         toImg(pl[k].pos[0], pl[k].pos[1], q);
                         int x = (int)q[0], y = (int)q[1];
@@ -599,7 +661,7 @@ int main(int argc, char** argv) {
                         }
                         continue;
                     }
-                    const uint8_t* mb = b.data() + me->offset;
+                    const uint8_t* mb = me ? b.data() + me->offset : poolModel;
                     W3dModelHeader mh;
                     std::memcpy(&mh, mb, sizeof mh);
                     const W3dModelVertex* mv = reinterpret_cast<const W3dModelVertex*>(mb + mh.offVertices);

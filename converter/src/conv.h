@@ -11,6 +11,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <set>
 #include <unordered_set>
 #include <vector>
 
@@ -84,9 +85,25 @@ public:
     bool setSpillPath(const std::string& path);
     // Returns false if (type,id) already present.
     bool add(uint32_t type, uint32_t id, std::vector<uint8_t> blob);
-    bool has(uint32_t type, uint32_t id) const { return keys_.count(((uint64_t)type << 32) | id) != 0; }
+    bool has(uint32_t type, uint32_t id) const {
+        if (pool_ && !w3d_is_tile_entry(type)) return pool_->has(type, id);
+        return keys_.count(((uint64_t)type << 32) | id) != 0;
+    }
+    // The id of an asset named by 'key' (its game path, plus whatever makes two conversions of it differ): FNV-1a of
+    // the key, unless that id already belongs to another key of the same type - then a salted hash, so two names never
+    // share an entry (a world has hundreds of thousands of names: 32-bit collisions do happen). Same key, same id.
+    uint32_t keyId(uint32_t type, const std::string& key);
+    size_t keyCollisions() const { return pool_ ? pool_->keyCollisions() : collisions_; }
+    // Stage 5.27: a map pack hands every non-tile entry (and the names) to the shared pool.
+    void setPool(PackWriter* pool) { pool_ = pool; }
+    PackWriter* pool() const { return pool_; }
+    // What the file is (PINF entry, written by write()); without it nothing is written (a standalone pack).
+    void setInfo(const W3dPackInfo& info) { info_ = info; haveInfo_ = true; }
     // False when it cannot write the file or the pack would pass 4 GiB (32-bit offsets, also the FAT32 file limit).
     bool write(const std::string& path) const;
+    // The pool: split into parts of at most partBytes, base.w3dp, base1.w3dp, ... (part numbers in their PINF).
+    // Returns the number of parts written, 0 on failure.
+    int writeParts(const std::string& basePath, uint64_t partBytes) const;
     size_t totalBytes(uint32_t type) const;
     size_t count(uint32_t type) const;
     uint64_t storedBytes() const { return pos_; }
@@ -94,6 +111,13 @@ public:
 private:
     struct Item { uint32_t type, id; uint64_t off; uint32_t size; };
     bool readAt(uint64_t off, void* dst, size_t n) const;
+    bool writeItems(const std::string& path, const std::vector<const Item*>& order, const W3dPackInfo* info) const;
+    std::vector<const Item*> fileOrder() const;
+    PackWriter* pool_ = nullptr;
+    std::unordered_map<uint64_t, std::string> names_;   // (type, id) -> key (keyId)
+    size_t collisions_ = 0;
+    W3dPackInfo info_{};
+    bool haveInfo_ = false;
     std::vector<Item> items_;
     std::unordered_set<uint64_t> keys_;
     std::vector<uint8_t> mem_;        // storage without a spill file
@@ -335,6 +359,15 @@ bool isDungeonMap(const DataDir& data, const std::string& dir);
 bool convertDungeon(const Options& o, const DataDir& data, PackWriter& pack, ConvStats& st);
 std::vector<DungeonMap> listDungeonMaps(const DataDir& data);
 bool buildSynthetic(const Options& o, PackWriter& pack, ConvStats& st);
+// Stage 5.27: w3dconv --all - interface, sound, every map of Map.dbc with one shared asset pool (all.cpp).
+struct AllOptions {
+    std::string folder;                       // where everything goes (copy it to sdmc:/3ds/w3dproto/)
+    std::set<uint32_t> maps;                  // only these Map.dbc ids (empty: all but 'skip')
+    std::set<uint32_t> skip = {13, 25, 29, 42, 169, 451};   // test and development maps of 1.12
+    bool ui = true, sound = true;
+    uint64_t partBytes = 3900ull << 20;       // pool parts below the FAT32 file limit of 4 GiB
+};
+int convertAll(const Options& o, const DataDir& data, const AllOptions& ao, UiOptions uo, SoundOptions so);
 int  printPackInfo(const std::string& path);   // validator, returns 0 if pack is sound
 
 }  // namespace w3d

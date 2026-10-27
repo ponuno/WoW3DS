@@ -38,7 +38,7 @@ uint8_t bakeLight(float nx, float ny, float nz) {
 }  // namespace
 
 uint32_t addPlaceholderTexture(PackWriter& pack, uint8_t fmt) {
-    uint32_t id = w3d_fnv1a("<placeholder>");
+    uint32_t id = pack.keyId(W3D_ENTRY_TEXTURE, "<placeholder>");
     if (pack.has(W3D_ENTRY_TEXTURE, id)) return id;
     Image im;
     im.w = im.h = 8;

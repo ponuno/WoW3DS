@@ -239,6 +239,9 @@ int main(int argc, char** argv) {
     std::printf("%d frames: tile loads %u, max resident instances %zu, models %zu, distinct models drawn %zu\n", frames,
                 s.tileLoads, maxInst, maxModels, modelsSeen.size());
     std::printf("submesh checks %zu, problems %zu; linear peak %.1f MB\n", checks, problems, stubLinearPeak() / 1048576.0);
+    // every texture a tile or model asked for was in the pack(s) and was read (stage 5.27: also from the pool parts)
+    std::printf("textures not in the pack %u, reads failed %u\n", (unsigned)s.texNotInPack, (unsigned)s.texReadFailed);
+    if (s.texNotInPack || s.texReadFailed) ++problems;
     // Optional: walk the floor-height expectations of converter/tests/gen_wmo_data.py
     // (env WALK_EXPECT=expect.json) through the real streamerFloorHeight().
     int walkBad = 0;

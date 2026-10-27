@@ -21,13 +21,24 @@ static inline double ticksToMs(u64 t) { return (double)t * 1000.0 / (double)SYSC
 // ------------------------------------------------------------------ pack index
 struct PackIndex {
     FILE* file = nullptr;            // main-thread handle (startup only)
-    char path[128] = {0};
+    char path[128] = {0};            // the pack opened (a map pack, or a standalone pack)
     std::vector<W3dEntry> entries;   // sorted by (type, id)
     uint32_t maxTerrainSize = 0;
     int minTileX = 99, minTileY = 99, maxTileX = -1, maxTileY = -1;
+    // Stage 5.27: a map pack of 'w3dconv --all' takes its assets from the pool next to it (common.w3dp, common1.w3dp
+    // ...): the entries of every file in one index, fileOf[i] = the file of entries[i] (files[0] = the map pack).
+    static constexpr int kMaxFiles = 9;
+    char files[kMaxFiles][128] = {};
+    int fileCount = 0;
+    std::vector<uint8_t> fileOf;
+    uint32_t buildId = 0;            // 0: a standalone pack
+    int poolParts = 0;
 
     bool open(const char* path, char* err, size_t errLen);
     const W3dEntry* find(uint32_t type, uint32_t id) const;
+    int fileIndex(const W3dEntry* e) const {
+        return (e >= entries.data() && e < entries.data() + entries.size()) ? fileOf[(size_t)(e - entries.data())] : 0;
+    }
     bool hasTile(int tx, int ty) const { return find(W3D_ENTRY_TERRAIN, w3d_tile_id(tx, ty)) != nullptr; }
 };
 

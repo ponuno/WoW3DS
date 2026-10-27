@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 
 using namespace w3d;
 
@@ -57,6 +58,12 @@ static void usage() {
         "  --water-tint F        0..1 how much the Light.dbc water colour tints the texture (default: by the texture)\n"
         "  --no-wmo-water        leave out the liquids of buildings (canals, fountains, dungeon pools)\n"
         "  --texts-only          only write spells.txt and factions.txt next to -o (seconds, no tiles)\n"
+        "  --all                 EVERYTHING in one run into the folder of -o: ui.w3dp + texts, sound/, every map of Map.dbc\n"
+        "                        (map<ID>.w3dp with the tiles only) and ONE shared asset pool common.w3dp (+ common1.w3dp ...)\n"
+        "                        with all textures, models, buildings, creatures, players, items, ships (each stored once)\n"
+        "  --maps L              with --all: only these Map.dbc ids (comma list; default all but test maps 13,25,29,42,169,451)\n"
+        "  --no-ui / --no-sound-step   with --all: leave out the interface pack / the sound\n"
+        "  --pool-part-mb N      with --all: pool part size (default 3900: FAT32 files stay below 4 GB)\n"
         "  -v                    verbose\n"
         "ui options:\n"
         "  --ui-skin F           sprite list (default: built in, same as ui_skin.txt)\n"
@@ -77,6 +84,8 @@ int main(int argc, char** argv) {
     bool textsOnly = false, uiMode = false, soundMode = false;
     SoundOptions so;
     UiOptions uo;
+    AllOptions ao;
+    bool allMode = false;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         auto next = [&]() -> const char* {
@@ -139,6 +148,20 @@ int main(int argc, char** argv) {
         else if (a == "--creature-anim-kb") o.creatureAnimKb = std::atoi(next());
         else if (a == "--player-anim-kb") o.playerAnimKb = std::atoi(next());
         else if (a == "--synthetic") o.synthetic = true;
+        else if (a == "--all") allMode = true;
+        else if (a == "--maps") {
+            std::string l = next();
+            for (size_t p = 0; p < l.size();) {
+                size_t q = l.find(',', p);
+                if (q == std::string::npos) q = l.size();
+                if (q > p) ao.maps.insert((uint32_t)std::strtoul(l.substr(p, q - p).c_str(), nullptr, 10));
+                p = q + 1;
+            }
+        }
+        else if (a == "--no-ui") ao.ui = false;
+        else if (a == "--no-sound-step") ao.sound = false;
+        else if (a == "--pool-part-mb") ao.partBytes = (uint64_t)std::max(1, std::atoi(next())) << 20;
+        else if (a == "--pool-part-kb") ao.partBytes = (uint64_t)std::max(16, std::atoi(next())) << 10;   // tests
         else if (a == "--water-tex") o.waterTex = std::atoi(next());
         else if (a == "--water-frames") o.waterFrames = std::max(1, std::min(30, std::atoi(next())));
         else if (a == "--water-tint") o.waterTint = (float)std::atof(next());
@@ -185,6 +208,13 @@ int main(int argc, char** argv) {
         size_t cut = o.out.find_last_of("\\/");
         return cut == std::string::npos ? std::string() : o.out.substr(0, cut + 1);
     };
+    if (allMode) {   // stage 5.27: everything, one shared asset pool
+        if (o.synthetic) { std::fputs("--all needs --data\n", stderr); return 1; }
+        ao.folder = o.out == "test.w3dp" ? std::string(".") : o.out;
+        std::error_code ec;
+        std::filesystem::create_directories(ao.folder, ec);
+        return convertAll(o, data, ao, uo, so);
+    }
     if (soundMode) {
         if (o.synthetic) { std::fputs("--sound needs --data\n", stderr); return 1; }
         so.outDir = o.out == "test.w3dp" ? std::string("sound") : o.out;

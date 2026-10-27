@@ -22,7 +22,7 @@ namespace {
 
 enum {
     ID_DATA = 100, ID_DATA_BROWSE, ID_OUT, ID_OUT_BROWSE, ID_MAP, ID_RADIO_WORLD, ID_RADIO_REGION, ID_TX0, ID_TY0, ID_TX1, ID_TY1,
-    ID_PACKWORLD, ID_CREATURES, ID_PLAYERS, ID_ITEMS, ID_TRANSPORTS, ID_GAMEOBJECTS, ID_DUNGEONS, ID_UI, ID_SOUND, ID_QUALITY, ID_EXTRA,
+    ID_PACKWORLD, ID_CREATURES, ID_PLAYERS, ID_ITEMS, ID_TRANSPORTS, ID_GAMEOBJECTS, ID_DUNGEONS, ID_UI, ID_SOUND, ID_QUALITY, ID_EXTRA, ID_EVERYTHING,
     ID_START, ID_CANCEL, ID_OPEN, ID_LOG, ID_STATUS, ID_PROGRESS
 };
 constexpr UINT WM_LOGLINE = WM_APP + 1, WM_STEPS_DONE = WM_APP + 2, WM_STATUS = WM_APP + 3;
@@ -77,6 +77,7 @@ w3gui::Settings readUi() {
     s.packWorld = checked(ID_PACKWORLD);
     s.creatures = checked(ID_CREATURES); s.players = checked(ID_PLAYERS); s.items = checked(ID_ITEMS);
     s.transports = checked(ID_TRANSPORTS); s.gameobjects = checked(ID_GAMEOBJECTS); s.dungeons = checked(ID_DUNGEONS); s.ui = checked(ID_UI); s.sound = checked(ID_SOUND);
+    s.everything = checked(ID_EVERYTHING);
     s.quality = (int)SendDlgItemMessageW(g_wnd, ID_QUALITY, CB_GETCURSEL, 0, 0);
     if (s.quality < 0) s.quality = 0;
     s.extra = narrow(getText(ID_EXTRA));
@@ -94,6 +95,7 @@ void writeUi(const w3gui::Settings& s) {
     setChecked(ID_PACKWORLD, s.packWorld);
     setChecked(ID_CREATURES, s.creatures); setChecked(ID_PLAYERS, s.players); setChecked(ID_ITEMS, s.items);
     setChecked(ID_TRANSPORTS, s.transports); setChecked(ID_GAMEOBJECTS, s.gameobjects); setChecked(ID_DUNGEONS, s.dungeons); setChecked(ID_UI, s.ui); setChecked(ID_SOUND, s.sound);
+    setChecked(ID_EVERYTHING, s.everything);
     SendDlgItemMessageW(g_wnd, ID_QUALITY, CB_SETCURSEL, (WPARAM)s.quality, 0);
     setText(ID_EXTRA, widen(s.extra));
 }
@@ -223,10 +225,20 @@ DWORD WINAPI worker(LPVOID p) {
     return 0;
 }
 
+// "Everything" converts every map with creatures, players and ships: the per-map choices are greyed out.
+void applyEverything() {
+    const bool all = SendMessageW(GetDlgItem(g_wnd, ID_EVERYTHING), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    for (int id : {ID_MAP, ID_RADIO_WORLD, ID_RADIO_REGION, ID_TX0, ID_TY0, ID_TX1, ID_TY1, ID_PACKWORLD, ID_CREATURES, ID_PLAYERS,
+                   ID_TRANSPORTS, ID_DUNGEONS})
+        EnableWindow(GetDlgItem(g_wnd, id), !all);
+}
+
 void setRunning(bool running) {
     for (int id : {ID_START, ID_DATA, ID_DATA_BROWSE, ID_OUT, ID_OUT_BROWSE, ID_MAP, ID_RADIO_WORLD, ID_RADIO_REGION, ID_TX0, ID_TY0, ID_TX1, ID_TY1,
-                   ID_PACKWORLD, ID_CREATURES, ID_PLAYERS, ID_ITEMS, ID_TRANSPORTS, ID_GAMEOBJECTS, ID_DUNGEONS, ID_UI, ID_SOUND, ID_QUALITY, ID_EXTRA})
+                   ID_PACKWORLD, ID_CREATURES, ID_PLAYERS, ID_ITEMS, ID_TRANSPORTS, ID_GAMEOBJECTS, ID_DUNGEONS, ID_UI, ID_SOUND, ID_QUALITY, ID_EXTRA,
+                   ID_EVERYTHING})
         EnableWindow(GetDlgItem(g_wnd, id), !running);
+    if (!running) applyEverything();
     EnableWindow(GetDlgItem(g_wnd, ID_CANCEL), running);
     HWND bar = GetDlgItem(g_wnd, ID_PROGRESS);
     LONG_PTR st = GetWindowLongPtrW(bar, GWL_STYLE);
@@ -315,6 +327,9 @@ void createControls() {
     mk(L"BUTTON", L"Sound and music (folder sound)", BS_AUTOCHECKBOX | WS_TABSTOP, 420, y, 170, 20, ID_SOUND);
     y += 24;
     mk(L"BUTTON", L"Dungeons and raids (one map<ID>.w3dp each; slow, with Creatures/Players it is big)", BS_AUTOCHECKBOX | WS_TABSTOP, 12, y, 578, 20, ID_DUNGEONS);
+    y += 24;
+    mk(L"BUTTON", L"EVERYTHING: all maps and dungeons, one shared asset pool (map<ID>.w3dp + common*.w3dp; hours, ~GBs)",
+       BS_AUTOCHECKBOX | WS_TABSTOP, 12, y, 578, 20, ID_EVERYTHING);
     y += 28;
     mk(L"STATIC", L"Extra (e.g. --gameobjects pumpkin):", 0, 12, y + 3, 230, 18, 0);
     mk(L"EDIT", L"", edit | ro | WS_BORDER, 244, y, 346, 24, ID_EXTRA, WS_EX_CLIENTEDGE);
@@ -336,6 +351,7 @@ LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
             g_wnd = h;
             createControls();
             writeUi(loadSettings());
+            applyEverything();
             return 0;
         case WM_COMMAND:
             switch (LOWORD(w)) {
@@ -350,6 +366,7 @@ LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
                     return 0;
                 }
                 case ID_START: startRun(); return 0;
+                case ID_EVERYTHING: applyEverything(); return 0;
                 case ID_CANCEL:
                     InterlockedExchange(&g_cancel, 1);
                     EnterCriticalSection(&g_cs);
@@ -433,7 +450,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
     wc.lpszClassName = L"w3dgui";
     RegisterClassW(&wc);
-    RECT r{0, 0, 602, 624};
+    RECT r{0, 0, 602, 648};
     AdjustWindowRect(&r, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE);
     HWND w = CreateWindowW(L"w3dgui", L"WoW 3DS converter (everything in one folder)", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
                            CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, nullptr, nullptr, inst, nullptr);

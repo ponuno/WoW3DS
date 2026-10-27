@@ -26,28 +26,91 @@
 #include <unordered_map>
 
 // ================================================================== index
+namespace {
+// One file's header, index and PINF (absent: a standalone pack, info.kind 0, buildId 0).
+bool readPackIndex(const char* p, std::vector<W3dEntry>& out, W3dPackInfo* info, char* err, size_t errLen) {
+    FILE* f = fopen(p, "rb");
+    if (!f) { snprintf(err, errLen, "cannot open %s", p); return false; }
+    W3dPackHeader h;
+    bool ok = fread(&h, 1, sizeof h, f) == sizeof h && h.magic == W3DP_MAGIC;
+    if (!ok) snprintf(err, errLen, "%s: not a W3DP pack", p);
+    else if (h.version != W3DP_VERSION) {
+        snprintf(err, errLen, "pack version %lu, need %u: re-run the converter", (unsigned long)h.version, W3DP_VERSION);
+        ok = false;
+    }
+    if (ok) {
+        out.resize(h.entryCount);
+        ok = fseek(f, h.indexOffset, SEEK_SET) == 0 && fread(out.data(), sizeof(W3dEntry), h.entryCount, f) == h.entryCount;
+        if (!ok) snprintf(err, errLen, "%s: bad pack index", p);
+    }
+    *info = W3dPackInfo{};
+    if (ok)
+        for (const W3dEntry& e : out)
+            if (e.type == W3D_ENTRY_PACKINFO && e.size >= sizeof(W3dPackInfo)) {
+                if (fseek(f, e.offset, SEEK_SET) != 0 || fread(info, sizeof *info, 1, f) != 1) *info = W3dPackInfo{};
+                break;
+            }
+    fclose(f);
+    return ok;
+}
+}  // namespace
+
 bool PackIndex::open(const char* p, char* err, size_t errLen) {
     snprintf(path, sizeof path, "%s", p);
-    file = fopen(p, "rb");
-    if (!file) { snprintf(err, errLen, "cannot open %s", p); return false; }
-    W3dPackHeader h;
-    if (fread(&h, 1, sizeof h, file) != sizeof h || h.magic != W3DP_MAGIC) {
-        snprintf(err, errLen, "not a W3DP pack");
-        return false;
+    entries.clear();
+    fileOf.clear();
+    fileCount = 0;
+    buildId = 0;
+    poolParts = 0;
+    W3dPackInfo info;
+    std::vector<W3dEntry> own;
+    if (!readPackIndex(p, own, &info, err, errLen)) return false;
+    snprintf(files[fileCount++], sizeof files[0], "%s", p);
+    struct Tagged { W3dEntry e; uint8_t file; };
+    std::vector<Tagged> all;
+    all.reserve(own.size());
+    for (const W3dEntry& e : own) all.push_back({e, 0});
+    if (info.kind == W3D_PACK_MAP) {   // its assets: the pool next to it, every part of the same conversion
+        buildId = info.buildId;
+        char dir[108];   // room for "common<k>.w3dp" in a 128-byte path
+        if (snprintf(dir, sizeof dir, "%s", p) >= (int)sizeof dir) { snprintf(err, errLen, "path too long: %s", p); return false; }
+        char* slash = strrchr(dir, '/');
+        if (slash) slash[1] = 0; else dir[0] = 0;
+        int parts = 1;
+        for (int k = 0; k < parts; ++k) {
+            if (fileCount >= kMaxFiles) { snprintf(err, errLen, "the pool has more than %d parts", kMaxFiles - 1); return false; }
+            char cp[128];
+            if (k) snprintf(cp, sizeof cp, "%scommon%d.w3dp", dir, k % 10);
+            else snprintf(cp, sizeof cp, "%scommon.w3dp", dir);
+            std::vector<W3dEntry> part;
+            W3dPackInfo pi;
+            if (!readPackIndex(cp, part, &pi, err, errLen)) {
+                snprintf(err, errLen, "%s needs %s (copy every common*.w3dp of the same conversion)", p, cp);
+                return false;
+            }
+            if (pi.kind != W3D_PACK_POOL || pi.buildId != buildId) {
+                snprintf(err, errLen, "%s is from another conversion than %s: copy all files of one w3dconv --all run", cp, p);
+                return false;
+            }
+            if (k == 0) parts = std::max<int>(1, pi.partCount);
+            const uint8_t fi = (uint8_t)fileCount;
+            snprintf(files[fileCount++], sizeof files[0], "%s", cp);
+            for (const W3dEntry& e : part)
+                if (e.type != W3D_ENTRY_PACKINFO) all.push_back({e, fi});
+        }
+        poolParts = parts;
     }
-    if (h.version != W3DP_VERSION) {
-        snprintf(err, errLen, "pack version %lu, need %u: re-run the converter", (unsigned long)h.version, W3DP_VERSION);
-        return false;
-    }
-    entries.resize(h.entryCount);
-    if (fseek(file, h.indexOffset, SEEK_SET) != 0 ||
-        fread(entries.data(), sizeof(W3dEntry), h.entryCount, file) != h.entryCount) {
-        snprintf(err, errLen, "bad pack index");
-        return false;
-    }
-    std::sort(entries.begin(), entries.end(), [](const W3dEntry& a, const W3dEntry& b) {
-        return a.type != b.type ? a.type < b.type : a.id < b.id;
+    // sorted by (type, id); the map pack's own entry wins a tie (it comes first, the sort is stable)
+    std::stable_sort(all.begin(), all.end(), [](const Tagged& a, const Tagged& b) {
+        return a.e.type != b.e.type ? a.e.type < b.e.type : a.e.id < b.e.id;
     });
+    entries.reserve(all.size());
+    fileOf.reserve(all.size());
+    for (size_t i = 0; i < all.size(); ++i) {
+        if (i && all[i].e.type == all[i - 1].e.type && all[i].e.id == all[i - 1].e.id) continue;
+        entries.push_back(all[i].e);
+        fileOf.push_back(all[i].file);
+    }
     for (const W3dEntry& e : entries) {
         if (e.type != W3D_ENTRY_TERRAIN) continue;
         maxTerrainSize = std::max(maxTerrainSize, e.size);
@@ -56,8 +119,6 @@ bool PackIndex::open(const char* p, char* err, size_t errLen) {
         minTileY = std::min(minTileY, ty); maxTileY = std::max(maxTileY, ty);
     }
     if (!maxTerrainSize) { snprintf(err, errLen, "pack has no terrain"); return false; }
-    fclose(file);
-    file = nullptr;
     return true;
 }
 
@@ -91,6 +152,7 @@ enum class JobKind : uint8_t { Terrain, Water, Placement, Collision, Model, Text
 
 struct Job {
     JobKind kind;
+    uint8_t file;                    // PackIndex::files (0: the map pack, 1..: the pool parts)
     uint32_t offset, size;
     uint8_t* dst;
     void* owner;
@@ -121,7 +183,7 @@ void freeColl(uint8_t* p, bool linear) {
 }
 
 PackIndex* g_index = nullptr;
-FILE* g_ioFile = nullptr;
+FILE* g_ioFiles[PackIndex::kMaxFiles] = {};   // one handle per pack file, used by the IO thread only
 
 Thread g_thread = nullptr;
 std::atomic<bool> g_quit{false};
@@ -199,7 +261,8 @@ void buildHeightField(Tile* t) {
 }
 
 void runJob(Job* j) {
-    j->ok = fseek(g_ioFile, j->offset, SEEK_SET) == 0 && fread(j->dst, 1, j->size, g_ioFile) == j->size;
+    FILE* f = j->file < PackIndex::kMaxFiles ? g_ioFiles[j->file] : nullptr;
+    j->ok = f && fseek(f, j->offset, SEEK_SET) == 0 && fread(j->dst, 1, j->size, f) == j->size;
     if (j->ok && j->kind != JobKind::Placement && j->kind != JobKind::Collision && j->kind != JobKind::Display &&
         j->kind != JobKind::CharInfo && j->kind != JobKind::CharImg && j->kind != JobKind::Item &&
         j->kind != JobKind::Liquid) {   // CPU-only data needs no flush
@@ -235,7 +298,7 @@ void workerMain(void*) {
 }
 
 void submit(JobKind kind, const W3dEntry* e, uint8_t* dst, void* owner) {
-    Job* j = new Job{kind, e->offset, e->size, dst, owner};
+    Job* j = new Job{kind, (uint8_t)g_index->fileIndex(e), e->offset, e->size, dst, owner};
     LightLock_Lock(&g_lock);
     g_requests.push_back(j);
     LightLock_Unlock(&g_lock);
@@ -951,9 +1014,11 @@ bool streamerInit(PackIndex* index, char* err, size_t errLen) {
     g_quit = false;   // a map change shuts the streamer down and starts it again on the next pack
     g_freeSlots.clear();
     g_pool = nullptr;
-    g_ioFile = fopen(index->path, "rb");
-    if (!g_ioFile) { snprintf(err, errLen, "cannot reopen pack"); return false; }
-    setvbuf(g_ioFile, NULL, _IOFBF, 64 * 1024);
+    for (int k = 0; k < index->fileCount; ++k) {
+        g_ioFiles[k] = fopen(index->files[k], "rb");
+        if (!g_ioFiles[k]) { snprintf(err, errLen, "cannot reopen %s", index->files[k]); return false; }
+        setvbuf(g_ioFiles[k], NULL, _IOFBF, k ? 32 * 1024 : 64 * 1024);
+    }
 
     // White 8x8 stand-in texture.
     C3D_TexInit(&g_white.tex, 8, 8, GPU_RGB565);
@@ -1046,8 +1111,10 @@ void streamerShutdown() {
     g_freeSlots.clear();
     g_deferred.clear();
     g_retry.clear();
-    if (g_ioFile) fclose(g_ioFile);
-    g_ioFile = nullptr;
+    for (FILE*& f : g_ioFiles) {
+        if (f) fclose(f);
+        f = nullptr;
+    }
     g_index = nullptr;
     C3D_TexDelete(&g_white.tex);
 }

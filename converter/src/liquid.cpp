@@ -353,7 +353,7 @@ void tileLook(const Options& o, const DataDir* data, int tx, int ty, W3dLiquidLo
 uint32_t proceduralLiquid(PackWriter& pack, int liquid, uint8_t fmt) {
     static const char* names[4] = {"<liquid-water>", "<liquid-ocean>", "<liquid-magma>", "<liquid-slime>"};
     static const uint8_t base[4][3] = {{150, 185, 200}, {130, 165, 195}, {230, 90, 20}, {80, 160, 40}};
-    uint32_t id = w3d_fnv1a(names[liquid]);
+    uint32_t id = pack.keyId(W3D_ENTRY_TEXTURE, names[liquid]);
     if (pack.has(W3D_ENTRY_TEXTURE, id)) return id;
     Image im;
     im.w = im.h = 64;

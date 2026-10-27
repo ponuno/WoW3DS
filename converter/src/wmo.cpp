@@ -264,7 +264,7 @@ static const WmoAsset& loadWmo(PackWriter& pack, const DataDir& data, const std:
         if (blob.empty()) { ++st.wmoGroupsFailed; continue; }
         char idKey[600];
         std::snprintf(idKey, sizeof idKey, "%s#%u", key.c_str(), gi);
-        uint32_t id = w3d_fnv1a(idKey);
+        uint32_t id = pack.keyId(W3D_ENTRY_MODEL, idKey);
         pack.add(W3D_ENTRY_MODEL, id, std::move(blob));
         a.groups.push_back({id, center});
         st.wmoTris += tris;

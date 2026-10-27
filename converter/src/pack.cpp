@@ -31,7 +31,21 @@ bool PackWriter::setSpillPath(const std::string& path) {
     return true;
 }
 
+uint32_t PackWriter::keyId(uint32_t type, const std::string& key) {
+    if (pool_) return pool_->keyId(type, key);
+    uint32_t id = w3d_fnv1a(key.c_str());
+    for (uint32_t salt = 1;; ++salt) {
+        if (id == 0) id = 1;   // 0 means "none" in many tables
+        auto [it, fresh] = names_.emplace(((uint64_t)type << 32) | id, key);
+        if (fresh && salt > 1) ++collisions_;   // a new name that had to move off another's hash
+        if (fresh || it->second == key) return id;
+        const std::string salted = key + "#" + std::to_string(salt);
+        id = w3d_fnv1a(salted.c_str());
+    }
+}
+
 bool PackWriter::add(uint32_t type, uint32_t id, std::vector<uint8_t> blob) {
+    if (pool_ && !w3d_is_tile_entry(type)) return pool_->add(type, id, std::move(blob));
     const uint64_t key = ((uint64_t)type << 32) | id;
     if (!keys_.insert(key).second) return false;
     Item it{type, id, pos_, (uint32_t)blob.size()};
@@ -78,11 +92,11 @@ size_t PackWriter::count(uint32_t type) const {
     return n;
 }
 
-bool PackWriter::write(const std::string& path) const {
+std::vector<const PackWriter::Item*> PackWriter::fileOrder() const {
     // Order: terrain, placements, models, textures — the client reads in file
     // order, so the small structural entries come first.
     std::vector<const Item*> order;
-    const uint32_t known[] = {W3D_ENTRY_TERRAIN, W3D_ENTRY_PLACEMENT, W3D_ENTRY_WATER, W3D_ENTRY_LIQUID, W3D_ENTRY_COLLISION, W3D_ENTRY_MODEL,
+    const uint32_t known[] = {W3D_ENTRY_PACKINFO, W3D_ENTRY_TERRAIN, W3D_ENTRY_PLACEMENT, W3D_ENTRY_WATER, W3D_ENTRY_LIQUID, W3D_ENTRY_COLLISION, W3D_ENTRY_MODEL,
                               W3D_ENTRY_DISPLAY, W3D_ENTRY_CHARACTER, W3D_ENTRY_ITEM, W3D_ENTRY_CREATURE, W3D_ENTRY_TEXTURE,
                               W3D_ENTRY_CHARIMG};
     for (uint32_t t : known)
@@ -90,7 +104,11 @@ bool PackWriter::write(const std::string& path) const {
             if (it.type == t) order.push_back(&it);
     for (const auto& it : items_)   // anything newer than this list still gets written
         if (std::find(std::begin(known), std::end(known), it.type) == std::end(known)) order.push_back(&it);
+    return order;
+}
 
+bool PackWriter::writeItems(const std::string& path, const std::vector<const Item*>& orderIn, const W3dPackInfo* info) const {
+    static const uint8_t pad0[W3D_BLOB_ALIGN] = {};
     FILE* f = std::fopen(path.c_str(), "wb");
     if (!f) return false;
     std::setvbuf(f, nullptr, _IOFBF, 1 << 20);
@@ -101,9 +119,15 @@ bool PackWriter::write(const std::string& path) const {
         at += n;
     };
     std::vector<W3dEntry> index;
-    index.reserve(order.size());
+    const std::vector<const Item*>& order = orderIn;
+    index.reserve(order.size() + 1);
     W3dPackHeader zero{};
     put(&zero, sizeof zero);
+    if (info) {   // PINF first: the client reads it before anything else
+        while (at % W3D_BLOB_ALIGN) put(pad0, 1);
+        index.push_back(W3dEntry{W3D_ENTRY_PACKINFO, 0, (uint32_t)at, (uint32_t)sizeof(W3dPackInfo)});
+        put(info, sizeof *info);
+    }
     std::vector<uint8_t> buf(1 << 20);
     const uint8_t pad[W3D_BLOB_ALIGN] = {};
     uint64_t total = 0;
@@ -147,6 +171,7 @@ bool PackWriter::write(const std::string& path) const {
         FILE* r = std::fopen(path.c_str(), "rb");
         W3dPackHeader h{};
         bool good = r && std::fread(&h, sizeof h, 1, r) == 1 && h.magic == W3DP_MAGIC && h.entryCount == index.size();
+        if (!good && r) std::fprintf(stderr, "  VERIFY: header of %s does not match\n", path.c_str());
         size_t missing = 0;
         if (good) {
             std::vector<W3dEntry> back(h.entryCount);
@@ -155,10 +180,12 @@ bool PackWriter::write(const std::string& path) const {
             if (good) {
                 std::unordered_set<uint64_t> have;
                 for (const W3dEntry& e : back) have.insert(((uint64_t)e.type << 32) | e.id);
-                for (uint64_t k : keys_)
+                for (const Item* it : order) {
+                    const uint64_t k = ((uint64_t)it->type << 32) | it->id;
                     if (!have.count(k)) {
                         if (missing++ < 10) std::fprintf(stderr, "  VERIFY: entry type %u id %08x is not in the written pack\n", (unsigned)(k >> 32), (unsigned)k);
                     }
+                }
             }
         }
         if (r) std::fclose(r);
@@ -166,6 +193,39 @@ bool PackWriter::write(const std::string& path) const {
         else std::printf("pack verify: %zu entries, every added entry is in the index\n", index.size());
     }
     return ok;
+}
+
+bool PackWriter::write(const std::string& path) const {
+    if (pool_) {   // a map pack: its tiles only, and the PINF naming the pool
+        std::vector<const Item*> order = fileOrder();
+        return writeItems(path, order, haveInfo_ ? &info_ : nullptr);
+    }
+    return writeItems(path, fileOrder(), haveInfo_ ? &info_ : nullptr);
+}
+
+int PackWriter::writeParts(const std::string& basePath, uint64_t partBytes) const {
+    const std::vector<const Item*> order = fileOrder();
+    std::vector<std::vector<const Item*>> parts(1);
+    uint64_t used = 0;
+    const uint64_t limit = std::max<uint64_t>(partBytes, 1 << 14);
+    for (const Item* it : order) {
+        const uint64_t need = it->size + W3D_BLOB_ALIGN + sizeof(W3dEntry);
+        if (used && used + need > limit) { parts.emplace_back(); used = 0; }
+        parts.back().push_back(it);
+        used += need;
+    }
+    std::string stem = basePath;
+    if (stem.size() > 5 && stem.compare(stem.size() - 5, 5, ".w3dp") == 0) stem.resize(stem.size() - 5);
+    for (size_t k = 0; k < parts.size(); ++k) {
+        W3dPackInfo info = info_;
+        info.kind = W3D_PACK_POOL;
+        info.part = (uint16_t)k;
+        info.partCount = (uint16_t)parts.size();
+        const std::string p = k ? stem + std::to_string(k) + ".w3dp" : stem + ".w3dp";
+        if (!writeItems(p, parts[k], &info)) return 0;
+        std::printf("  pool part %zu: %s, %zu entries\n", k, p.c_str(), parts[k].size());
+    }
+    return (int)parts.size();
 }
 
 // ------------------------------------------------------------ DataDir
@@ -222,6 +282,7 @@ const char* typeName(uint32_t t) {
         case W3D_ENTRY_PLACEMENT: return "PLCM";
         case W3D_ENTRY_WATER: return "WATR";
         case W3D_ENTRY_LIQUID: return "LIQD";
+        case W3D_ENTRY_PACKINFO: return "PINF";
         case W3D_ENTRY_COLLISION: return "COLL";
         case W3D_ENTRY_CREATURE: return "CMDL";
         case W3D_ENTRY_DISPLAY: return "CDSP";
@@ -259,6 +320,48 @@ int printPackInfo(const std::string& path) {
         bytesBy[e[i].type] += e[i].size;
         countBy[e[i].type]++;
         byKey[{e[i].type, e[i].id}] = &e[i];
+    }
+    // stage 5.27: a map pack or a pool part refers to entries of the other pool parts next to it
+    std::vector<std::vector<W3dEntry>> companions;
+    if (const auto* pe = byKey.count({W3D_ENTRY_PACKINFO, 0}) ? byKey[{W3D_ENTRY_PACKINFO, 0}] : nullptr) {
+        W3dPackInfo pi{};
+        std::memcpy(&pi, b.data() + pe->offset, std::min<size_t>(sizeof pi, pe->size));
+        static const char* kKind[3] = {"standalone", "pool part", "map"};
+        std::printf("  PINF: %s, build %08x, part %u of %u, map %u\n", pi.kind < 3 ? kKind[pi.kind] : "?", pi.buildId, pi.part,
+                    pi.partCount, pi.mapId);
+        if (pi.kind == W3D_PACK_MAP || pi.kind == W3D_PACK_POOL) {
+            const fs::path dir = fs::path(path).parent_path();
+            auto readIndex = [&](const fs::path& p, std::vector<W3dEntry>& out, W3dPackInfo* info) -> bool {
+                std::ifstream g(p, std::ios::binary);
+                W3dPackHeader gh;
+                if (!g.read(reinterpret_cast<char*>(&gh), sizeof gh) || gh.magic != W3DP_MAGIC) return false;
+                out.resize(gh.entryCount);
+                g.seekg(gh.indexOffset);
+                if (!g.read(reinterpret_cast<char*>(out.data()), (std::streamsize)(out.size() * sizeof(W3dEntry)))) return false;
+                for (const W3dEntry& x : out)
+                    if (x.type == W3D_ENTRY_PACKINFO) {
+                        g.seekg(x.offset);
+                        g.read(reinterpret_cast<char*>(info), std::min<size_t>(sizeof *info, x.size));
+                    }
+                return true;
+            };
+            int parts = pi.kind == W3D_PACK_POOL ? pi.partCount : 1;
+            for (int k = 0; k < parts; ++k) {
+                if (pi.kind == W3D_PACK_POOL && k == pi.part) continue;
+                const fs::path p = dir / (k ? "common" + std::to_string(k) + ".w3dp" : std::string("common.w3dp"));
+                std::vector<W3dEntry> idx;
+                W3dPackInfo ci{};
+                if (!readIndex(p, idx, &ci)) return fail(("the pool part " + p.string() + " is missing").c_str());
+                if (ci.buildId != pi.buildId) return fail(("the pool part " + p.string() + " is from another conversion").c_str());
+                if (k == 0 && pi.kind == W3D_PACK_MAP) parts = std::max<int>(1, ci.partCount);
+                companions.push_back(std::move(idx));
+            }
+            size_t n = 0;
+            for (auto& c : companions)
+                for (const W3dEntry& x : c)
+                    if (x.type != W3D_ENTRY_PACKINFO) { byKey.emplace(std::make_pair(x.type, x.id), &x); ++n; }
+            std::printf("  pool: %zu other file(s) of this conversion read, %zu entries\n", companions.size(), n);
+        }
     }
     auto texOk = [&](uint32_t id) { return byKey.count({W3D_ENTRY_TEXTURE, id}) != 0; };
 
