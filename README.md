@@ -63,7 +63,42 @@ cd proto3ds
 make            # produces w3dproto.3dsx
 ```
 
-## Converting your game files
+## Using the Windows GUI converter (`w3dgui.exe`)
+
+`w3dgui.exe` runs the whole conversion in one window. Keep it in the same folder as `w3dconv.exe` (and `w3dpreview.exe`);
+it starts `w3dconv.exe` once per step and shows its output. Use paths without non-Latin characters.
+
+1. **Data folder:** the `Data` folder of your WoW 1.12 client (the one with the `.MPQ` files). The archives are read
+   directly, nothing has to be extracted.
+2. **Output folder:** one folder for everything. Copy its contents to `sdmc:/3ds/w3dproto/` on the SD card, or pick
+   `<SD>:\3ds\w3dproto` here directly.
+3. **World group**
+   - *Build the world pack*: the terrain pack of one map. **Map:** `Azeroth` (Eastern Kingdoms) gives `test.w3dp`,
+     `Kalimdor` gives `map1.w3dp`; another map directory name gives `<name>.w3dp`, which you must rename to `map<ID>.w3dp`
+     yourself (use *Dungeons* below for instances).
+   - *Whole world* converts all tiles (hours of work and a lot of disk space; a pack cannot exceed 4 GB, the FAT32 limit).
+     *Tile region* converts only the tiles between "x from / y from" and "x to / y to" (0..63), the quick way to test
+     (default 30,46 - 34,50 is Elwynn Forest and Northshire).
+   - *Textures*: `fast`, `better`, `best` terrain/model texture compression. `fast` is much quicker, slightly blurrier.
+   - *Creatures*, *Players*, *Armor, weapons*, *Ships, zeppelins*, *All game objects (big)*: which models go into the pack.
+     Without *Players* other characters are not drawn, and without *Creatures* there are no monsters or NPCs.
+     *All game objects* adds every ordinary object model (event decorations, chests, ...); narrow it with *Extra*
+     (e.g. `--gameobjects pumpkin`).
+4. **Interface and texts:** makes `ui.w3dp` (icons, window skin, fonts, zone maps, in-game loading screens) and the text
+   files (`spells.txt`, `factions.txt`, `talents.txt`, `taxi.txt`, ...). Without `ui.w3dp` the 3DS draws a plain stub skin.
+5. **Sound and music:** makes the `sound` folder.
+6. **Dungeons and raids:** one `map<ID>.w3dp` per instance map, with the same Creatures/Players/Armor options (every pack
+   carries its own model copies, so this is slow and big; leave it off until the open world works).
+7. **Extra:** any more `w3dconv` options for the world pack, typed as on the command line.
+8. Press **Start**. The steps run one after another (interface, sound, world, dungeons); the progress bar and log show
+   the current step, **Cancel** stops it. When it says "Done", press **Open the output folder** and copy everything
+   to the SD card.
+
+Each step also writes a log into the output folder (`log_ui.txt`, `log_sound.txt`, `log_world.txt`, `log_dungeons.txt`);
+send those when something looks wrong. The GUI remembers its settings in `w3dgui.ini` next to the exe. The password
+of the game server is never asked for here.
+
+## Converting your game files from the command line
 
 Point the converter at the client's `Data` folder (the MPQ archives are read directly). The Windows GUI (`w3dgui.exe`)
 runs all of the steps below with checkboxes; on the command line:
