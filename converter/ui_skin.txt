@@ -1,0 +1,66 @@
+# wow3ds interface skin: what ui.w3dp takes from the client (UI stage 7). Paths are game paths; "a|b" = the first
+# that exists. Crops are fractions of the source picture (u0 v0 u1 v1), sizes / margins are output pixels.
+#   edge   NAME PATH SIZE                        backdrop edge file (8 squares) -> 9-slice frame, corners SIZE px
+#   nine   NAME PATH u0 v0 u1 v1 W H  L T R B    a crop stretched to W x H with 9-slice margins
+#   sprite NAME PATH u0 v0 u1 v1 W H             a crop resampled to W x H
+#   arrow  NAME PATH SIZE                        16 rotations NAME0..NAME15 (step 22.5 degrees counter-clockwise)
+#   icon   NAME PATH [u0 v0 u1 v1]               a named icon in the icon atlas (Interface\Icons are trimmed)
+#   grid   NAME PATH COLS ROWS ID:C,R ...        cells of a sheet as icons NAME_ID
+edge   panel        Interface\Tooltips\UI-Tooltip-Border.blp 8
+edge   dialog       Interface\DialogFrame\UI-DialogBox-Border.blp 12
+nine   button       Interface\Buttons\UI-Panel-Button-Up.blp 0 0 0.625 0.6875 80 22 10 6 10 6
+nine   button_down  Interface\Buttons\UI-Panel-Button-Down.blp 0 0 0.625 0.6875 80 22 10 6 10 6
+nine   button_off   Interface\Buttons\UI-Panel-Button-Disabled.blp 0 0 0.625 0.6875 80 22 10 6 10 6
+sprite slot         Interface\Buttons\UI-Quickslot2.blp 0 0 1 1 64 64
+sprite slot_empty   Interface\PaperDoll\UI-Backpack-EmptySlot.blp 0 0 1 1 40 40
+sprite bar          Interface\TargetingFrame\UI-StatusBar.blp 0 0 1 1 64 8
+sprite gossip_0     Interface\GossipFrame\GossipGossipIcon.blp 0 0 1 1 16 16
+sprite gossip_1     Interface\GossipFrame\VendorGossipIcon.blp 0 0 1 1 16 16
+sprite gossip_2     Interface\GossipFrame\TaxiGossipIcon.blp 0 0 1 1 16 16
+sprite gossip_3     Interface\GossipFrame\TrainerGossipIcon.blp 0 0 1 1 16 16
+sprite gossip_4     Interface\GossipFrame\HealerGossipIcon.blp|Interface\GossipFrame\GossipGossipIcon.blp 0 0 1 1 16 16
+sprite gossip_5     Interface\GossipFrame\BinderGossipIcon.blp 0 0 1 1 16 16
+sprite gossip_6     Interface\GossipFrame\BankerGossipIcon.blp 0 0 1 1 16 16
+sprite gossip_7     Interface\GossipFrame\PetitionGossipIcon.blp 0 0 1 1 16 16
+sprite gossip_8     Interface\GossipFrame\TabardGossipIcon.blp 0 0 1 1 16 16
+sprite gossip_9     Interface\GossipFrame\BattleMasterGossipIcon.blp 0 0 1 1 16 16
+sprite quest_new    Interface\GossipFrame\AvailableQuestIcon.blp 0 0 1 1 16 16
+sprite quest_done   Interface\GossipFrame\ActiveQuestIcon.blp 0 0 1 1 16 16
+sprite coin_gold    Interface\MoneyFrame\UI-GoldIcon.blp 0 0 1 1 12 12
+sprite coin_silver  Interface\MoneyFrame\UI-SilverIcon.blp 0 0 1 1 12 12
+sprite coin_copper  Interface\MoneyFrame\UI-CopperIcon.blp 0 0 1 1 12 12
+sprite check        Interface\Buttons\UI-CheckBox-Check.blp 0 0 1 1 16 16
+arrow  arrow        Interface\Minimap\MinimapArrow.blp 16
+icon   tab_combat   Interface\Icons\Ability_DualWield.blp|Interface\Icons\INV_Sword_04.blp
+icon   tab_map      Interface\Icons\INV_Misc_Map_01.blp|Interface\Icons\INV_Misc_Map_02.blp
+icon   tab_bags     Interface\Icons\INV_Misc_Bag_08.blp|Interface\Icons\INV_Misc_Bag_07.blp
+icon   tab_spells   Interface\Icons\INV_Misc_Book_09.blp|Interface\Icons\INV_Misc_Book_11.blp
+icon   tab_quests   Interface\Icons\INV_Misc_Note_01.blp|Interface\Icons\INV_Scroll_03.blp
+icon   tab_chat     Interface\Icons\INV_Letter_01.blp|Interface\Icons\INV_Misc_Note_02.blp
+icon   tab_social   Interface\Icons\Spell_Holy_PrayerOfFortitude.blp|Interface\Icons\INV_Misc_Head_Human_01.blp
+icon   tab_settings Interface\Icons\INV_Misc_Gear_01.blp|Interface\Icons\Trade_Engineering.blp
+icon   talents      Interface\Icons\Ability_Marksmanship.blp|Interface\Icons\INV_Misc_Book_07.blp
+icon   attack       Interface\Icons\Ability_MeleeDamage.blp|Interface\Icons\INV_Sword_04.blp
+icon   money        Interface\Icons\INV_Misc_Coin_01.blp
+icon   unknown      Interface\Icons\INV_Misc_QuestionMark.blp
+icon   slot_0       Interface\PaperDoll\UI-PaperDoll-Slot-Head.blp
+icon   slot_1       Interface\PaperDoll\UI-PaperDoll-Slot-Neck.blp
+icon   slot_2       Interface\PaperDoll\UI-PaperDoll-Slot-Shoulder.blp
+icon   slot_3       Interface\PaperDoll\UI-PaperDoll-Slot-Shirt.blp
+icon   slot_4       Interface\PaperDoll\UI-PaperDoll-Slot-Chest.blp
+icon   slot_5       Interface\PaperDoll\UI-PaperDoll-Slot-Waist.blp
+icon   slot_6       Interface\PaperDoll\UI-PaperDoll-Slot-Legs.blp
+icon   slot_7       Interface\PaperDoll\UI-PaperDoll-Slot-Feet.blp
+icon   slot_8       Interface\PaperDoll\UI-PaperDoll-Slot-Wrists.blp
+icon   slot_9       Interface\PaperDoll\UI-PaperDoll-Slot-Hands.blp
+icon   slot_10      Interface\PaperDoll\UI-PaperDoll-Slot-Finger.blp
+icon   slot_11      Interface\PaperDoll\UI-PaperDoll-Slot-Finger.blp
+icon   slot_12      Interface\PaperDoll\UI-PaperDoll-Slot-Trinket.blp
+icon   slot_13      Interface\PaperDoll\UI-PaperDoll-Slot-Trinket.blp
+icon   slot_14      Interface\PaperDoll\UI-PaperDoll-Slot-Chest.blp|Interface\PaperDoll\UI-Backpack-EmptySlot.blp
+icon   slot_15      Interface\PaperDoll\UI-PaperDoll-Slot-MainHand.blp
+icon   slot_16      Interface\PaperDoll\UI-PaperDoll-Slot-SecondaryHand.blp
+icon   slot_17      Interface\PaperDoll\UI-PaperDoll-Slot-Ranged.blp
+icon   slot_18      Interface\PaperDoll\UI-PaperDoll-Slot-Tabard.blp
+icon   slot_19      Interface\PaperDoll\UI-PaperDoll-Slot-Bag.blp|Interface\PaperDoll\UI-Backpack-EmptySlot.blp
+grid   class        Interface\Glues\CharacterCreate\UI-CharacterCreate-Classes.blp 4 4 1:0,0 8:1,0 4:2,0 11:3,0 3:0,1 7:1,1 5:2,1 9:3,1 2:0,2

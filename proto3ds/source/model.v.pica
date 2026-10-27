@@ -1,0 +1,68 @@
+; Model (M2 doodad) vertex shader: per-vertex Lambert light + distance fog.
+; v0 = s16 position, v1 = s8 normal, v2 = s16 uv
+; Output colour: x = light, y = fog visibility (1 = clear), z = 0, w = 1.
+
+.fvec projection[4], modelView[4]
+.fvec posScale          ; xyz = position scale, w = uv scale
+.fvec posOffset         ; xyz = position offset
+.fvec lightDir          ; xyz = direction to the sun in MODEL space (normalised)
+.fvec lightParams       ; x = ambient, y = diffuse, w = minimum brightness (1 = unlit)
+.fvec fogParams         ; x = 1/(end-start), y = end/(end-start)
+
+.constf myconst(0.0, 1.0, 0.007874015748, 0.0)
+.alias  zeros   myconst.xxxx
+.alias  ones    myconst.yyyy
+.alias  inv127  myconst.zzzz
+
+.out outpos position
+.out outtc0 texcoord0
+.out outclr color
+
+.alias inpos v0
+.alias innrm v1
+.alias intc  v2
+
+.proc main
+	mul r0.xyz, posScale.xyz, inpos.xyz
+	add r0.xyz, posOffset.xyz, r0.xyz
+	mov r0.w, ones
+
+	dp4 r1.x, modelView[0], r0
+	dp4 r1.y, modelView[1], r0
+	dp4 r1.z, modelView[2], r0
+	dp4 r1.w, modelView[3], r0
+
+	dp4 outpos.x, projection[0], r1
+	dp4 outpos.y, projection[1], r1
+	dp4 outpos.z, projection[2], r1
+	dp4 outpos.w, projection[3], r1
+
+	mul r2, posScale.wwww, intc
+	mov outtc0, r2
+
+	; light = clamp(ambient + diffuse * max(0, n.L), unlitFloor, 1)
+	mul r3.xyz, inv127, innrm.xyz
+	dp3 r4.x, lightDir, r3
+	max r4.x, zeros, r4.x
+	mul r4.x, lightParams.yyyy, r4.x
+	add r4.x, lightParams.xxxx, r4.x
+	max r4.x, lightParams.wwww, r4.x
+	min r4.x, ones, r4.x
+
+	; fog visibility from the view-space distance (modelView includes the scale,
+	; so r1 is already in yards)
+	dp3 r5.x, r1, r1
+	rsq r5.y, r5.x
+	mul r5.x, r5.x, r5.y
+	mul r5.x, fogParams.xxxx, r5.x
+	add r5.x, fogParams.yyyy, -r5.x
+	max r5.x, zeros, r5.x
+	min r5.x, ones, r5.x
+
+	mov r6, zeros
+	mov r6.x, r4.x
+	mov r6.y, r5.x
+	mov r6.w, ones
+	mov outclr, r6
+	end
+.end
