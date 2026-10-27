@@ -823,3 +823,20 @@ render/main без предупреждений. Как проверить на 
   falls through floors that are not streamed yet. The network keeps running meanwhile (this wait is in the main loop; only
   the pack swap itself blocks).
 - Tests: run_dungeon_tests.sh (ui.w3dp with 6 loading screens), tests/loading_pack_test.cpp, tests/portal_test.cpp.
+
+## Part 15 — Pack size (open problem, nothing implemented yet)
+
+Every map pack (test.w3dp, map1.w3dp, each dungeon's map<ID>.w3dp) carries its own copy of everything the map needs, because the
+client opens one pack at a time. By the design of the converter that includes the data that does not depend on the map: player
+race models, CharSections layers and worn items (CHRS/CIMG/ITEM), creature models (CDSP/CMDL), and the models and textures shared
+between maps. With the dungeon packs (stage 5.24) the game on the SD card gets larger than the PC client. Real sizes are not
+measured yet: this is reasoned from the converter, `w3dconv --info <pack>` gives the split by entry type.
+
+Options, best first:
+1. Measure: `w3dconv --info` of a dungeon pack and of test.w3dp (sizes by entry type).
+2. Shared pack: players, items and creatures written once into `common.w3dp`; map packs keep only tiles, buildings and their own
+   doodads/textures. Client: the streamer opens two files and looks a record up in the map pack first, then in the shared one
+   (`g_index` / `g_ioFile` are global today). Also shrinks Azeroth and Kalimdor, not only the dungeons.
+3. GUI: choose which dungeons to convert (skip raids), instead of every WDT-only map of Map.dbc.
+4. Settings: smaller creature/building textures (128 -> 64), tighter triangle and animation budgets for dungeons.
+5. Per-entry deflate for geometry and animation (net/inflate.cpp exists); ETC1 textures hardly compress; costs ARM11 time.
