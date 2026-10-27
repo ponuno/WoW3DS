@@ -118,4 +118,33 @@ private:
     std::vector<std::pair<uint32_t, uint32_t>> spells_;
 };
 
+// areatriggers.txt (AreaTrigger.dbc, stage 5.28): the invisible zones the client reports to the server (CMSG_AREATRIGGER):
+// dungeon / raid doors, the Deeprun Tram entrances, quest and inn triggers. "A id map x y z radius length width height yaw";
+// radius > 0 is a sphere, else a box turned by yaw (the server's own test, MaNGOS IsPointInAreaTriggerZone).
+struct AreaTrigger { uint32_t id = 0, map = 0; float x = 0, y = 0, z = 0, radius = 0, length = 0, width = 0, height = 0, yaw = 0; };
+class AreaTriggerTable {
+public:
+    bool load(const char* path);
+    bool loaded() const { return !all_.empty(); }
+    void add(const AreaTrigger& t) { all_.push_back(t); }
+    const std::vector<AreaTrigger>& all() const { return all_; }
+    static bool inside(const AreaTrigger& t, const float pos[3]);
+private:
+    std::vector<AreaTrigger> all_;
+};
+// Which triggers we stand in: reports each one once when we walk into it (the stock client does the same), again only
+// after we left it. After a map change / teleport the zones we appear in count as already entered (the exit of a
+// dungeon lies next to its entrance trigger: no ping-pong).
+class AreaTriggerWatch {
+public:
+    // Triggers newly entered at pos on this map (ids appended to 'entered').
+    void update(const AreaTriggerTable& table, uint32_t map, const float pos[3], std::vector<uint32_t>& entered);
+    void rearm() { armed_ = false; }     // the next update only records where we are
+    void reset() { inside_.clear(); armed_ = false; map_ = ~0u; }
+private:
+    std::vector<uint32_t> inside_;
+    bool armed_ = false;
+    uint32_t map_ = ~0u;
+};
+
 }  // namespace w3n

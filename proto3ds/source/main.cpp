@@ -884,6 +884,9 @@ int main() {
                 eyeValid = false;
             }
             wasFlight = flightNow;
+            // Stage 5.28: walking into a dungeon door / the tram entrance / any area trigger tells the server (CMSG_AREATRIGGER);
+            // not while a map is loading, not on a taxi (the server ignores those anyway), not under the transfer screen.
+            if (game && onlineWalk && !flightNow && !loadingWorld && portal.phase() == PortalFx::Phase::Idle) game->checkAreaTriggers(pl, netMs);
             if (flightNow) {
                 if (!wasFlightSent) { game->mover.stopAll(netMs); wasFlightSent = true; }
                 pl[0] = fpos[0]; pl[1] = fpos[1]; pl[2] = fpos[2];

@@ -166,6 +166,7 @@ bool LoginFlow::update(u32 down) {
                 if (!game_.talents.loaded()) game_.talents.load("sdmc:/3ds/w3dproto/talents.txt");   // UI stage 4
                 if (!game_.taxiTable.loaded()) game_.taxiTable.load("sdmc:/3ds/w3dproto/taxi.txt");  // UI stage 6
                 if (!game_.locks.loaded()) game_.locks.load("sdmc:/3ds/w3dproto/locks.txt");         // herbs, ore, chests
+                if (!game_.areaTriggers.loaded()) game_.areaTriggers.load("sdmc:/3ds/w3dproto/areatriggers.txt");   // dungeon doors, the tram
                 if (!game_.emotes.loaded()) game_.emotes.load("sdmc:/3ds/w3dproto/emotes.txt");      // emote animations
                 game_.objects.setTransportsFile("sdmc:/3ds/w3dproto/transports.txt");                 // ships, read on first use
                 game_.attach(world_, sessionMs());

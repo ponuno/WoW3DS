@@ -246,3 +246,6 @@ grep -q "look: skin 1 face 6 hair 8 colour 3 facial 2 | life alive" "$OUT/real.l
 python3 "$N/tests/build_water_log.py" "$OUT/water.w3dl" "$OUT/water.expect"
 g++ -std=c++20 $SAN -Wall "$N/tests/water_test.cpp" $SRC -o "$OUT/water_test"
 "$OUT/water_test" "$OUT/water.w3dl" "$OUT/water.expect"
+# Stage 5.28: area triggers (dungeon doors, the tram): geometry, once per walk-in, CMSG_AREATRIGGER, the refusal text
+g++ -std=c++20 $SAN -Wall "$N/tests/areatrigger_test.cpp" $SRC -o "$OUT/areatrigger_test"
+"$OUT/areatrigger_test"

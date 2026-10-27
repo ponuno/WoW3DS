@@ -233,6 +233,7 @@ int main(int argc, char** argv) {
         exportTalents(data, textDir() + "talents.txt", o.verbose);
         exportTaxi(data, textDir() + "taxi.txt", o.verbose);
         exportLocks(data, textDir() + "locks.txt", o.verbose);
+        exportAreaTriggers(data, textDir() + "areatriggers.txt", o.verbose);
         exportEmotes(data, textDir() + "emotes.txt", o.verbose);
         exportTransports(data, textDir() + "transports.txt", o.verbose);
         double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -246,6 +247,7 @@ int main(int argc, char** argv) {
         exportTalents(data, textDir() + "talents.txt", o.verbose);
         exportTaxi(data, textDir() + "taxi.txt", o.verbose);
         exportLocks(data, textDir() + "locks.txt", o.verbose);
+        exportAreaTriggers(data, textDir() + "areatriggers.txt", o.verbose);
         exportEmotes(data, textDir() + "emotes.txt", o.verbose);
         exportTransports(data, textDir() + "transports.txt", o.verbose);
         return spells || facts ? 0 : 4;
@@ -318,6 +320,7 @@ int main(int argc, char** argv) {
         exportTalents(data, textDir() + "talents.txt", o.verbose);
         exportTaxi(data, textDir() + "taxi.txt", o.verbose);
         exportLocks(data, textDir() + "locks.txt", o.verbose);
+        exportAreaTriggers(data, textDir() + "areatriggers.txt", o.verbose);
         exportEmotes(data, textDir() + "emotes.txt", o.verbose);
     }
     if ((o.creatures || o.transports) && !o.synthetic) exportTransports(data, textDir() + "transports.txt", o.verbose);

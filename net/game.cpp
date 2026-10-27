@@ -231,6 +231,7 @@ bool GameSession::handle(uint16_t op, const Bytes& data, uint32_t nowMs) {
             // anything still queued was measured from the old spot.
             mover.queue().clear();
             teleported_ = true;
+            triggerWatch.rearm();   // we stand where the server put us: no trigger fires until we walk into one
             ++stats.teleports;
             return true;
         }
@@ -240,6 +241,7 @@ bool GameSession::handle(uint16_t op, const Bytes& data, uint32_t nowMs) {
             if (r.bad) return true;
             objects.clear();
             objects.setSelf(self_);
+            triggerWatch.rearm();
             mover.reset(x, y, z, o, nowMs);
             send(MoveOp::WorldportAck, {}, nowMs);
             sendActiveMover(nowMs);

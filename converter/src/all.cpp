@@ -77,6 +77,7 @@ int convertAll(const Options& oIn, const DataDir& data, const AllOptions& ao, Ui
         exportTalents(data, folder + "talents.txt", o.verbose);
         exportTaxi(data, folder + "taxi.txt", o.verbose);
         exportLocks(data, folder + "locks.txt", o.verbose);
+        exportAreaTriggers(data, folder + "areatriggers.txt", o.verbose);
         exportEmotes(data, folder + "emotes.txt", o.verbose);
     }
     // ---- 2. sound

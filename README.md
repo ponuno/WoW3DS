@@ -134,7 +134,7 @@ Eastern Kingdoms (preferred over `test.w3dp`), `map1.w3dp` Kalimdor. Developer t
 picks maps, `--no-ui` / `--no-sound-step` skip those steps. `w3dconv --info` and `w3dpreview` resolve the pool.
 
 Copy the output to the SD card as `sdmc:/3ds/w3dproto/` (`test.w3dp` or `map0.w3dp`, `map<ID>.w3dp`, `common*.w3dp`,
-`ui.w3dp`, the `sound/` folder and the text files the converter writes next to the packs), then start `w3dproto.3dsx`
+`ui.w3dp`, the `sound/` folder and the text files the converter writes next to the packs, among them `areatriggers.txt`: without it dungeon doors and the Deeprun Tram do nothing), then start `w3dproto.3dsx`
 through the Homebrew Launcher.
 
 ## Tests (no console and no game data needed)

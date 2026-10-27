@@ -1,6 +1,7 @@
 #include "tables.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -159,6 +160,47 @@ bool LockTable::load(const char* path) {
     }
     fclose(f);
     return !locks_.empty();
+}
+
+bool AreaTriggerTable::load(const char* path) {
+    FILE* f = fopen(path, "r");
+    if (!f) return false;
+    all_.clear();
+    char line[256];
+    while (fgets(line, sizeof line, f)) {
+        std::vector<std::string> c = fields(line);
+        if (c[0] != "A" || c.size() < 11) continue;
+        AreaTrigger t;
+        t.id = num(c[1]);
+        t.map = num(c[2]);
+        t.x = (float)atof(c[3].c_str()); t.y = (float)atof(c[4].c_str()); t.z = (float)atof(c[5].c_str());
+        t.radius = (float)atof(c[6].c_str());
+        t.length = (float)atof(c[7].c_str()); t.width = (float)atof(c[8].c_str()); t.height = (float)atof(c[9].c_str());
+        t.yaw = (float)atof(c[10].c_str());
+        all_.push_back(t);
+    }
+    fclose(f);
+    return !all_.empty();
+}
+
+bool AreaTriggerTable::inside(const AreaTrigger& t, const float pos[3]) {
+    const float dx = pos[0] - t.x, dy = pos[1] - t.y, dz = pos[2] - t.z;
+    if (t.radius > 0) return dx * dx + dy * dy + dz * dz <= t.radius * t.radius;
+    const float c = cosf(t.yaw), s = sinf(t.yaw);   // into the box's frame (the server: rotate the player by -yaw)
+    const float rx = dx * c - dy * s, ry = dy * c + dx * s;
+    return fabsf(rx) <= t.length * 0.5f && fabsf(ry) <= t.width * 0.5f && fabsf(dz) <= t.height * 0.5f;
+}
+
+void AreaTriggerWatch::update(const AreaTriggerTable& table, uint32_t map, const float pos[3], std::vector<uint32_t>& entered) {
+    if (map != map_) { map_ = map; armed_ = false; inside_.clear(); }
+    std::vector<uint32_t> now;
+    for (const AreaTrigger& t : table.all())
+        if (t.map == map && AreaTriggerTable::inside(t, pos)) now.push_back(t.id);
+    if (armed_)
+        for (uint32_t id : now)
+            if (std::find(inside_.begin(), inside_.end(), id) == inside_.end()) entered.push_back(id);
+    inside_ = std::move(now);
+    armed_ = true;
 }
 
 }  // namespace w3n

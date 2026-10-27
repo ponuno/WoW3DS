@@ -107,6 +107,8 @@ dbc("Spell.dbc", 173, spells, S.b)
 # Lock.dbc: ID, Type[8], Index[8], Skill[8], Action[8] (33 fields); 99 = a herb needing herbalism 50
 lk = [99] + [2] + [0] * 7 + [2] + [0] * 7 + [50] + [0] * 7 + [0] * 8
 dbc("Lock.dbc", 33, [lk], b"\0")
+# AreaTrigger.dbc: ID, Map, X, Y, Z, Radius, Box length / width / height / yaw (10 fields): a sphere and a turned box
+dbc("AreaTrigger.dbc", 10, [[2173, 369, -4.0, 5.0, 6.0, 3.5, 0.0, 0.0, 0.0, 0.0], [45, 0, 100.0, 200.0, 30.0, 0.0, 10.0, 4.0, 6.0, 1.5708]], b"\0")
 S = Strings()
 idi = []
 for did, n in ((1001, "INV_Misc_Food_15"), (1002, "INV_Shirt_05"), (1003, "INV_Misc_Food_15"), (1004, "")):

@@ -169,6 +169,31 @@ bool exportLocks(const DataDir& data, const std::string& path, bool verbose) {
     return true;
 }
 
+// areatriggers.txt: "A id map x y z radius length width height yaw" per AreaTrigger.dbc row (1.12: ID, ContinentID, X, Y, Z,
+// Radius, Box_length, Box_width, Box_height, Box_yaw). The server holds where each one leads (areatrigger_teleport); the
+// 3DS only has to say that we walked into it.
+bool exportAreaTriggers(const DataDir& data, const std::string& path, bool verbose) {
+    DbcTable at;
+    if (!at.load(data, "AreaTrigger.dbc") || at.fields < 10) {
+        std::fprintf(stderr, "areatriggers: AreaTrigger.dbc not found (no areatriggers.txt: dungeon doors will not work)\n");
+        return false;
+    }
+    std::string out = "# wow3ds area triggers: A id map x y z radius length width height yaw\n";
+    size_t n = 0;
+    char b[200];
+    for (uint32_t r = 0; r < at.records; ++r) {
+        if (!at.u32(r, 0)) continue;
+        std::snprintf(b, sizeof b, "A\t%u\t%u\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.5f\n", at.u32(r, 0), at.u32(r, 1), at.f32(r, 2),
+                      at.f32(r, 3), at.f32(r, 4), at.f32(r, 5), at.f32(r, 6), at.f32(r, 7), at.f32(r, 8), at.f32(r, 9));
+        out += b;
+        ++n;
+    }
+    if (!writeText(path, out)) return false;
+    std::printf("  areatriggers: %zu triggers written to %s\n", n, path.c_str());
+    (void)verbose;
+    return true;
+}
+
 // emotes.txt: "E emote anim" per Emotes.dbc row (1.12: ID, EmoteSlashCommand, AnimID, Flags, ...): SMSG_EMOTE and
 // UNIT_NPC_EMOTESTATE carry the emote, the 3DS plays its animation.
 bool exportEmotes(const DataDir& data, const std::string& path, bool verbose) {

@@ -14,6 +14,7 @@ enum : uint16_t {
     CMSG_TAXINODE_STATUS_QUERY = 0x1AA, SMSG_TAXINODE_STATUS = 0x1AB, SMSG_SHOWTAXINODES = 0x1A9,
     CMSG_TAXIQUERYAVAILABLENODES = 0x1AC, CMSG_ACTIVATETAXI = 0x1AD, SMSG_ACTIVATETAXIREPLY = 0x1AE,
     SMSG_NEW_TAXI_PATH = 0x1AF, CMSG_ACTIVATETAXIEXPRESS = 0x312,
+    CMSG_AREATRIGGER = 0x0B4, SMSG_AREA_TRIGGER_MESSAGE = 0x2B8,
     CMSG_BANKER_ACTIVATE = 0x1B7, SMSG_SHOW_BANK = 0x1B8, CMSG_BUY_BANK_SLOT = 0x1B9, SMSG_BUY_BANK_SLOT_RESULT = 0x1BA,
     CMSG_AUTOSTORE_BANK_ITEM = 0x282, CMSG_AUTOBANK_ITEM = 0x283,
     CMSG_LEARN_TALENT = 0x251,
@@ -196,9 +197,29 @@ void GameSession::updateServices(uint32_t nowMs) {
 }
 
 // ------------------------------------------------------------------ server packets
+int GameSession::checkAreaTriggers(const float pos[3], uint32_t nowMs) {
+    if (!areaTriggers.loaded()) return 0;
+    std::vector<uint32_t> entered;
+    triggerWatch.update(areaTriggers, map_, pos, entered);
+    for (uint32_t id : entered) {
+        Writer w;
+        w.u32(id);
+        send(CMSG_AREATRIGGER, w.b, nowMs);
+        ++stats.areaTriggers;
+    }
+    return (int)entered.size();
+}
+
 bool GameSession::handleServices(uint16_t op, const Bytes& data, uint32_t nowMs) {
     Reader r(data);
     switch (op) {
+        case SMSG_AREA_TRIGGER_MESSAGE: {   // u32 length, string: "You must be level 55 to enter." (a locked door)
+            r.u32();
+            std::string text = r.cstr();
+            if (r.bad || text.empty()) return true;
+            addLocal(text, nowMs);
+            return true;
+        }
         case SMSG_SHOW_BANK: {
             uint64_t npc = r.u64();
             if (r.bad) return true;

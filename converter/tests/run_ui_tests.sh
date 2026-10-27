@@ -17,4 +17,6 @@ g++ -std=c++20 -O1 -g -fsanitize=address,undefined -I"$W/proto3ds/source" -I"$W/
     "$W/proto3ds/source/ui_assets.cpp" "$D/rgetc1/rg_etc1.cpp" -w -o "$OUT/ui_pack_test"
 "$OUT/ui_pack_test" "$OUT/out/ui.w3dp" "$OUT/ui_pack.png"
 grep -q "^B" "$OUT/out/talents.txt" && grep -q "^N" "$OUT/out/taxi.txt" && echo "TEXTS (talents.txt, taxi.txt): PASS"
+grep -q "^A	2173	369	-4.000	5.000	6.000	3.500	0.000	0.000	0.000	0.00000$" "$OUT/out/areatriggers.txt" && \
+grep -q "^A	45	0	100.000	200.000	30.000	0.000	10.000	4.000	6.000	1.57080$" "$OUT/out/areatriggers.txt" && echo "AREA TRIGGERS (areatriggers.txt): PASS"
 grep -q "^L	99	2	0	0	0	0	0	0	0	2	" "$OUT/out/locks.txt" && grep -q "^S	2366	2$" "$OUT/out/locks.txt" && echo "LOCKS (locks.txt): PASS"

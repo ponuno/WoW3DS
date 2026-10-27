@@ -387,7 +387,7 @@ public:
     Mover mover;
 
     struct Stats {
-        uint32_t teleports = 0, newWorlds = 0, speedChanges = 0, roots = 0, queries = 0, packetsOut = 0, flagAcks = 0;
+        uint32_t teleports = 0, newWorlds = 0, speedChanges = 0, roots = 0, queries = 0, packetsOut = 0, flagAcks = 0, areaTriggers = 0;
     } stats;
 
     // Packet tap (both directions) for recording sessions: dir 0 = server->client, 1 = client->server.
@@ -479,6 +479,12 @@ public:
     struct ObjectAction { const char* verb = nullptr; uint32_t spell = 0; std::string why; };
     ObjectAction objectAction(const WorldObject& o) const;
     LockTable locks;                                     // locks.txt
+    // Stage 5.28: areatriggers.txt. Call every frame with our feet position while in the world (not during a load, not on a
+    // taxi): each newly entered trigger goes to the server as CMSG_AREATRIGGER (its answer: the transfer / new world, or
+    // SMSG_AREA_TRIGGER_MESSAGE as a chat line). Returns the number of packets sent.
+    AreaTriggerTable areaTriggers;
+    AreaTriggerWatch triggerWatch;
+    int checkAreaTriggers(const float pos[3], uint32_t nowMs);
     EmoteTable emotes;                                   // emotes.txt (Emotes.dbc: emote -> animation)
     // Emotes and sitting (the animation stage): /dance /wave ... and /sit /stand /sleep
     static uint32_t textEmoteId(const std::string& cmd);

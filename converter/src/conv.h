@@ -269,6 +269,8 @@ bool exportFactions(const DataDir& data, const std::string& path, bool verbose);
 bool exportTalents(const DataDir& data, const std::string& path, bool verbose);
 bool exportTaxi(const DataDir& data, const std::string& path, bool verbose);
 bool exportLocks(const DataDir& data, const std::string& path, bool verbose);
+// areatriggers.txt (AreaTrigger.dbc, stage 5.28): the zones the client reports with CMSG_AREATRIGGER (dungeon doors, the tram).
+bool exportAreaTriggers(const DataDir& data, const std::string& path, bool verbose);
 bool exportEmotes(const DataDir& data, const std::string& path, bool verbose);
 // Transports (stage 5.21): transports.txt = "T path node map x y z flags delay" per TaxiPathNode.dbc row and
 // "M display deckZ x0 y0 x1 y1" per transport model that has a walkable deck (found by convertTransports in creatures.cpp).
