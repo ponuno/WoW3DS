@@ -12,6 +12,6 @@ g++ $FL -fsanitize=thread $SRC -o "$OUT/streamer_tsan" -lpthread
 # WALK_EXPECT=<converter/tests expect.json> also walks the synthetic stairs through streamerFloorHeight()
 # and the wall cases (hut, fences) through streamerCollideMove().
 for p in "$@"; do
-    for pace in 0 100 1000; do PACE_US=$pace "$OUT/streamer_asan" "$p" 1500 | grep -E "floor walk|wall|creatures:|players:|STREAMER"; done
+    for pace in 0 100 1000; do PACE_US=$pace "$OUT/streamer_asan" "$p" 1500 | grep -E "floor walk|wall|liquid|creatures:|players:|STREAMER"; done
     PACE_US=3000 "$OUT/streamer_tsan" "$p" 600 2>&1 | grep -E "WARNING: ThreadSanitizer|STREAMER" | sort | uniq -c
 done

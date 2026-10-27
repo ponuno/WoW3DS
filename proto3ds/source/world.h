@@ -141,6 +141,8 @@ struct Tile {
     uint8_t* plcm = nullptr;         // malloc'd until parsed
     uint8_t* coll = nullptr;         // COLL entry (floors + walls), malloc'd while resident
     u32 collSize = 0;
+    uint8_t* liq = nullptr;          // LIQD entry (where the liquids are, stage 5.26), malloc'd with the tile
+    u32 liqSize = 0;
     std::vector<Instance> instances;
     std::vector<Model*> models;      // one reference per distinct model
 };
@@ -187,6 +189,15 @@ bool streamerFloorHeight(float wx, float wy, float zFeet, float* out, bool* onFl
 // Returns true if a wall changed the target.
 static constexpr float kWalkerRadius = 0.35f;
 bool streamerCollideMove(float fromX, float fromY, float zFeet, float* toX, float* toY);
+// Liquids (stage 5.26, LIQD): the surface over render (wx, wy) for something whose feet / eyes are at zRef. A liquid of
+// the terrain does not count below the terrain (a cave under a lake): zRef more than 2 yd under the ground there.
+struct LiquidHere {
+    float level;                     // surface height
+    uint8_t flags;                   // W3D_LIQ_* (kind, deep, from a building)
+    W3dLiquidLook look;              // colours and the underwater fog of the tile
+    int kind() const { return flags & W3D_LIQ_KIND; }
+};
+bool streamerLiquidAt(float wx, float wy, float zRef, LiquidHere* out);
 // Creature displays (nullptr if the pack has no such display). Release every acquired display.
 bool streamerHasDisplay(uint32_t displayId);   // the pack has a CDSP entry with this id (ids 0x80000000|n: game objects)
 CreatureDisplay* streamerAcquireDisplay(uint32_t displayId);
@@ -233,6 +244,10 @@ struct RenderSettings {
     int forceLod = -1;           // -1 = by distance
     float timeSec = 0;
     bool creatures = true;
+    // stage 5.26: the camera is under a liquid's surface - fog in its colour, sight ends at waterFogEnd
+    bool underwater = false;
+    uint8_t waterFog[3] = {28, 62, 78};
+    float waterFogEnd = 45.0f;
 };
 
 // Stage 5: world objects drawn as coloured direction markers until creature models exist.
@@ -248,6 +263,7 @@ void rendererInit();
 void rendererShutdown();
 void rendererSetProjection(float drawDist);   // also rebuilds the fog LUT
 void rendererSetEye(float iod);               // stereoscopic 3D: the projection of one eye (-iod left, +iod right, 0 = mono)
+u32 rendererClearColor(const RenderSettings& rs);   // the sky's colour behind everything (RGBA8), water when under it
 void rendererDraw(C3D_RenderTarget* target, const Camera& cam, const RenderSettings& rs, FrameCounters& fc,
                   const std::vector<Marker>* markers = nullptr,
                   const std::vector<CreatureInstance>* creatures = nullptr);

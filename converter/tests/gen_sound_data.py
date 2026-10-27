@@ -73,7 +73,9 @@ rows = [
 WORLD = [(300, "WolfAggro"), (301, "WolfDeath"), (302, "WolfWoundA"), (303, "WolfWoundCrit"), (304, "WolfAttackA"),
          (305, "WolfAttackCrit"), (310, "m1hSwordHitFlesh"), (311, "m1hSwordHitFleshCrit"), (312, "m1hSwordHitMetal"),
          (320, "PreCastFireHigh"), (321, "FireCast"), (322, "FireBallImpact"), (330, "FootStepsMediumDirt"),
-         (331, "FootStepsMediumGrass")]
+         (331, "FootStepsMediumGrass"),
+         # liquids (stage 5.26): found by keyword (splash, swim, wade) and by the id the server plays at a bite (3355)
+         (350, "EnterWaterMediumA"), (351, "SwimSlowMedium"), (352, "FootStepsWaterSmall"), (3355, "FishBite")]
 for k, (i, n) in enumerate(WORLD):
     tone_wav(path("Sound\\Creature\\%s.wav" % n), 2000 + k * 100, 0.4 if i != 320 else 5.0, rate=22050)
     rows.append(se(i, n, [n + ".wav", n + ".wav"], "Sound\\Creature", 0.8))

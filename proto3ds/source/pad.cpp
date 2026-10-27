@@ -132,6 +132,7 @@ PadOut Pad::forever(const PadInput& in, const PadConfig& cfg, bool inCombat, flo
             if (pressed(kDpad[b])) o.slot = o.set * kPadButtons + b;
         if (o.set == 0) {
             o.jump = pressed(KEY_B);
+            o.ascend = (in.held & KEY_B) != 0;
             o.cancel = pressed(KEY_A);
             o.interact = pressed(KEY_Y);
             o.context = pressed(KEY_X);
@@ -180,6 +181,7 @@ PadOut Pad::classic(const PadInput& in, const PadConfig& cfg, float dt) {
     PadOut o;
     const u32 d = in.down, h = in.held;
     o.jump = d & KEY_B;
+    o.ascend = (h & KEY_B) != 0;
     o.nextTarget = d & KEY_L;
     o.toggleAttack = d & KEY_R;
     o.chat = d & KEY_Y;

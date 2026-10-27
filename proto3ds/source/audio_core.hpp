@@ -120,8 +120,10 @@ public:
     std::pair<uint32_t, uint32_t> weapon(uint32_t subclass) const;   // impact, crit (0 when unknown)
     uint32_t footstep(uint32_t footstepId) const;                    // footstep id 0: the generic one
     const SpellSounds* spell(uint32_t spellId) const;
+    uint32_t liquid(const char* kind) const;                         // stage 5.26: "splash", "swim", "wade", "fishbite" (0: none)
 private:
     bool loaded_ = false;
+    std::unordered_map<std::string, uint32_t> liquid_;
     std::unordered_map<uint32_t, uint32_t> display_, footstep_, spellVisual_;
     std::unordered_map<uint32_t, CreatureSounds> csd_;
     std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> weapon_;

@@ -63,6 +63,11 @@ struct Options {
     bool transports = false;    // stage 5.21: ship / zeppelin models (GameObjectDisplayInfo) as CDSP 0x80000000|id + deck data
     std::string transportFilter = "transport,zeppelin,ship,boat";   // model path keywords that make a GO display a transport
     bool dungeons = false;      // stage 5.24: one map<ID>.w3dp per instance map (WDT-only maps of Map.dbc) into the folder given with -o
+    // Water (stage 5.26): the game's animated liquid textures, Light.dbc colours
+    int waterTex = 128;         // max size of a liquid texture frame
+    int waterFrames = 30;       // animation frames kept of the 30 (1, 2, 3, 5, 6, 10, 15 or 30)
+    float waterTint = -1;       // 0..1: how much the Light.dbc colour tints the texture (-1: by the texture's own colour)
+    bool noWmoWater = false;    // leave out the liquids of buildings (canals, fountains, dungeon pools)
     bool synthetic = false;
     bool verbose = false;
 };
@@ -202,6 +207,17 @@ struct ConvStats {
     std::unordered_map<uint32_t, std::vector<float>> m2Coll;
     size_t m2CollModels = 0, m2CollSimplified = 0, m2CollPlaced = 0, m2CollSource = 0, m2CollWalkable = 0, m2CollWalls = 0;
     size_t terrainTris = 0, terrainVerts = 0, modelTrisTotal = 0, placements = 0;
+    // Liquids (stage 5.26), collected per tile while the tiles and buildings are converted, written by emitLiquids().
+    struct LiquidChunk {            // one MCNK's surface (the topmost of its MCLQ layers per cell)
+        uint8_t cell[64];           // W3D_LIQ_* (kind | deep), W3D_LIQ_DRY
+        float h[64][4];             // corner heights of each cell: (r,k) (r,k+1) (r+1,k) (r+1,k+1)
+        float depth[64][4];         // the same corners: surface minus terrain (yards; < 0 = above ground)
+    };
+    struct LiquidQuad { float p[4][3]; uint8_t kind; };   // a building's MLIQ cell, render space, corners in order
+    struct TileLiquids { std::map<int, LiquidChunk> chunks; std::vector<LiquidQuad> quads; };
+    std::map<uint32_t, TileLiquids> liquids;              // by tile id
+    size_t liquidLayers = 0, liquidCells = 0, liquidDeepCells = 0, liquidQuads = 0, liquidWmoGroups = 0, liquidTiles = 0;
+    size_t liquidFramesOk = 0, liquidFramesMissing = 0, liquidBytes = 0, liquidMclqBad = 0;
     size_t modelsOk = 0, modelsFailed = 0, texturesOk = 0, texturesFailed = 0;
 };
 
@@ -299,9 +315,17 @@ uint32_t addPlaceholderTexture(PackWriter& pack, uint8_t fmt);
 bool emitTile(const Options& o, const wowee::pipeline::ADTTerrain& adt, const std::vector<uint32_t>& texIds,
               const std::vector<uint16_t>& mtexToSlot, const std::function<uint32_t(const std::string&)>& modelFor,
               PackWriter& pack, ConvStats& st,
-              const std::function<void(std::vector<W3dPlacement>&)>& wmoPlace = nullptr);
-void emitWater(const Options& o, const wowee::pipeline::ADTTerrain& adt, float minX, float minY, PackWriter& pack,
-               ConvStats& st);
+              const std::function<void(std::vector<W3dPlacement>&)>& wmoPlace = nullptr,
+              const std::vector<uint8_t>* adtBytes = nullptr);
+// Liquids (stage 5.26). collectAdtLiquids: the MCLQ layers of a tile (from the raw ADT when given - all layers, deep
+// water - else from WoWee's parse), with their depth over the terrain. emitLiquids: WATR (mesh, animated game
+// textures, Light.dbc colours) + LIQD (query grid) for every tile with a TERR that got liquids (data may be null).
+void collectAdtLiquids(const Options& o, const std::vector<uint8_t>* adtBytes, const wowee::pipeline::ADTTerrain& adt,
+                       ConvStats& st);
+void emitLiquids(const Options& o, const DataDir* data, PackWriter& pack, ConvStats& st);
+// Kind (W3dLiquid) of a WMO group's MLIQ the way the server's extractor resolves it (vMaNGOS vmapextract), -1 = none.
+int wmoLiquidKind(uint32_t rootFlags, uint32_t rootId, uint32_t groupFlags, uint32_t groupLiquid, const uint8_t* tiles,
+                  size_t tileCount);
 bool convertTile(const Options& o, const DataDir& data, PackWriter& pack, ConvStats& st);
 // Dungeons (stage 5.24): maps whose WDT holds one global WMO and no ADTs. convertDungeon() puts the building (split by
 // tile) plus a hidden terrain quad per tile into the pack; listDungeonMaps() = Map.dbc rows (id, directory) of such maps.

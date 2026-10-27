@@ -52,6 +52,10 @@ static void usage() {
         "  --creature-tris N     triangle budget per creature model (default 800)\n"
         "  --creature-anim-kb N  animation budget per creature model, KB (default 320; 0 = every animation)\n"
         "  --player-anim-kb N    animation budget per race model, KB (default 900)\n"
+        "  --water-tex N         max size of a liquid texture frame (default 128)\n"
+        "  --water-frames N      animation frames of each liquid, 1..30 (default 30; fewer = less memory)\n"
+        "  --water-tint F        0..1 how much the Light.dbc water colour tints the texture (default: by the texture)\n"
+        "  --no-wmo-water        leave out the liquids of buildings (canals, fountains, dungeon pools)\n"
         "  --texts-only          only write spells.txt and factions.txt next to -o (seconds, no tiles)\n"
         "  -v                    verbose\n"
         "ui options:\n"
@@ -135,6 +139,10 @@ int main(int argc, char** argv) {
         else if (a == "--creature-anim-kb") o.creatureAnimKb = std::atoi(next());
         else if (a == "--player-anim-kb") o.playerAnimKb = std::atoi(next());
         else if (a == "--synthetic") o.synthetic = true;
+        else if (a == "--water-tex") o.waterTex = std::atoi(next());
+        else if (a == "--water-frames") o.waterFrames = std::max(1, std::min(30, std::atoi(next())));
+        else if (a == "--water-tint") o.waterTint = (float)std::atof(next());
+        else if (a == "--no-wmo-water") o.noWmoWater = true;
         else if (a == "--info") info = next();
         else if (a == "--texts-only") textsOnly = true;
         else if (a == "--ui") uiMode = true;
@@ -159,7 +167,7 @@ int main(int argc, char** argv) {
     }
     if (!info.empty()) return printPackInfo(info);
     if (o.grid != 9 && o.grid != 5 && o.grid != 3) { std::fputs("--grid must be 9, 5 or 3\n", stderr); return 1; }
-    if (!pow2ok(o.terrainTex) || !pow2ok(o.modelTex)) { std::fputs("texture sizes must be pow2 in 8..1024\n", stderr); return 1; }
+    if (!pow2ok(o.terrainTex) || !pow2ok(o.modelTex) || !pow2ok(o.waterTex)) { std::fputs("texture sizes must be pow2 in 8..1024\n", stderr); return 1; }
 
     auto t0 = std::chrono::steady_clock::now();
     PackWriter pack;
@@ -231,6 +239,7 @@ int main(int argc, char** argv) {
             if (!dp.setSpillPath(m.out + ".spill")) std::fprintf(stderr, "note: cannot create %s.spill\n", m.out.c_str());
             if (!convertDungeon(m, data, dp, ds)) continue;
             emitCollision(m, dp, ds);
+            emitLiquids(m, &data, dp, ds);
             if (m.creatures || m.players || m.gameobjects) convertCreatures(m, data, dp, ds);
             if (!dp.write(m.out)) { std::fprintf(stderr, "cannot write %s\n", m.out.c_str()); continue; }
             std::printf("  wrote %s: %zu buildings, %zu models, %zu textures, floors %zu triangles\n", m.out.c_str(), ds.wmoOk,
@@ -267,6 +276,8 @@ int main(int argc, char** argv) {
     if (st.tiles == 0) { std::fputs("no tiles converted\n", stderr); return 2; }
     if (st.dump) std::fclose(st.dump);
     emitCollision(o, pack, st);
+    progress(true, "liquids of %zu tiles ...", st.liquids.size());
+    emitLiquids(o, o.synthetic ? nullptr : &data, pack, st);
     if ((o.creatures || o.players || o.transports || o.gameobjects) && !o.synthetic) {
         std::printf(o.creatures ? "creatures...\n" : "players...\n");
         convertCreatures(o, data, pack, st);
@@ -294,6 +305,10 @@ int main(int argc, char** argv) {
     std::printf("  tiles: %zu converted, %d skipped\n", st.tiles, failed);
     std::printf("  terrain: %zu verts, %zu tris (grid %d); water: %zu tris\n", st.terrainVerts, st.terrainTris, o.grid,
                 st.waterTris);
+    std::printf("  liquids: %zu tiles, %zu MCLQ layers, %zu cells (%zu deep), %zu building cells from %zu groups; %zu texture frames"
+                " (%zu missing), LIQD %.0f KB%s\n", st.liquidTiles, st.liquidLayers, st.liquidCells, st.liquidDeepCells,
+                st.liquidQuads, st.liquidWmoGroups, st.liquidFramesOk, st.liquidFramesMissing, st.liquidBytes / 1024.0,
+                st.liquidMclqBad ? " (some MCLQ layers cut short)" : "");
     if (st.wmoSkipped) std::printf("  note: %zu WMO placements skipped (--no-wmo)\n", st.wmoSkipped);
     if (st.wmoPlacements || st.wmoFailed)
         std::printf("  buildings: %zu placed (%zu distinct WMO ok, %zu failed), %zu groups converted (%zu failed, %zu interior skipped),\n"

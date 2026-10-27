@@ -328,6 +328,25 @@ void hudBuildGame(HudList& l, const HudInput& in) {
         if (g.spiritHealerConfirm) l.textCentered(200, 62, "Spirit healer: answer on the touch screen", kGold);
     }
 
+    // ---- breath / fatigue / feign death (stage 5.26): the original's bars at the top of the screen, under the frames
+    {
+        int y = 64;
+        for (int k = 0; k < w3n::kMirrorTimers; ++k) {
+            const w3n::MirrorTimer& m = g.mirror[k];
+            if (!m.active || !m.maxMs) continue;
+            const uint32_t left = m.valueAt(now);
+            if (m.scale > 0 && left >= m.maxMs) continue;   // filled back up: the server stops it soon
+            static const uint32_t kCol[3] = {hudRgba(255, 230, 0), hudRgba(0, 128, 255), hudRgba(255, 178, 0)};
+            const int w = 150, x = (kHudW - w) / 2;
+            l.bar(x, y, w, 11, (float)left / (float)m.maxMs, kCol[k], hudRgba(0, 0, 0, 170));
+            l.outline(x - 1, y - 1, w + 2, 13, kBorder);
+            l.textCentered(x + w / 2, y - 1, w3n::mirrorTimerName((uint32_t)k), kWhite);
+            y += 16;
+        }
+        if (g.fishBiting(now) && (now / 250) % 4 != 0)   // a bite: catch it with the interact button (the prompt at the bobber)
+            l.textCentered(kHudW / 2, y + 4, "A fish bites!", kGold);
+    }
+
     // ---- cast bar (bottom right: the place of the action bar and the cast bar of the original is the touch screen here)
     if (g.cast.active && g.cast.durMs) {
         uint32_t el = now - g.cast.startMs;

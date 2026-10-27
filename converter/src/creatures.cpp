@@ -313,6 +313,8 @@ static void convertTransports(const Options& o, const DataDir& data, PackWriter&
         if (mdx.empty()) continue;
         std::string lm = lower(mdx);
         bool isT = false, isG = o.gameobjects && goWords.empty();
+        // the fishing bobber (stage 5.26) always comes with the creatures: it is small and every angler needs it
+        if (o.creatures && lm.find("fishingbobber") != std::string::npos) isG = true;
         if (o.transports) for (auto& w : words) isT = isT || lm.find(w) != std::string::npos;
         if (o.gameobjects) for (auto& w : goWords) isG = isG || lm.find(w) != std::string::npos;
         const bool hit = isT || isG;
@@ -519,7 +521,7 @@ bool convertCreatures(const Options& o, const DataDir& data, PackWriter& pack, C
                           haveFacial ? &facial : nullptr, cdi, modelPath, modelFor);
         if (!o.noItems) convertItems(o, data, pack, st);   // stage 5.19: armour, helmets, shoulders, weapons for players
     }
-    if (o.transports || o.gameobjects) convertTransports(o, data, pack, st, modelFor);
+    if (o.transports || o.gameobjects || o.creatures) convertTransports(o, data, pack, st, modelFor);
     return true;
 }
 

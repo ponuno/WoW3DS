@@ -1,4 +1,5 @@
 #include "conv.h"
+#include "w3d_liquid.h"
 #include <unordered_set>
 #include "w3d_ui.h"
 
@@ -81,7 +82,7 @@ bool PackWriter::write(const std::string& path) const {
     // Order: terrain, placements, models, textures — the client reads in file
     // order, so the small structural entries come first.
     std::vector<const Item*> order;
-    const uint32_t known[] = {W3D_ENTRY_TERRAIN, W3D_ENTRY_PLACEMENT, W3D_ENTRY_WATER, W3D_ENTRY_COLLISION, W3D_ENTRY_MODEL,
+    const uint32_t known[] = {W3D_ENTRY_TERRAIN, W3D_ENTRY_PLACEMENT, W3D_ENTRY_WATER, W3D_ENTRY_LIQUID, W3D_ENTRY_COLLISION, W3D_ENTRY_MODEL,
                               W3D_ENTRY_DISPLAY, W3D_ENTRY_CHARACTER, W3D_ENTRY_ITEM, W3D_ENTRY_CREATURE, W3D_ENTRY_TEXTURE,
                               W3D_ENTRY_CHARIMG};
     for (uint32_t t : known)
@@ -220,6 +221,7 @@ const char* typeName(uint32_t t) {
         case W3D_ENTRY_MODEL: return "MODL";
         case W3D_ENTRY_PLACEMENT: return "PLCM";
         case W3D_ENTRY_WATER: return "WATR";
+        case W3D_ENTRY_LIQUID: return "LIQD";
         case W3D_ENTRY_COLLISION: return "COLL";
         case W3D_ENTRY_CREATURE: return "CMDL";
         case W3D_ENTRY_DISPLAY: return "CDSP";
@@ -303,13 +305,34 @@ int printPackInfo(const std::string& path) {
             const uint16_t* idx = reinterpret_cast<const uint16_t*>(p + t.offIndices);
             for (uint32_t k = 0; k < t.indexCount; ++k) if (idx[k] >= t.vertexCount) return fail("water index >= vertexCount");
             const W3dWaterBatch* bt = reinterpret_cast<const W3dWaterBatch*>(p + t.offBatches);
+            uint32_t frames = 0;
             for (uint32_t k = 0; k < t.batchCount; ++k) {
                 if (bt[k].firstIndex + bt[k].indexCount > t.indexCount) return fail("water batch range");
-                if (bt[k].tex >= t.texCount) return fail("water batch tex");
+                if (bt[k].tex + std::max<uint32_t>(1, bt[k].frames) > t.texCount) return fail("water batch tex");
+                if (bt[k].liquid > 3) return fail("water batch liquid");
+                frames = std::max<uint32_t>(frames, bt[k].frames);
             }
+            std::printf("  water %u_%u: %u tris, %u batches, %u textures (%u frames)\n", t.tileX, t.tileY, t.indexCount / 3,
+                        t.batchCount, t.texCount, frames);
             const uint32_t* ids = reinterpret_cast<const uint32_t*>(p + t.offTexIds);
             for (uint32_t k = 0; k < t.texCount; ++k) if (!texOk(ids[k])) ++missingTex;
             if (!byKey.count({W3D_ENTRY_TERRAIN, e[i].id})) return fail("water without terrain tile");
+        } else if (e[i].type == W3D_ENTRY_LIQUID) {
+            if (!w3d_liquid_valid(p, e[i].size)) return fail("liquid grid");
+            if (!byKey.count({W3D_ENTRY_TERRAIN, e[i].id})) return fail("liquid without terrain tile");
+            W3dLiquidHeader lh; std::memcpy(&lh, p, sizeof lh);
+            const W3dLiquidChunk* lc = reinterpret_cast<const W3dLiquidChunk*>(p + lh.offChunks);
+            size_t cells[4] = {0, 0, 0, 0}, deep = 0, wmo = 0;
+            for (uint32_t k = 0; k < lh.chunkCount; ++k)
+                for (uint8_t f : lc[k].cell) {
+                    if (f == W3D_LIQ_DRY) continue;
+                    ++cells[f & W3D_LIQ_KIND];
+                    deep += (f & W3D_LIQ_DEEP) != 0;
+                    wmo += (f & W3D_LIQ_WMO) != 0;
+                }
+            std::printf("  liquid %u_%u: %u chunks, cells water %zu ocean %zu magma %zu slime %zu (deep %zu, buildings %zu), "
+                        "fog %u %u %u / %.0f yd\n", lh.tileX, lh.tileY, lh.chunkCount, cells[0], cells[1], cells[2], cells[3], deep,
+                        wmo, lh.look[0].fog[0], lh.look[0].fog[1], lh.look[0].fog[2], lh.look[0].fogEnd);
         } else if (e[i].type == W3D_ENTRY_MODEL) {
             W3dModelHeader m; std::memcpy(&m, p, sizeof m);
             if (m.offIndices + m.indexCount * 2 > e[i].size) return fail("model index range");

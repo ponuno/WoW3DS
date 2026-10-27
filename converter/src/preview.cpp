@@ -4,13 +4,16 @@
 #include "w3d_format.h"
 #include "w3d_anim.h"
 #include "w3d_character.h"
+#include "w3d_liquid.h"
 #include "rg_etc1.h"
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <map>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -247,6 +250,53 @@ struct Canvas {
 
 // Collision of one tile seen from above, 2 px per yard (north up, like region.png):
 // floors blue, building walls red, doodad walls orange; grid cells faint.
+// Stage 5.26: the liquid query grid of one tile, 4 px per cell, north up like region.png: water blue, sea dark blue,
+// lava orange, slime green; deep cells darker, cells from buildings striped. Brightness follows the surface height.
+static int previewLiquid(const std::vector<uint8_t>& b, const W3dEntry& e, const std::string& outDir) {
+    const uint8_t* p = b.data() + e.offset;
+    if (!w3d_liquid_valid(p, e.size)) { std::printf("LIQD %u: invalid\n", e.id); return 1; }
+    W3dLiquidHeader h;
+    std::memcpy(&h, p, sizeof h);
+    const int S = 4, W = 128 * S;
+    std::vector<uint8_t> img((size_t)W * W * 3, 0);
+    float lo = 1e30f, hi = -1e30f;
+    size_t wet = 0;
+    std::vector<float> lev(128 * 128, NAN);
+    std::vector<uint8_t> fl(128 * 128, W3D_LIQ_DRY);
+    for (int gx = 0; gx < 128; ++gx)
+        for (int gy = 0; gy < 128; ++gy) {
+            W3dLiquidHit hit;
+            float x = h.maxX - (gx + 0.5f) * W3D_LIQ_CELL, y = h.maxY - (gy + 0.5f) * W3D_LIQ_CELL;
+            if (!w3d_liquid_at(p, x, y, &hit)) continue;
+            lev[gx * 128 + gy] = hit.level;
+            fl[gx * 128 + gy] = hit.flags;
+            lo = std::min(lo, hit.level); hi = std::max(hi, hit.level);
+            ++wet;
+        }
+    static const uint8_t kCol[4][3] = {{60, 140, 255}, {20, 60, 190}, {255, 110, 20}, {100, 220, 40}};
+    for (int gx = 0; gx < 128; ++gx)
+        for (int gy = 0; gy < 128; ++gy) {
+            const uint8_t f = fl[gx * 128 + gy];
+            if (f == W3D_LIQ_DRY) continue;
+            float L = hi > lo ? 0.55f + 0.45f * (lev[gx * 128 + gy] - lo) / (hi - lo) : 1.0f;
+            if (f & W3D_LIQ_DEEP) L *= 0.6f;
+            for (int yy = 0; yy < S; ++yy)
+                for (int xx = 0; xx < S; ++xx) {
+                    // image: x = column gy (west to the right like region.png), y = row gx (north up)
+                    uint8_t* o = &img[((size_t)(gx * S + yy) * W + gy * S + xx) * 3];
+                    bool stripe = (f & W3D_LIQ_WMO) && ((xx + yy) % 4 == 0);
+                    for (int c = 0; c < 3; ++c) o[c] = stripe ? 255 : (uint8_t)(kCol[f & W3D_LIQ_KIND][c] * L);
+                }
+        }
+    char name[512];
+    std::snprintf(name, sizeof name, "%s/liquid_%u_%u.png", outDir.c_str(), h.tileX, h.tileY);
+    stbi_write_png(name, W, W, 3, img.data(), W * 3);
+    std::printf("wrote %s: %zu wet cells, surface %.2f .. %.2f, look water fog %u %u %u (%.0f yd), ocean fog %u %u %u (%.0f yd)\n",
+                name, wet, wet ? lo : 0.0f, wet ? hi : 0.0f, h.look[0].fog[0], h.look[0].fog[1], h.look[0].fog[2], h.look[0].fogEnd,
+                h.look[1].fog[0], h.look[1].fog[1], h.look[1].fog[2], h.look[1].fogEnd);
+    return 0;
+}
+
 static int previewCollision(const std::vector<uint8_t>& b, const W3dEntry& e, const std::string& outDir) {
     const uint8_t* p = b.data() + e.offset;
     W3dCollHeader h;
@@ -365,6 +415,7 @@ int main(int argc, char** argv) {
     if (argc < 3) {
         std::puts("usage: w3dpreview <pack.w3dp> <outdir> [lod]\n       w3dpreview <pack.w3dp> <outdir> --creature <displayId | 0 [count]>\n"
                   "       w3dpreview <pack.w3dp> <outdir> --coll [tileX tileY]   (floors and walls, 2 px per yard)\n"
+                  "       w3dpreview <pack.w3dp> <outdir> --liquid [tileX tileY] (where the liquids are: swimming, 4 px per cell)\n"
                   "       w3dpreview <pack.w3dp> <outdir> --player race sex skin face hairStyle hairColor facialHair [--equip slot=display,...]");
         return 1;
     }
@@ -392,6 +443,16 @@ int main(int argc, char** argv) {
                     ++q;
                 }
         return previewPlayer(b, e, h.entryCount, look, outDir, equip);
+    }
+    if (argc > 3 && std::string(argv[3]) == "--liquid") {
+        int n = 0;
+        for (uint32_t i = 0; i < h.entryCount; ++i) {
+            if (e[i].type != W3D_ENTRY_LIQUID) continue;
+            if (argc > 5 && e[i].id != w3d_tile_id((uint32_t)std::atoi(argv[4]), (uint32_t)std::atoi(argv[5]))) continue;
+            n += previewLiquid(b, e[i], outDir) == 0;
+        }
+        if (!n) std::puts("no matching LIQD entries in the pack");
+        return n ? 0 : 1;
     }
     if (argc > 3 && std::string(argv[3]) == "--coll") {
         int n = 0;
@@ -451,6 +512,26 @@ int main(int argc, char** argv) {
         out[1] = (maxX - rx) / TS * cv.px;
     };
 
+    std::map<uint32_t, std::array<float, 3>> means;
+    auto texMean = [&](uint32_t id, float out[3]) {
+        auto it = means.find(id);
+        if (it == means.end()) {
+            std::array<float, 3> m = {200, 200, 200};
+            for (uint32_t j = 0; j < h.entryCount; ++j) {
+                if (e[j].type != W3D_ENTRY_TEXTURE || e[j].id != id) continue;
+                W3dTexHeader t;
+                std::memcpy(&t, b.data() + e[j].offset, sizeof t);
+                auto rgba = decodeLevel0(t, b.data() + e[j].offset + W3D_TEX_DATA_OFFSET);
+                double acc[3] = {0, 0, 0};
+                const size_t n = rgba.size() / 4;
+                for (size_t k = 0; k < n; ++k) for (int c = 0; c < 3; ++c) acc[c] += rgba[k * 4 + c];
+                if (n) for (int c = 0; c < 3; ++c) m[c] = (float)(acc[c] / n);
+                break;
+            }
+            it = means.emplace(id, m).first;
+        }
+        for (int c = 0; c < 3; ++c) out[c] = it->second[c];
+    };
     for (int pass = 0; pass < 3; ++pass)
         for (uint32_t i = 0; i < h.entryCount; ++i) {
             const uint8_t* p = b.data() + e[i].offset;
@@ -474,22 +555,29 @@ int main(int argc, char** argv) {
                     cv.tri(P, col, 1.0f);
                 }
             } else if (pass == 1 && e[i].type == W3D_ENTRY_WATER) {
+                // stage 5.26: the colour the 3DS shows - the first frame's mean colour times the vertex colour, its opacity
                 W3dWaterHeader t;
                 std::memcpy(&t, p, sizeof t);
                 const W3dTerrainVertex* v = reinterpret_cast<const W3dTerrainVertex*>(p + t.offVertices);
                 const uint16_t* idx = reinterpret_cast<const uint16_t*>(p + t.offIndices);
                 const W3dWaterBatch* wb = reinterpret_cast<const W3dWaterBatch*>(p + t.offBatches);
+                const uint32_t* tids = reinterpret_cast<const uint32_t*>(p + t.offTexIds);
                 for (uint32_t bi = 0; bi < t.batchCount; ++bi) {
-                    static const uint8_t liq[4][3] = {{40, 90, 200}, {20, 50, 160}, {240, 90, 20}, {90, 200, 40}};
+                    float mean[3] = {200, 200, 200};
+                    if (wb[bi].tex < t.texCount) texMean(tids[wb[bi].tex], mean);
                     for (uint32_t k = wb[bi].firstIndex; k + 2 < wb[bi].firstIndex + wb[bi].indexCount; k += 3) {
                         float P[3][2];
                         uint8_t col[3][3];
+                        float a = 0;
                         for (int c = 0; c < 3; ++c) {
                             const W3dTerrainVertex& q = v[idx[k + c]];
                             toImg(t.origin[0] + q.x * t.posScale[0] + t.posOffset[0], t.origin[1] + q.y * t.posScale[1] + t.posOffset[1], P[c]);
-                            std::memcpy(col[c], liq[std::min<int>(wb[bi].liquid, 3)], 3);
+                            col[c][0] = (uint8_t)(mean[0] * q.r / 255.0f);
+                            col[c][1] = (uint8_t)(mean[1] * q.g / 255.0f);
+                            col[c][2] = (uint8_t)(mean[2] * q.b / 255.0f);
+                            a += q.a / (3 * 255.0f);
                         }
-                        cv.tri(P, col, 0.75f);
+                        cv.tri(P, col, std::max(0.35f, a));
                     }
                 }
             } else if (pass == 2 && e[i].type == W3D_ENTRY_PLACEMENT) {

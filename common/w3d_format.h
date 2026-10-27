@@ -36,6 +36,7 @@ enum W3dEntryType {
     W3D_ENTRY_CHARACTER = W3D_FOURCC('C', 'H', 'R', 'S'),   // stage 5.5: player race/sex (id = w3d_char_id)
     W3D_ENTRY_CHARIMG   = W3D_FOURCC('C', 'I', 'M', 'G'),   // stage 5.5: body texture layer (id = path hash)
     W3D_ENTRY_ITEM      = W3D_FOURCC('I', 'T', 'E', 'M'),   // stage 5.19: worn item look (id = ItemDisplayInfo id)
+    W3D_ENTRY_LIQUID    = W3D_FOURCC('L', 'I', 'Q', 'D'),   // stage 5.26: where the liquids of a tile are (swimming, id = tile)
 };
 
 typedef struct {
@@ -162,14 +163,19 @@ typedef struct {
 } W3dPlacementHeader;
 
 // ---------------------------------------------------------------- water
-// Flat-shaded liquid surfaces of one tile (from MCLQ). Vertices use the
-// terrain vertex layout: rgb = 255, a = opacity, uv = world-aligned tiling.
-// Same id as the tile's TERR entry.
+// Liquid surfaces of one tile: the terrain's (MCLQ) and the buildings' (WMO MLIQ) that the tile owns.
+// Vertices use the terrain vertex layout: rgb = the liquid's colour (Light.dbc river / ocean colour,
+// shallow -> deep), a = opacity (by depth), uv = world-aligned tiling. Same id as the tile's TERR entry.
+// Since stage 5.26 the textures are the game's own animated ones (XTextures\river\lake_a.N.blp, ocean_h, lava,
+// slime): the batch's frames are 'frames' consecutive entries of the texture id table starting at 'tex',
+// shown W3D_WATER_FRAME_MS each (frames == 0 in older packs: one procedural texture).
 enum W3dLiquid { W3D_LIQUID_WATER = 0, W3D_LIQUID_OCEAN = 1, W3D_LIQUID_MAGMA = 2, W3D_LIQUID_SLIME = 3 };
+#define W3D_WATER_FRAME_MS 60u        // 30 frames: the 1.8 s cycle of the original
 
 typedef struct {
-    uint16_t liquid;              // W3dLiquid
-    uint16_t tex;                 // index into the water texture id table
+    uint8_t  liquid;              // W3dLiquid
+    uint8_t  frames;              // animation frames (0 or 1 = a still texture)
+    uint16_t tex;                 // index into the water texture id table (first frame)
     uint32_t firstIndex;
     uint32_t indexCount;
     float    bmin[3], bmax[3];    // tile-local
@@ -183,6 +189,44 @@ typedef struct {
     uint32_t vertexCount, indexCount, batchCount, texCount;
     uint32_t offTexIds, offBatches, offVertices, offIndices;
 } W3dWaterHeader;
+
+// ---------------------------------------------------------------- liquid query (stage 5.26)
+// Where the liquids of one tile are and how high, for movement (swimming, water walking, falling into water) and the
+// underwater view; CPU data (heap). The tile is the 128 x 128 grid of liquid cells (4.17 yd, the MCLQ / MLIQ cell):
+//   gx = (maxX - x) / W3D_LIQ_CELL (rows, render -x), gy = (maxY - y) / W3D_LIQ_CELL (columns, render -y),
+//   chunk = (gx / 8) * 16 + gy / 8 (the ADT's MCNK order), cell = (gx % 8) * 8 + gy % 8,
+// corner heights [row 0..8][col 0..8] of a chunk, bilinear inside a cell; a chunk where two surfaces meet (a river
+// beside lava, a pool of a building over a lake) keeps four corners per cell instead (W3D_LIQ_PERCELL). Building
+// liquids are rasterised into the same grid (a cell is wet when its centre is over a wet MLIQ cell, flat at the
+// height there); a cell covered twice takes the higher surface.
+#define W3D_LIQ_CELL  (533.33333f / 128.0f)
+#define W3D_LIQ_DRY   0xFFu
+#define W3D_LIQ_KIND  0x03u       // W3dLiquid
+#define W3D_LIQ_DEEP  0x04u       // deep water: fatigue (MCLQ "dark water" 0x80)
+#define W3D_LIQ_WMO   0x08u       // from a building: no cave test against the terrain
+#define W3D_LIQ_FLAT  0xFFFFFFFFu // W3dLiquidChunk.offHeights: every corner at 'base'
+#define W3D_LIQ_PERCELL 0x80000000u   // offHeights bit: int16_t[64][4] (corners (r,k) (r,k+1) (r+1,k) (r+1,k+1)) instead of [81]
+typedef struct {
+    uint8_t  cell[64];            // W3D_LIQ_* per cell, W3D_LIQ_DRY = no liquid
+    float    base;                // corner height = base + h / 32
+    uint32_t offHeights;          // int16_t[81] (| W3D_LIQ_PERCELL: [64][4]) from the start of the blob, or W3D_LIQ_FLAT
+} W3dLiquidChunk;                 // 72 bytes
+
+typedef struct {
+    uint8_t  close[4], far_[4];   // surface colour, shallow / deep (rgb, a unused)
+    uint8_t  fog[4];              // under the surface
+    float    fogEnd;              // yards of sight under the surface
+} W3dLiquidLook;                  // 16 bytes
+
+typedef struct {
+    uint32_t tileX, tileY;
+    float    maxX, maxY;          // render-space corner of the tile where gx = gy = 0
+    uint32_t chunkCount;
+    uint32_t offChunkIndex;       // uint16_t[256]: chunk record or 0xFFFF (dry)
+    uint32_t offChunks;           // W3dLiquidChunk[chunkCount]
+    uint32_t pad;
+    W3dLiquidLook look[4];        // by W3dLiquid (Light.dbc of the tile at noon; magma / slime: fixed)
+} W3dLiquidHeader;
 
 // ---------------------------------------------------------------- collision (floors + walls)
 // Collision triangles of buildings (WMO collision faces) and doodads (M2 bounding
@@ -423,7 +467,7 @@ typedef struct {
 
 static inline int w3d_item_valid(const uint8_t* blob, uint32_t size) { (void)blob; return size >= sizeof(W3dItemDisplay); }
 
-// Entry id of a tile's TERR / PLCM / WATR / COLL entries.
+// Entry id of a tile's TERR / PLCM / WATR / COLL / LIQD entries.
 static inline uint32_t w3d_tile_id(uint32_t tileX, uint32_t tileY) { return tileX * 64u + tileY; }
 
 // ---------------------------------------------------------------- helpers

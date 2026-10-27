@@ -35,7 +35,7 @@ file(GLOB MESHOPT_SRC ${meshoptimizer_SOURCE_DIR}/src/*.cpp)
 # Converter core as a static library: the tool and the tests link it.
 add_library(w3dcore STATIC
   src/pack.cpp src/mpq.cpp src/texture.cpp src/model.cpp src/terrain.cpp src/synthetic.cpp src/wmo.cpp
-  src/creature_model.cpp src/creatures.cpp src/items.cpp src/spells.cpp src/progress.cpp src/ui.cpp src/ui_font.cpp src/texts.cpp src/sound.cpp src/dungeon.cpp
+  src/creature_model.cpp src/creatures.cpp src/items.cpp src/spells.cpp src/progress.cpp src/ui.cpp src/ui_font.cpp src/texts.cpp src/sound.cpp src/dungeon.cpp src/liquid.cpp
   ${MESHOPT_SRC}
   ${rgetc1_SOURCE_DIR}/rg_etc1.cpp
   ${wowee_SOURCE_DIR}/src/pipeline/adt_loader.cpp

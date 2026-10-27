@@ -219,6 +219,10 @@ GameSession::ObjectAction GameSession::objectAction(const WorldObject& o) const 
     ObjectAction a;
     const uint32_t type = o.field(UF::GAMEOBJECT_TYPE_ID), dyn = o.field(UF::GAMEOBJECT_DYN_FLAGS);
     if (type == kGoMailbox) { a.verb = "Mail"; return a; }
+    if (type == 17) {   // stage 5.26: our own fishing bobber - catch the fish when it bites (the others' are not ours to use)
+        if (o.guid == fishingBobber()) a.verb = fishBiting(now_) ? "Catch" : "Reel in";
+        return a;
+    }
     if (type == kGoQuestGiver) { a.verb = "Quest"; return a; }
     if (type != kGoChest && type != kGoGoober) return a;
     const ObjectTable::GoInfo* gi = objects.goInfo(o.entry());
@@ -299,7 +303,14 @@ std::string GameSession::interact(uint64_t guid, const float pos[3], uint32_t no
         return "";
     }
     if (t->type == ObjType::GameObject && useVerb(*t)) {
-        if (d > kInteractRange) return "You are too far away";
+        const bool bobber = t->field(UF::GAMEOBJECT_TYPE_ID) == 17;   // cast 20 yd out: used from where we stand
+        if (d > (bobber ? (float)kFishingRange : kInteractRange)) return "You are too far away";
+        if (bobber) {
+            ++fishCaughtTries;
+            fishBiteGuid = 0;
+            useGameObject(guid, nowMs);   // the server answers with the loot window, or "got away" / "not hooked"
+            return "";
+        }
         if (lootWindow.open) closeLoot(nowMs);
         if (t->field(UF::GAMEOBJECT_TYPE_ID) == kGoMailbox) { openMailbox(guid, nowMs); return ""; }   // the client opens it
         ObjectAction act = objectAction(*t);

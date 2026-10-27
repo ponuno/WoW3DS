@@ -37,7 +37,8 @@ llvm-mingw from GitHub releases (mstorsjo/llvm-mingw, ucrt-ubuntu x86_64):
     x86_64-w64-mingw32-clang++ -std=c++20 -O2 -static -o w3dlogin.exe net/tools/w3dlogin.cpp \
         net/client.cpp net/crypto.cpp net/socket.cpp net/inflate.cpp net/movement.cpp net/objects.cpp net/transport.cpp net/game.cpp net/game_social.cpp net/game_spells.cpp net/game_items.cpp net/game_life.cpp net/result_text.cpp \
         net/factions.cpp net/game_factions.cpp net/game_vendor.cpp net/game_quests.cpp net/game_group.cpp \
-        -lws2_32 -lbcrypt
+        net/game_friends.cpp net/game_services.cpp net/game_mail.cpp net/game_auction.cpp net/game_trade.cpp \
+        net/game_water.cpp net/tables.cpp -lws2_32 -lbcrypt      (that is: every net/*.cpp)
 
 ## Windows tools (w3dconv.exe / w3dpreview.exe, stage5s)
 

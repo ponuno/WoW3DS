@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <map>
 
 namespace w3d {
@@ -33,7 +34,28 @@ struct WmoAsset {
     std::vector<glm::vec3> coll;               // collidable triangles (WMO space), 3 vertices each
     struct Doodad { std::string path; glm::mat4 local; };
     std::vector<std::vector<Doodad>> sets;     // per doodad set
+    // Liquids (stage 5.26): wet MLIQ cells of every group, WMO space, corners in order, with their kind.
+    struct LiquidCell { glm::vec3 p[4]; uint8_t kind; };
+    std::vector<LiquidCell> liquid;
 };
+
+// Root MOHD fields the WoWee loader does not keep: flags (u16 at +60) and the WMO id (u32 at +32).
+void rootHeader(const std::vector<uint8_t>& b, uint32_t* flags, uint32_t* id) {
+    *flags = 0; *id = 0;
+    for (size_t p = 0; p + 8 <= b.size();) {
+        uint32_t len;
+        std::memcpy(&len, &b[p + 4], 4);
+        if (!std::memcmp(&b[p], "DHOM", 4) && len >= 62 && p + 8 + 62 <= b.size()) {
+            uint16_t f;
+            std::memcpy(&f, &b[p + 8 + 60], 2);
+            std::memcpy(id, &b[p + 8 + 32], 4);
+            *flags = f;
+            return;
+        }
+        if (len > b.size() - p - 8) return;
+        p += 8 + len;
+    }
+}
 
 std::map<std::string, WmoAsset> g_wmoCache;    // normalized path -> converted asset
 
@@ -136,6 +158,39 @@ static const WmoAsset& loadWmo(PackWriter& pack, const DataDir& data, const std:
             a.coll.push_back(g.vertices[i0].position);
             a.coll.push_back(g.vertices[i1].position);
             a.coll.push_back(g.vertices[i2].position);
+        }
+    }
+
+    // Liquids of the groups (canals, fountains, dungeon pools): MLIQ = xVerts x yVerts heights from basePosition in steps
+    // of W3D_LIQ_CELL, a flag byte per cell ((flags & 0x0F) == 0x0F: dry), kind as the server's extractor resolves it.
+    if (!o.noWmoWater) {
+        uint32_t rootFlags = 0, rootId = 0;
+        rootHeader(bytes, &rootFlags, &rootId);
+        for (const auto& g : w.groups) {
+            const auto& L = g.liquid;
+            if (!L.hasLiquid() || L.xTiles == 0 || L.yTiles == 0 || L.xTiles > 1024 || L.yTiles > 1024) continue;
+            if (L.heights.size() < (size_t)L.xVerts * L.yVerts || L.flags.size() < (size_t)L.xTiles * L.yTiles) continue;
+            if (L.xVerts < L.xTiles + 1 || L.yVerts < L.yTiles + 1) continue;
+            int kind = wmoLiquidKind(rootFlags, rootId, g.flags, g.liquidType, L.flags.data(), L.flags.size());
+            if (kind < 0) continue;
+            size_t before = a.liquid.size();
+            for (uint32_t ty = 0; ty < L.yTiles; ++ty)
+                for (uint32_t tx = 0; tx < L.xTiles; ++tx) {
+                    if ((L.flags[ty * L.xTiles + tx] & 0x0F) == 0x0F) continue;
+                    WmoAsset::LiquidCell c;
+                    c.kind = (uint8_t)kind;
+                    const uint32_t vx[4] = {tx, tx + 1, tx + 1, tx}, vy[4] = {ty, ty, ty + 1, ty + 1};
+                    for (int k = 0; k < 4; ++k) {
+                        float h = L.heights[vy[k] * L.xVerts + vx[k]];
+                        if (!std::isfinite(h) || std::fabs(h - L.basePosition.z) > 2000.0f) h = L.basePosition.z;
+                        c.p[k] = glm::vec3(L.basePosition.x + vx[k] * W3D_LIQ_CELL, L.basePosition.y + vy[k] * W3D_LIQ_CELL, h);
+                    }
+                    a.liquid.push_back(c);
+                }
+            if (a.liquid.size() > before) ++st.liquidWmoGroups;
+            if (o.verbose && a.liquid.size() > before)
+                std::printf("    liquid in group %s: %u x %u cells, kind %d, %zu wet\n", g.name.c_str(), (unsigned)L.xTiles,
+                            (unsigned)L.yTiles, kind, a.liquid.size() - before);
         }
     }
 
@@ -435,6 +490,21 @@ void placeWmo(PackWriter& pack, const DataDir& data, const std::string& path, co
     }
     ++st.wmoPlacements;
     if (!o.noFloors) addCollisionTris(o, st, a.coll.data(), a.coll.size(), W, false);
+    // liquids: each cell goes to the tile under its centre (inside the region)
+    for (const auto& c : a.liquid) {
+        ConvStats::LiquidQuad q;
+        glm::vec3 mid(0.0f);
+        for (int k = 0; k < 4; ++k) {
+            glm::vec3 v = glm::vec3(W * glm::vec4(c.p[k], 1.0f));
+            q.p[k][0] = v.x; q.p[k][1] = v.y; q.p[k][2] = v.z;
+            mid += 0.25f * v;
+        }
+        q.kind = c.kind;
+        int tx, ty;
+        if (!placementOwner(o, mid.x, mid.y, tx, ty)) continue;
+        st.liquids[w3d_tile_id(tx, ty)].quads.push_back(q);
+        ++st.liquidQuads;
+    }
     if (o.noWmoDoodads) return;
     std::vector<size_t> sets = {0};
     if (doodadSet > 0 && doodadSet < a.sets.size()) sets.push_back(doodadSet);

@@ -24,6 +24,7 @@ namespace {
 const uint8_t kZenith[3] = {70, 120, 200};
 const uint8_t kHorizon[3] = {190, 210, 230};
 inline u32 fogConstColor(const uint8_t c[3]) { return (u32)c[0] | ((u32)c[1] << 8) | ((u32)c[2] << 16) | 0xFF000000u; }
+u32 g_fogColor = fogConstColor(kHorizon);   // this frame's fog: the horizon, or the water's colour under the surface
 
 struct Shader {
     DVLB_s* dvlb = nullptr;
@@ -231,7 +232,7 @@ void fogStage(int stage) {
     C3D_TexEnvFunc(env, C3D_RGB, GPU_INTERPOLATE);
     C3D_TexEnvSrc(env, C3D_Alpha, GPU_PREVIOUS, GPU_PREVIOUS, GPU_PREVIOUS);
     C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
-    C3D_TexEnvColor(env, fogConstColor(kHorizon));
+    C3D_TexEnvColor(env, g_fogColor);
 }
 
 void resetStages(int from) {
@@ -679,12 +680,14 @@ void drawWater(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, const 
     C3D_BindProgram(&g_terrainSh.prog);
     C3D_SetAttrInfo(&g_terrainAttr);
     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_terrainSh.uProj, &g_proj);
-    float t = rs.timeSec;
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, g_terrainSh.uUV, fmodf(t * 0.05f, 64.0f), fmodf(t * 0.03f, 64.0f), 0, 0);
+    const float t = rs.timeSec;
+    // stage 0: rgb = texture * vertex colour (the Light.dbc colour of the liquid, shallow -> deep), alpha = vertex
+    // alpha (opacity by depth); then fog. The game's animated textures move by themselves; the old still procedural
+    // texture (packs before stage 5.26) scrolls instead.
     C3D_TexEnv* env = C3D_GetTexEnv(0);
     C3D_TexEnvInit(env);
     C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
-    C3D_TexEnvOpRgb(env, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_R, GPU_TEVOP_RGB_SRC_COLOR);
+    C3D_TexEnvOpRgb(env, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR);
     C3D_TexEnvFunc(env, C3D_RGB, GPU_MODULATE);
     C3D_TexEnvSrc(env, C3D_Alpha, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
     C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
@@ -695,6 +698,7 @@ void drawWater(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, const 
     C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_ONE, GPU_ZERO);
     C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_COLOR);
     C3D_CullFace(GPU_CULL_NONE);   // visible from below when swimming
+    const u32 timeMs = (u32)(t * 1000.0f);
 
     BindCache bc;
     for (Tile* tile : streamerReadyTiles()) {
@@ -709,6 +713,7 @@ void drawWater(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, const 
         C3D_FVUnifSet(GPU_VERTEX_SHADER, g_terrainSh.uScale, h->posScale[0], h->posScale[1], h->posScale[2], W3D_TERRAIN_UV_SCALE);
         C3D_FVUnifSet(GPU_VERTEX_SHADER, g_terrainSh.uOffset, h->posOffset[0], h->posOffset[1], h->posOffset[2], 0);
         const uint16_t* idx = (const uint16_t*)(tile->water + h->offIndices);
+        int scrolling = -1;
         for (u32 i = 0; i < h->batchCount; ++i) {
             const W3dWaterBatch& b = tile->wbatches[i];
             float c[3], r2 = 0;
@@ -718,7 +723,19 @@ void drawWater(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, const 
                 r2 += e * e;
             }
             if (!fr.sphere(c, sqrtf(r2))) continue;
-            bc.bind(0, tile->wtex[b.tex], fc);
+            u32 tex = b.tex;
+            const bool animated = b.frames > 1;
+            if (animated) {   // fewer frames than the original 30 (--water-frames) are shown longer each
+                const u32 frameMs = W3D_WATER_FRAME_MS * 30u / b.frames;
+                tex += (timeMs / frameMs) % b.frames;
+            }
+            if (tex >= tile->wtex.size()) tex = b.tex;
+            if (scrolling != (animated ? 0 : 1)) {
+                scrolling = animated ? 0 : 1;
+                if (animated) C3D_FVUnifSet(GPU_VERTEX_SHADER, g_terrainSh.uUV, 0, 0, 0, 0);
+                else C3D_FVUnifSet(GPU_VERTEX_SHADER, g_terrainSh.uUV, fmodf(t * 0.05f, 64.0f), fmodf(t * 0.03f, 64.0f), 0, 0);
+            }
+            bc.bind(0, tile->wtex[tex], fc);
             C3D_DrawElements(GPU_TRIANGLES, b.indexCount, C3D_UNSIGNED_SHORT, idx + b.firstIndex);
             ++fc.drawCalls;
             ++fc.waterBatches;
@@ -799,17 +816,32 @@ void rendererSetProjection(float drawDist) {
     g_fogY = end / (end - start);
 }
 
-void rendererDraw(C3D_RenderTarget* target, const Camera& cam, const RenderSettings& rs, FrameCounters& fc,
+void rendererDraw(C3D_RenderTarget* target, const Camera& cam, const RenderSettings& rsIn, FrameCounters& fc,
                   const std::vector<Marker>* markers, const std::vector<CreatureInstance>* creatures) {
     (void)target;
+    RenderSettings rs = rsIn;
+    if (rs.underwater) rs.fog = true;   // the water is never clear: the fog switch only concerns the open air
     float f[3];
     cam.forward(f);
     C3D_Mtx view;
     Mtx_LookAt(&view, FVec3_New(0, 0, 0), FVec3_New(f[0], f[1], f[2]), FVec3_New(0, 0, 1), false);
     Frustum fr;
     fr.build(cam, g_near);
+    // Under the surface (stage 5.26): the water's colour all around, sight ends at its fog distance (Light.dbc underwater
+    // parameters): no sky, and nothing farther than that is drawn at all.
+    const float keepX = g_fogX, keepY = g_fogY;
+    if (rs.underwater) {
+        const float end = std::max(rs.waterFogEnd, 6.0f);
+        g_fogX = 1.0f / end;   // visibility = 1 - dist / end: from the eye
+        g_fogY = 1.0f;
+        g_fogColor = fogConstColor(rs.waterFog);
+        fr.maxDist = std::min(fr.maxDist, end + 8.0f);
+        fr.d[5] = fr.maxDist;
+    } else {
+        g_fogColor = fogConstColor(kHorizon);
+    }
 
-    drawSky(view, fc);
+    if (!rs.underwater) drawSky(view, fc);
     drawTerrain(cam, view, fr, rs, fc);
     collectModels(fr, rs, fc);   // doodads (if enabled) and buildings
     drawModels(cam, view, rs, false, fc);
@@ -820,5 +852,12 @@ void rendererDraw(C3D_RenderTarget* target, const Camera& cam, const RenderSetti
     // Drop per-frame instance pointers: tiles/models may be freed before the next frame.
     for (Model* m : g_activeModels) m->visible.clear();
     g_activeModels.clear();
+    g_fogX = keepX;
+    g_fogY = keepY;
+}
+
+u32 rendererClearColor(const RenderSettings& rs) {   // RGBA8 for C3D_RenderTargetClear
+    if (!rs.underwater) return 0x8CB8E8FF;
+    return ((u32)rs.waterFog[0] << 24) | ((u32)rs.waterFog[1] << 16) | ((u32)rs.waterFog[2] << 8) | 0xFF;
 }
 

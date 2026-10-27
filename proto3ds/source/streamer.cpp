@@ -14,6 +14,7 @@
 // first and fall back to linear memory.
 #include "world.h"
 #include "w3d_collision.h"
+#include "w3d_liquid.h"
 
 #include <math.h>
 #include <stdlib.h>
@@ -86,7 +87,7 @@ bool Model::texturesReady() const {
 // ================================================================== internals
 namespace {
 
-enum class JobKind : uint8_t { Terrain, Water, Placement, Collision, Model, Texture, Display, Creature, CharInfo, CharImg, Item };
+enum class JobKind : uint8_t { Terrain, Water, Placement, Collision, Model, Texture, Display, Creature, CharInfo, CharImg, Item, Liquid };
 
 struct Job {
     JobKind kind;
@@ -200,7 +201,8 @@ void buildHeightField(Tile* t) {
 void runJob(Job* j) {
     j->ok = fseek(g_ioFile, j->offset, SEEK_SET) == 0 && fread(j->dst, 1, j->size, g_ioFile) == j->size;
     if (j->ok && j->kind != JobKind::Placement && j->kind != JobKind::Collision && j->kind != JobKind::Display &&
-        j->kind != JobKind::CharInfo && j->kind != JobKind::CharImg && j->kind != JobKind::Item) {   // CPU-only data needs no flush
+        j->kind != JobKind::CharInfo && j->kind != JobKind::CharImg && j->kind != JobKind::Item &&
+        j->kind != JobKind::Liquid) {   // CPU-only data needs no flush
         // Write the data back from THIS core's L1 cache: ARM11 MPCore cache
         // maintenance is per-core, and the GPU/GX engine read memory directly,
         // so a flush issued later on the main core may not see these lines.
@@ -586,6 +588,7 @@ void finishTileRelease(TileExt* t) {
         deferFree(FreeKind::Linear, t->water);
     }
     if (t->plcm) free(t->plcm);
+    if (t->liq) { free(t->liq); t->liq = nullptr; }
     if (t->coll) { freeColl(t->coll, t->collLinear); g_stats.collBytes -= t->collSize; t->coll = nullptr; }
     if (t->collLoad) t->collLoad->tile = nullptr;   // freed when the read completes
     g_tiles.erase(std::remove(g_tiles.begin(), g_tiles.end(), t), g_tiles.end());
@@ -619,6 +622,14 @@ bool requestTile(int tx, int ty) {
             t->waterSize = we->size;
             g_stats.geomBytes += we->size;
             submit(JobKind::Water, we, t->water, t);
+            t->pendingJobs++;
+        }
+    }
+    if (const W3dEntry* le = g_index->find(W3D_ENTRY_LIQUID, id)) {   // stage 5.26: small (a few KB, ~20 KB of open sea)
+        t->liq = (uint8_t*)malloc(le->size);
+        if (t->liq) {
+            t->liqSize = le->size;
+            submit(JobKind::Liquid, le, t->liq, t);
             t->pendingJobs++;
         }
     }
@@ -752,6 +763,7 @@ void onJobDone(Job* j) {
         }
         case JobKind::Terrain:
         case JobKind::Water:
+        case JobKind::Liquid:
         case JobKind::Placement: {
             TileExt* t = (TileExt*)j->owner;
             t->pendingJobs--;
@@ -762,6 +774,8 @@ void onJobDone(Job* j) {
                     t->batches = (const W3dTerrainBatch*)(t->terr + t->th->offBatches);
                     const uint32_t* ids = (const uint32_t*)(t->terr + t->th->offTexIds);
                     for (u32 i = 0; i < t->th->texCount; ++i) t->ttex.push_back(acquireTex(ids[i]));
+                } else if (j->kind == JobKind::Liquid) {
+                    if (!w3d_liquid_valid(t->liq, t->liqSize)) { free(t->liq); t->liq = nullptr; }
                 } else if (j->kind == JobKind::Water) {
                     GSPGPU_FlushDataCache(t->water, j->size);
                     t->wh = (const W3dWaterHeader*)t->water;
@@ -795,6 +809,7 @@ void onJobDone(Job* j) {
                 }
             }
             if (j->kind == JobKind::Terrain && !j->ok) t->th = nullptr;
+            if (j->kind == JobKind::Liquid && !j->ok && t->liq) { free(t->liq); t->liq = nullptr; }
             if (t->pendingJobs == 0) {
                 if (t->doomed) finishTileRelease(t);
                 else t->state = TileState::WaitingDeps;
@@ -1283,6 +1298,22 @@ bool streamerCollideMove(float fromX, float fromY, float zFeet, float* toX, floa
         }
     if (!n) return false;
     return w3d_collide_move(colls, n, fromX, fromY, zFeet, toX, toY, r) != 0;
+}
+
+bool streamerLiquidAt(float wx, float wy, float zRef, LiquidHere* out) {
+    Tile* t = tileAt(wx, wy);
+    if (!t || !t->liq) return false;
+    W3dLiquidHit hit;
+    if (!w3d_liquid_at(t->liq, wx, wy, &hit)) return false;
+    if (!(hit.flags & W3D_LIQ_WMO)) {   // the terrain's lake does not reach into a cave under it
+        float ground;
+        if (streamerGroundHeight(wx, wy, &ground) && zRef < ground - 2.0f) return false;
+    }
+    out->level = hit.level;
+    out->flags = hit.flags;
+    const W3dLiquidHeader* h = (const W3dLiquidHeader*)t->liq;
+    out->look = h->look[hit.flags & W3D_LIQ_KIND];
+    return true;
 }
 
 bool streamerGroundHeight(float wx, float wy, float* out) {

@@ -634,7 +634,8 @@ bool convertSound(const SoundOptions& so, const DataDir& data, bool verbose) {
     // ---- the world: creatures, weapons, spells, footsteps (sounds.txt + world.w3ds)
     if (so.world) {
         WorldCtx w{se, byId, {}, "# wow3ds world sounds: D display csd | K csd aggro death wound woundCrit attack attackCrit footstep | "
-                                 "W sub impact crit | F footstep sound | Q visual precast cast impact missile channel | P spell visual\n"};
+                                 "W sub impact crit | F footstep sound | Q visual precast cast impact missile channel | P spell visual | "
+                                 "L liquid-sound-kind sound\n"};
         exportWorldTables(data, w, verbose);
         // footsteps of any creature when FootstepTerrainLookup gave nothing: a SoundEntries name "*footstep*dirt*"
         if (w.txt.find("\nF\t") == std::string::npos)
@@ -645,6 +646,32 @@ bool convertSound(const SoundOptions& so, const DataDir& data, bool verbose) {
                     w.used.insert(id);
                     break;
                 }
+        // liquids (stage 5.26): "L kind sound" - splash (falling / wading into deep water), swim (a stroke), wade (a step in
+        // shallow water), fishbite (the server plays SoundEntries 3355 at the bobber when a fish bites). The names of these
+        // rows are not documented for 1.12: the first SoundEntries row whose name or first file has the keyword wins.
+        {
+            struct Want { const char* kind; std::vector<const char*> keys; uint32_t fixedId; };
+            const Want wants[] = {
+                {"splash", {"enterwatermedium", "enterwater", "watersplash", "splashlarge", "splash"}, 0},
+                {"swim", {"swimslow", "swimming", "swim"}, 0},
+                {"wade", {"footstepswater", "footstepwater", "wade", "watersplashsmall"}, 0},
+                {"fishbite", {"fishbite", "fishingbobber", "bobbersplash", "bobber"}, 3355},
+            };
+            std::string found;
+            for (const Want& wt : wants) {
+                uint32_t id = wt.fixedId && byId.count(wt.fixedId) ? wt.fixedId : 0;
+                for (const char* k : wt.keys) {
+                    if (id) break;
+                    for (uint32_t r = 0; r < se.records && !id; ++r)   // in table order: the same pick every run
+                        if (has(lower(se.str(r, 2)), k) || has(lower(se.str(r, 3)), k)) id = se.u32(r, 0);
+                }
+                if (!id) continue;
+                w.txt += std::string("L\t") + wt.kind + "\t" + std::to_string(id) + "\n";
+                w.used.insert(id);
+                found += std::string(" ") + wt.kind + "=" + w.nameOf(id);
+            }
+            std::printf("  liquid sounds:%s\n", found.empty() ? " none found" : found.c_str());
+        }
         FILE* tf = std::fopen((base + "sounds.txt").c_str(), "wb");
         if (tf) { std::fwrite(w.txt.data(), 1, w.txt.size(), tf); std::fclose(tf); }
         writeWorldBank(data, so, w, base + "world.w3ds");

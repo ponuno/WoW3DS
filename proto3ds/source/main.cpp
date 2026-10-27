@@ -22,6 +22,7 @@
 #include "hud_game.hpp"
 #include "pad.hpp"
 #include "portal.hpp"
+#include "swim.hpp"
 #include "action_layout.hpp"
 #include "ui_assets.hpp"
 #include "ui_render.hpp"
@@ -78,6 +79,14 @@ static LoginFlow g_login;
 // Marker colours (0xAABBGGRR).
 static const u32 kColUnit = 0xFF2896FF, kColNpc = 0xFF60E0A0, kColDead = 0xFF707070, kColPlayer = 0xFFFF8C3C,
                  kColSelf = 0xFF40FF40, kColObject = 0xFF3CDCE6;
+
+// A fishing bobber (stage 5.26) rides the waves, and dips when a fish bites (SMSG_GAMEOBJECT_CUSTOM_ANIM).
+static float goBob(const w3n::WorldObject& o, uint32_t nowMs) {
+    if (o.field(w3n::UF::GAMEOBJECT_TYPE_ID) != 17) return 0.0f;
+    float z = 0.05f * sinf((float)(nowMs % 2000) / 2000.0f * 6.2831853f);
+    if (o.customAnimMs && nowMs - o.customAnimMs < 900) z -= 0.25f * sinf((float)(nowMs - o.customAnimMs) / 900.0f * 3.14159265f);
+    return z;
+}
 
 // Units with a creature display in the pack, nearest first (models are drawn up to kCreatureRange).
 static constexpr float kCreatureRange = 110.0f;
@@ -154,7 +163,7 @@ static void collectCreatures(w3n::GameSession& g, uint32_t nowMs, const float ca
         CreatureSeen c;
         c.guid = guid;
         c.displayId = did;
-        c.pos[0] = p[0]; c.pos[1] = p[1]; c.pos[2] = p[2];
+        c.pos[0] = p[0]; c.pos[1] = p[1]; c.pos[2] = p[2] + goBob(o, nowMs);
         c.yaw = yaw;
         float scale = o.fieldF(w3n::UF::OBJECT_SCALE_X);
         c.scale = (scale > 0.05f && scale < 20.0f) ? scale : 1.0f;
@@ -179,6 +188,7 @@ static void buildMarkers(w3n::GameSession& g, uint32_t nowMs, const float camPos
         Marker mk;
         float yaw;
         o.positionAt(nowMs, mk.pos, &yaw);
+        if (!unit) mk.pos[2] += goBob(o, nowMs);
         float dx = mk.pos[0] - camPos[0], dy = mk.pos[1] - camPos[1];
         if (dx * dx + dy * dy > r2) continue;
         mk.yaw = yaw;
@@ -414,6 +424,7 @@ int main() {
     // Online character state (stage 5): feet position, jump, last held direction.
     float pl[3] = {0, 0, 0}, plVz = 0;
     bool airborne = false, jumped = false, wasOnlineWalk = false, onFloor = false, wasFlight = false, wasFlightSent = false;
+    swim::State swimState;           // stage 5.26: momentum of a plunge, floating back up
     bool wallHit = false;          // a wall stopped/deflected this frame's step (HUD)
     float wallUs = 0, wallUsShown = 0;   // wall test time accumulated per HUD refresh
     uint32_t heldDir = 0;
@@ -771,6 +782,7 @@ int main() {
                     beginLoading(game->mapId(), false);   // the destination is not streamed yet: wait for it
                 ride.guid = 0;
                 memcpy(pl, tp, sizeof pl);
+                swimState = swim::State();   // (the mover's reset dropped the swimming flag: the water there decides again)
                 airborne = jumped = false;
                 plVz = 0;
                 heldDir = 0;
@@ -892,6 +904,7 @@ int main() {
             if (flightNow) {
                 // handled above
             } else if (onlineWalk) {
+                soundReqs.clear();   // this frame's sounds (the movement below may add a splash)
                 // --- ships: the server may have put us on one (login, a zeppelin transfer); we carry our offset with it
                 if (!ride.guid) {
                     const w3n::WorldObject* me = game->objects.find(game->selfGuid());
@@ -935,6 +948,20 @@ int main() {
                     }
                     return streamerFloorHeight(x, y, zref, g, onF);
                 };
+                // Water walking (ghosts, the spell): the surface of a liquid is a floor to walk on (stage 5.26).
+                const bool waterWalker = (game->mover.info().flags & w3n::MoveFlag::WaterWalking) != 0;
+                auto floorW = [&](float x, float y, float zref, float* g, bool* onF = nullptr) -> bool {
+                    bool ok = floorQ(x, y, zref, g, onF);
+                    if (waterWalker && !ride.guid) {
+                        LiquidHere lq;
+                        if (streamerLiquidAt(x, y, zref, &lq) && (!ok || lq.level > *g) && zref >= lq.level - 1.0f) {
+                            *g = lq.level;
+                            if (onF) *onF = false;
+                            ok = true;
+                        }
+                    }
+                    return ok;
+                };
                 // WoW movement is digital: keys (from the stick by pad.cpp), walk or run. Keys are frozen in the air.
                 uint32_t dir = 0;
                 if (!airborne) {
@@ -954,6 +981,51 @@ int main() {
                 if (dir && !airborne) game->mover.setWalk(po.walk, netMs);
                 uint32_t other = game->mover.info().flags & ~(uint32_t)w3n::MoveFlag::MaskMoving;
                 float speed = game->mover.speeds.forFlags(dir | other);
+                if (game->mover.swimming() && !ride.guid && !loadingWorld) {
+                    // --- swimming (stage 5.26): swim.cpp moves us; the surface, walls and the bottom bound it
+                    swim::World sw;
+                    sw.floor = [&](float x, float y, float z, float* g) { return floorQ(x, y, z, g); };
+                    sw.liquid = [&](float x, float y, float z, float* lv, uint8_t* fl) {
+                        LiquidHere lq;
+                        if (!streamerLiquidAt(x, y, z, &lq)) return false;
+                        *lv = lq.level; *fl = lq.flags;
+                        return true;
+                    };
+                    sw.walls = [&](float fx, float fy, float z, float* tx, float* ty) {
+                        u64 w0 = svcGetSystemTick();
+                        wallHit |= streamerCollideMove(fx, fy, z, tx, ty);
+                        wallUs += (float)(ticksToMs(svcGetSystemTick() - w0) * 1000.0);
+                    };
+                    swim::Input si;
+                    si.dt = dt;
+                    memcpy(si.pos, pl, sizeof si.pos);
+                    si.yaw = charYaw;
+                    si.dir = dir;
+                    si.speed = dir ? speed : game->mover.speeds.swim;   // swimming straight up: the swim speed
+                    si.camPitch = cam.pitch;
+                    si.ascend = po.ascend && !uiOut.blockJump;
+                    si.jump = po.jump && !uiOut.blockJump;
+                    si.rooted = game->mover.rooted();
+                    swim::Result sr = swim::step(swimState, sw, si);
+                    if (sr.jumpOut) {   // out of the water with a jump: STOP_SWIM, then JUMP
+                        game->mover.stopSwim(netMs);
+                        game->mover.update(dir, pl[0], pl[1], pl[2], charYaw, netMs);
+                        game->mover.jump(netMs);
+                        airborne = jumped = true;
+                        plVz = 7.9555473f;
+                        heldDir = dir;
+                    } else {
+                        memcpy(pl, sr.pos, sizeof pl);
+                        if (sr.stop) {
+                            game->mover.stopSwim(netMs);
+                            if (floorQ(pl[0], pl[1], pl[2], &ground) && ground < pl[2] - 1.0f) { airborne = true; jumped = false; plVz = 0; }
+                            else if (floorQ(pl[0], pl[1], pl[2], &ground)) pl[2] = ground;
+                            swimState = swim::State();
+                        } else {
+                            game->mover.setSwimPitch(sr.pitch, netMs);
+                        }
+                    }
+                } else {
                 if (dir) {
                     float fx = (dir & w3n::MoveFlag::Forward) ? 1.f : (dir & w3n::MoveFlag::Backward) ? -1.f : 0.f;
                     float sx = (dir & w3n::MoveFlag::StrafeLeft) ? 1.f : (dir & w3n::MoveFlag::StrafeRight) ? -1.f : 0.f;
@@ -963,11 +1035,11 @@ int main() {
                     u64 w0 = svcGetSystemTick();
                     wallHit = ride.guid ? false : streamerCollideMove(pl[0], pl[1], pl[2], &nx, &ny);   // no walls on a ship (yet)
                     wallUs += (float)(ticksToMs(svcGetSystemTick() - w0) * 1000.0);
-                    if (floorQ(nx, ny, pl[2], &ground)) { pl[0] = nx; pl[1] = ny; }
+                    if (floorW(nx, ny, pl[2], &ground)) { pl[0] = nx; pl[1] = ny; }
                     else if (!airborne) dir = 0;   // never walk onto an unloaded tile
                 }
                 // Ground = terrain or a building floor within a step of the feet (stairs, upper floors).
-                bool haveGround = floorQ(pl[0], pl[1], pl[2], &ground, &onFloor);
+                bool haveGround = floorW(pl[0], pl[1], pl[2], &ground, &onFloor);
                 if (loadingWorld) { haveGround = false; airborne = false; plVz = 0; }   // frozen until the ground is there
                 if (po.jump && !uiOut.blockJump && !airborne && !game->mover.rooted() && !loadingWorld) {
                     game->mover.update(dir, pl[0], pl[1], pl[2], charYaw, netMs);
@@ -980,10 +1052,26 @@ int main() {
                     jumped = false;
                     plVz = 0;
                 }
+                // Into the water (stage 5.26): feet deeper than W3D_SWIM_DEPTH under a surface - walking down a lake's
+                // bed, or falling / jumping in (the fall ends with START_SWIM: no landing, no fall damage).
+                LiquidHere lq;
+                auto deepWater = [&]() {
+                    return !ride.guid && !loadingWorld && !waterWalker && !game->mover.rooted() &&
+                           streamerLiquidAt(pl[0], pl[1], pl[2], &lq) && swim::deepEnough(lq.level, pl[2]);
+                };
                 if (airborne) {
                     plVz -= 19.291105f * dt;   // the client's gravity
                     pl[2] += plVz * dt;
-                    if (haveGround && plVz < 0 && pl[2] <= ground) {
+                    if (deepWater()) {
+                        swimState = swim::State();
+                        swimState.vz = std::max(plVz * 0.5f, -12.0f);   // the plunge carries on a little
+                        swimState.surfacing = true;
+                        game->mover.update(dir, pl[0], pl[1], pl[2], charYaw, netMs);
+                        game->mover.startSwim(netMs);
+                        soundWorld.splash(pl, -plVz, netMs, soundReqs);
+                        airborne = jumped = false;
+                        plVz = 0;
+                    } else if (haveGround && plVz < 0 && pl[2] <= ground) {
                         pl[2] = ground;
                         airborne = false;
                         if (jumped) game->mover.land(ground, netMs);
@@ -991,7 +1079,15 @@ int main() {
                     }
                 } else if (haveGround) {
                     pl[2] = ground;
+                    if (deepWater()) {   // waded in deep enough: float up to the surface
+                        swimState = swim::State();
+                        swimState.surfacing = true;
+                        game->mover.update(dir, pl[0], pl[1], pl[2], charYaw, netMs);
+                        game->mover.startSwim(netMs);
+                        soundWorld.splash(pl, 2.0f, netMs, soundReqs);
+                    }
                 }
+                }   // not swimming
                 // Which ship are we on? (standing on a deck, or still in the air above the one we were on)
                 {
                     uint64_t on = 0;
@@ -1032,8 +1128,12 @@ int main() {
                 game->mover.update(dir, pl[0], pl[1], pl[2], charYaw, netMs);
                 // Sounds of the world around the character (heard from the character, facing the camera's way)
                 audio::setListener(pl[0], pl[1], pl[2], cam.yaw);
-                soundReqs.clear();
-                soundWorld.update(*game, pl, dir != 0, !airborne, po.walk, netMs, soundReqs);
+                int inWater = game->mover.swimming() ? 2 : 0;
+                if (!inWater) {
+                    LiquidHere lw;
+                    if (streamerLiquidAt(pl[0], pl[1], pl[2], &lw) && lw.level > pl[2] + 0.15f && lw.kind() <= W3D_LIQUID_OCEAN) inWater = 1;
+                }
+                soundWorld.update(*game, pl, dir != 0, !airborne, po.walk, netMs, soundReqs, inWater);
                 for (const SoundReq& q : soundReqs) {
                     if (q.stop) audio::stopTag(q.tag);
                     else audio::playAt(q.sound, q.x, q.y, q.z, q.self, q.tag, q.gain);
@@ -1185,6 +1285,15 @@ int main() {
             consoleClear();
         }
 
+        // --- under a liquid's surface? (stage 5.26: fog in the water's colour, short sight)
+        {
+            LiquidHere lc;
+            rs.underwater = streamerLiquidAt(cam.pos[0], cam.pos[1], cam.pos[2], &lc) && cam.pos[2] < lc.level - 0.05f;
+            if (rs.underwater) {
+                memcpy(rs.waterFog, lc.look.fog, 3);
+                rs.waterFogEnd = lc.look.fogEnd;
+            }
+        }
         // --- stream, then draw
         streamerUpdate(cam.pos, cam.drawDist);
         fc = FrameCounters();
@@ -1199,7 +1308,7 @@ int main() {
             for (int eye = 0; eye < (stereo ? 2 : 1); ++eye) {
                 C3D_RenderTarget* t = eye == 0 ? left : topRight;
                 if (stereo) rendererSetEye(eye == 0 ? -iod : iod);
-                C3D_RenderTargetClear(t, C3D_CLEAR_ALL, 0x8CB8E8FF, 0);
+                C3D_RenderTargetClear(t, C3D_CLEAR_ALL, rendererClearColor(rs), 0);
                 C3D_FrameDrawOn(t);
                 rendererDraw(t, cam, rs, fc, &markers, &creatures);
                 uiDraw(hud, kHudW);
@@ -1267,7 +1376,8 @@ int main() {
             printf("\x1b[13;1Hwalls %-7s %4.0fus coll %4luKB%s     ", walk ? (wallHit ? "CONTACT" : "clear") : "off",
                    wallUsShown, (unsigned long)(s.collBytes / 1024), s.collFailed ? " NOMEM" : "");
             static const char* kDetail[3] = {"near", "norm", "far"};
-            printf("\x1b[14;1H%s dist %3.0f doodads %-3s %-4s fog %-3s  ", walk ? (onFloor ? "FLOOR" : "WALK ") : "FLY  ", cam.drawDist,
+            printf("\x1b[14;1H%s dist %3.0f doodads %-3s %-4s fog %-3s  ",
+                   walk ? (g_login.online() && g_login.game().mover.swimming() ? "SWIM " : onFloor ? "FLOOR" : "WALK ") : "FLY  ", cam.drawDist,
                    rs.doodads ? "on" : "off", kDetail[detailIdx], rs.fog ? "on" : "off");
             printf("\x1b[15;1H%-40s", bench.running ? "BENCHMARK RUNNING (40 s)..." : "Y: 40 s streaming benchmark");
             printf("\x1b[17;1HCirclePad move/turn CStick look   ");

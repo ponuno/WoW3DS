@@ -306,6 +306,35 @@ int main(int argc, char** argv) {
             walkBad += wallBad + (cases == 0);
         }
     }
+    // Stage 5.26: the liquid queries of converter/tests/gen_water_data.py (env LIQUID_EXPECT=expect.txt, Q lines)
+    // through the real streamerLiquidAt() (LIQD loaded with the tiles; feet at the surface).
+    const char* lq = std::getenv("LIQUID_EXPECT");
+    if (lq && *lq) {
+        std::ifstream ef(lq);
+        std::string line;
+        int n = 0, wrong = 0;
+        while (std::getline(ef, line)) {
+            if (line.size() < 2 || line[0] != 'Q') continue;
+            float x, y, level; int wet, flags;
+            if (std::sscanf(line.c_str() + 2, "%f %f %d %d %f", &x, &y, &wet, &flags, &level) != 5) continue;
+            float c2[3] = {x, y, 90.0f};
+            for (int f = 0; f < 600 && !streamerTileReadyAt(x, y); ++f) {
+                streamerUpdate(c2, 250.0f);
+                streamerEndFrame();
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            LiquidHere h;
+            const bool got = streamerLiquidAt(x, y, wet ? level : 80.0f, &h);
+            ++n;
+            if (got != (wet != 0) || (got && (h.flags != flags || std::fabs(h.level - level) > 0.05f))) {
+                ++wrong;
+                std::printf("liquid FAIL (%.2f, %.2f): %d flags %d level %.2f, want %d %d %.2f\n", x, y, got, got ? h.flags : 0,
+                            got ? h.level : 0.0f, wet, flags, level);
+            }
+        }
+        std::printf("liquid queries through the streamer: %d, %d wrong\n", n, wrong);
+        walkBad += wrong + (n == 0);
+    }
     streamerShutdown();
     size_t leakLin = stubLinearUsed(), leakTex = stubTexturesLive();
     std::printf("after shutdown: linear in use %zu bytes, textures alive %zu\n", leakLin, leakTex);

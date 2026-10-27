@@ -53,144 +53,6 @@ uint32_t addPlaceholderTexture(PackWriter& pack, uint8_t fmt) {
 }
 
 
-// ---------------------------------------------------------------- water
-// Procedural liquid textures (one per W3dLiquid), shared by all tiles.
-static uint32_t addLiquidTexture(PackWriter& pack, int liquid, uint8_t fmt) {
-    static const char* names[4] = {"<liquid-water>", "<liquid-ocean>", "<liquid-magma>", "<liquid-slime>"};
-    static const uint8_t base[4][3] = {{60, 105, 150}, {35, 75, 125}, {230, 90, 20}, {80, 160, 40}};
-    uint32_t id = w3d_fnv1a(names[liquid]);
-    if (pack.has(W3D_ENTRY_TEXTURE, id)) return id;
-    Image im;
-    im.w = im.h = 64;
-    im.rgba.resize(64 * 64 * 4);
-    for (int y = 0; y < 64; ++y)
-        for (int x = 0; x < 64; ++x) {
-            // Tileable ripples: sum of sines with integer periods.
-            float t = 6.2831853f / 64.0f;
-            float n = 0.5f + 0.18f * std::sin(t * (2 * x + 3 * y)) + 0.14f * std::sin(t * (5 * x - 2 * y)) +
-                      0.10f * std::sin(t * (7 * y + x));
-            uint8_t* p = &im.rgba[(y * 64 + x) * 4];
-            for (int c = 0; c < 3; ++c) p[c] = (uint8_t)std::clamp(base[liquid][c] * (0.6f + 0.8f * n), 0.0f, 255.0f);
-            p[3] = 255;
-        }
-    pack.add(W3D_ENTRY_TEXTURE, id, encodeTexture(im, 64, fmt, false));
-    return id;
-}
-
-void emitWater(const Options& o, const wowee::pipeline::ADTTerrain& adt, float minX, float minY, PackWriter& pack,
-               ConvStats& st) {
-    struct WV { float p[3]; uint8_t a; float uv[2]; };
-    std::vector<WV> verts;
-    std::map<std::pair<int, int>, std::vector<uint32_t>> lists;  // (region, liquid)
-    static const uint8_t kAlpha[4] = {150, 175, 255, 205};
-
-    for (int cy = 0; cy < 16; ++cy)
-        for (int cx = 0; cx < 16; ++cx) {
-            const auto& w = adt.waterData[cy * 16 + cx];
-            for (const auto& L : w.layers) {
-                int liquid = std::min<int>(L.liquidType, 3);
-                int vw = L.width + 1, vh = L.height + 1;
-                if ((int)L.heights.size() < vw * vh) continue;
-                uint32_t base = (uint32_t)verts.size();
-                for (int j = 0; j < vh; ++j)
-                    for (int i = 0; i < vw; ++i) {
-                        int row = L.y + j, col = L.x + i;
-                        float gridX = (float)cy * 8.0f + (float)row, gridY = (float)cx * 8.0f + (float)col;
-                        WV v{};
-                        v.p[0] = (1.0f - gridX / 128.0f) * TS;
-                        v.p[1] = (1.0f - gridY / 128.0f) * TS;
-                        float hgt = L.heights[j * vw + i];
-                        v.p[2] = std::isfinite(hgt) ? hgt : L.maxHeight;
-                        v.a = kAlpha[liquid];
-                        v.uv[0] = (TS - v.p[1]) / 8.0f;
-                        v.uv[1] = v.p[0] / 8.0f;
-                        verts.push_back(v);
-                    }
-                auto& lst = lists[{(cy / 4) * 4 + cx / 4, liquid}];
-                for (int j = 0; j < L.height; ++j)
-                    for (int i = 0; i < L.width; ++i) {
-                        // mask: one byte per layer row, bit = column (layer-relative)
-                        if (j < (int)L.mask.size() && !((L.mask[j] >> i) & 1)) continue;
-                        uint32_t a = base + j * vw + i, b = a + 1, c = a + vw, d = c + 1;
-                        for (auto tri : {std::array<uint32_t, 3>{a, c, b}, std::array<uint32_t, 3>{b, c, d}}) {
-                            const float* p0 = verts[tri[0]].p; const float* p1 = verts[tri[1]].p; const float* p2 = verts[tri[2]].p;
-                            float cz = (p1[0] - p0[0]) * (p2[1] - p0[1]) - (p1[1] - p0[1]) * (p2[0] - p0[0]);
-                            if (cz < 0) std::swap(tri[1], tri[2]);
-                            lst.insert(lst.end(), tri.begin(), tri.end());
-                        }
-                    }
-            }
-        }
-    size_t total = 0;
-    for (auto& [k, l] : lists) total += l.size();
-    if (total == 0 || verts.size() > 65535) return;
-
-    float zmin = 1e30f, zmax = -1e30f;
-    for (auto& v : verts) { zmin = std::min(zmin, v.p[2]); zmax = std::max(zmax, v.p[2]); }
-    W3dWaterHeader h{};
-    h.tileX = (uint32_t)o.tileX; h.tileY = (uint32_t)o.tileY;
-    h.origin[0] = minX; h.origin[1] = minY; h.origin[2] = zmin;
-    float zr = std::max(zmax - zmin, 1.0f);
-    h.posOffset[0] = TS * 0.5f; h.posOffset[1] = TS * 0.5f; h.posOffset[2] = zr * 0.5f;
-    h.posScale[0] = TS * 0.5f / 32767.0f; h.posScale[1] = h.posScale[0]; h.posScale[2] = zr * 0.5f / 32767.0f;
-
-    std::vector<uint32_t> texIds;
-    std::map<int, uint16_t> liquidSlot;
-    std::vector<W3dWaterBatch> batches;
-    std::vector<uint16_t> indices;
-    for (auto& [key, lst] : lists) {
-        if (lst.empty()) continue;
-        int liquid = key.second;
-        if (!liquidSlot.count(liquid)) {
-            liquidSlot[liquid] = (uint16_t)texIds.size();
-            texIds.push_back(addLiquidTexture(pack, liquid, o.texFormat));
-        }
-        W3dWaterBatch b{};
-        b.liquid = (uint16_t)liquid;
-        b.tex = liquidSlot[liquid];
-        b.firstIndex = (uint32_t)indices.size();
-        b.indexCount = (uint32_t)lst.size();
-        for (int c = 0; c < 3; ++c) { b.bmin[c] = 1e30f; b.bmax[c] = -1e30f; }
-        for (uint32_t i : lst) {
-            indices.push_back((uint16_t)i);
-            for (int c = 0; c < 3; ++c) {
-                float v = c == 2 ? verts[i].p[2] - zmin : verts[i].p[c];
-                b.bmin[c] = std::min(b.bmin[c], v); b.bmax[c] = std::max(b.bmax[c], v);
-            }
-        }
-        batches.push_back(b);
-    }
-    std::vector<W3dTerrainVertex> qv(verts.size());
-    for (size_t i = 0; i < verts.size(); ++i) {
-        auto& v = verts[i];
-        auto q = [&](float val, int c) {
-            return (int16_t)std::clamp((int)std::lround((val - h.posOffset[c]) / h.posScale[c]), -32767, 32767);
-        };
-        qv[i] = {q(v.p[0], 0), q(v.p[1], 1), q(v.p[2] - zmin, 2), 0, 255, 255, 255, v.a,
-                 (int16_t)std::lround(v.uv[0] / W3D_TERRAIN_UV_SCALE), (int16_t)std::lround(v.uv[1] / W3D_TERRAIN_UV_SCALE)};
-    }
-    h.vertexCount = (uint32_t)qv.size();
-    h.indexCount = (uint32_t)indices.size();
-    h.batchCount = (uint32_t)batches.size();
-    h.texCount = (uint32_t)texIds.size();
-    Blob blob;
-    blob.put(h);
-    blob.align(4);
-    size_t offTex = blob.putArray(texIds);
-    blob.align(4);
-    size_t offB = blob.putArray(batches);
-    blob.align(16);
-    size_t offV = blob.putArray(qv);
-    blob.align(4);
-    size_t offI = blob.putArray(indices);
-    blob.align(4);
-    auto* hp = blob.at<W3dWaterHeader>(0);
-    hp->offTexIds = (uint32_t)offTex; hp->offBatches = (uint32_t)offB;
-    hp->offVertices = (uint32_t)offV; hp->offIndices = (uint32_t)offI;
-    pack.add(W3D_ENTRY_WATER, w3d_tile_id(o.tileX, o.tileY), std::move(blob.data));
-    st.waterTris += indices.size() / 3;
-}
-
 struct TVert { float p[3]; uint8_t c[4]; float uv[2]; };
 
 static bool claimPlacement(const Options& o, std::unordered_set<uint32_t>& seen, uint32_t uid, float x, float y);
@@ -235,7 +97,7 @@ bool convertTile(const Options& o, const DataDir& data, PackWriter& pack, ConvSt
                 placeWmo(pack, data, adt.wmoNames[p.nameId], pos, rot, p.doodadSet, o, st, modelFor, out);
             }
         };
-    return emitTile(o, adt, texIds, mtexToSlot, modelFor, pack, st, wmoPlace);
+    return emitTile(o, adt, texIds, mtexToSlot, modelFor, pack, st, wmoPlace, &bytes);
 }
 
 bool placementOwner(const Options& o, float x, float y, int& tx, int& ty) {
@@ -256,7 +118,8 @@ static bool claimPlacement(const Options& o, std::unordered_set<uint32_t>& seen,
 
 bool emitTile(const Options& o, const wowee::pipeline::ADTTerrain& adt, const std::vector<uint32_t>& texIds,
               const std::vector<uint16_t>& mtexToSlot, const std::function<uint32_t(const std::string&)>& modelFor,
-              PackWriter& pack, ConvStats& st, const std::function<void(std::vector<W3dPlacement>&)>& wmoPlace) {
+              PackWriter& pack, ConvStats& st, const std::function<void(std::vector<W3dPlacement>&)>& wmoPlace,
+              const std::vector<uint8_t>* adtBytes) {
     // Tile min corner in render space (WoWee terrain_mesh.cpp convention).
     const float minX = (32.0f - (float)o.tileY - 1.0f) * TS;
     const float minY = (32.0f - (float)o.tileX - 1.0f) * TS;
@@ -447,7 +310,7 @@ bool emitTile(const Options& o, const wowee::pipeline::ADTTerrain& adt, const st
     st.terrainVerts += qv.size();
     ++st.tiles;
 
-    emitWater(o, adt, minX, minY, pack, st);
+    collectAdtLiquids(o, adtBytes, adt, st);   // written with the buildings' liquids by emitLiquids() after all tiles
 
     // ---- doodads
     std::vector<W3dPlacement> placements;

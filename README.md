@@ -17,6 +17,9 @@ server).
   (collision from WMO and M2 data); continents and instance maps as separate packs (`map<ID>.w3dp`); dungeons are
   WDT-only maps converted from their global WMO; in-game **loading screens** and a loading gate that keeps the character
   frozen until the ground and its collision are ready.
+- **Water:** lakes, rivers, the sea, lava and slime of the terrain and of buildings (Stormwind's canals, dungeon pools)
+  with the game's own animated textures and Light.dbc colours; swimming (diving with the camera, swimming up, jumping
+  out), falling into water, water walking, the underwater view, breath / fatigue bars, drowning and lava damage, fishing.
 - **Characters and creatures:** skinned, animated creature and player models (race, skin, face, hair, armour layers,
   helmets, weapons), ships and zeppelins, ordinary game objects (event decorations, chests, ...).
 - **Gameplay client:** login, realm and character screens, chat, targeting, auto-attack, spells and action bar, loot,
@@ -122,6 +125,9 @@ Copy the output to the SD card as `sdmc:/3ds/w3dproto/` (`test.w3dp`, `map<ID>.w
 the text files the converter writes next to the packs), then start `w3dproto.3dsx` through the Homebrew Launcher.
 
 ## Tests (no console and no game data needed)
+
+Liquids: `converter/tests/run_water_tests.sh <build dir>`, `proto3ds/tests/run_swim.sh`, and `water_test` inside
+`net/tests/run_stage5.sh`.
 
 ```
 converter/tests/run_wmo_tests.sh <build dir>        buildings, collision, previews

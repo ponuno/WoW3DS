@@ -127,6 +127,11 @@ bool convertDungeon(const Options& optIn, const DataDir& data, PackWriter& pack,
         for (const auto& t : tris)
             for (int k = 0; k < 3; ++k) zmin = std::min(zmin, t.v[k * 3 + 2]);
     for (auto& kv : st.collTris) byTile[kv.first];   // collision-only tiles get an (empty) placement list too
+    for (auto& kv : st.liquids) {                     // pools and rivers of the building (stage 5.26)
+        byTile[kv.first];
+        for (const auto& q : kv.second.quads)
+            for (int k = 0; k < 4; ++k) zmin = std::min(zmin, q.p[k][2]);
+    }
     int ctx, cty;
     if (tileOf(0.0f, 0.0f, ctx, cty)) byTile[w3d_tile_id(ctx, cty)];   // the middle of the map: where entrances usually are
     if (zmin > 1e29f) zmin = 0;

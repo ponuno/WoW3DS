@@ -273,7 +273,8 @@ uint64_t GameSession::softInteract(const float pos[3], float yaw, uint32_t nowMs
         if (o.self || !o.hasPos || (o.type != ObjType::Unit && o.type != ObjType::GameObject)) continue;
         const char* v = useVerb(o);
         if (!v) continue;
-        float range = o.type == ObjType::Unit && o.dead() ? 5.0f : 5.5f;
+        const bool bobber = o.type == ObjType::GameObject && o.field(UF::GAMEOBJECT_TYPE_ID) == 17;   // ours (useVerb)
+        float range = bobber ? (float)kFishingRange : o.type == ObjType::Unit && o.dead() ? 5.0f : 5.5f;
         float p[3];
         o.positionAt(nowMs, p);
         float dx = p[0] - pos[0], dy = p[1] - pos[1], dz = p[2] - pos[2];
@@ -281,6 +282,10 @@ uint64_t GameSession::softInteract(const float pos[3], float yaw, uint32_t nowMs
         if (d > range) continue;
         float a = d < 0.5f ? 0.0f : std::fabs(std::remainder(std::atan2(dy, dx) - yaw, 6.2831853f));
         float key = d + (a > 1.5708f ? 4.0f : 0.0f) + (o.type == ObjType::GameObject ? 0.5f : 0.0f);   // in front, units first
+        if (bobber) {   // a bite beats everything; else anything near comes first
+            key = fishBiting(nowMs) ? -1.0f : 50.0f;
+            v = fishBiting(nowMs) ? "Catch" : "Reel in";
+        }
         if (key < bestKey) { bestKey = key; best = g; bestVerb = v; }
     }
     if (verb) *verb = bestVerb;

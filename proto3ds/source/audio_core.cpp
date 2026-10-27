@@ -332,6 +332,7 @@ bool SoundTables::load(const char* path) {
         else if (c[0] == "F" && c.size() >= 3) footstep_[num(c[1])] = num(c[2]);
         else if (c[0] == "Q" && c.size() >= 7) visual_[num(c[1])] = {num(c[2]), num(c[3]), num(c[4]), num(c[5]), num(c[6])};
         else if (c[0] == "P" && c.size() >= 3) spellVisual_[num(c[1])] = num(c[2]);
+        else if (c[0] == "L" && c.size() >= 3) liquid_[c[1]] = num(c[2]);
     }
     fclose(f);
     loaded_ = true;
@@ -355,6 +356,11 @@ uint32_t SoundTables::footstep(uint32_t id) const {
     if (it == footstep_.end()) it = footstep_.find(0);
     if (it == footstep_.end() && !footstep_.empty()) it = footstep_.begin();
     return it == footstep_.end() ? 0 : it->second;
+}
+
+uint32_t SoundTables::liquid(const char* kind) const {
+    auto it = liquid_.find(kind);
+    return it == liquid_.end() ? 0 : it->second;
 }
 
 const SpellSounds* SoundTables::spell(uint32_t spellId) const {

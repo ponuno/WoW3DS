@@ -77,6 +77,7 @@ struct PadOut {
     bool centerCamera = false;
     // fixed actions
     bool jump = false, cancel = false, interact = false, context = false, menu = false, freeCamera = false;
+    bool ascend = false;              // the jump button held: swims up (stage 5.26)
     // classic extras
     bool nextTarget = false, toggleAttack = false, chat = false, nextSet = false;
     // hotbar

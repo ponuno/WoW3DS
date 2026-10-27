@@ -98,6 +98,10 @@ void GameSession::attach(WorldClient& wc, uint32_t nowMs) {
     auction = AuctionWindow();
     trade = TradeState();
     mailTextAsked_.clear();
+    for (MirrorTimer& m : mirror) m = MirrorTimer();
+    envDamageTaken = lastEnvDamageMs = 0;
+    fishBiteMs = 0;
+    fishBiteGuid = 0;
     const float* p = wc.position();
     mover = Mover();   // a new session: default speeds, no water walking / walk mode from the last one
     mover.reset(p[0], p[1], p[2], wc.orientation(), nowMs);
@@ -289,7 +293,7 @@ bool GameSession::handle(uint16_t op, const Bytes& data, uint32_t nowMs) {
                    handleLife(op, data, nowMs) || handleFactions(op, data, nowMs) || handleVendor(op, data, nowMs) ||
                    handleQuests(op, data, nowMs) || handleGroup(op, data, nowMs) || handleFriends(op, data, nowMs) ||
                    handleServices(op, data, nowMs) || handleMail(op, data, nowMs) || handleAuction(op, data, nowMs) ||
-                   handleTrade(op, data, nowMs);
+                   handleTrade(op, data, nowMs) || handleWater(op, data, nowMs);
     }
 }
 

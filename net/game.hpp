@@ -330,6 +330,21 @@ struct TradeState {
     bool open() const { return phase == Phase::Open; }
 };
 
+// ---------------------------------------------------------------- liquids (stage 5.26)
+// The bars at the top of the screen (SMSG_START_MIRROR_TIMER, vMaNGOS Player::SendMirrorTimerStart): u32 type, u32 value
+// (ms left), u32 max, i32 scale (-1: running down a ms per ms; 10: filling back up ten times faster), u8 paused, u32 spell.
+// Types 0 fatigue (deep water), 1 breath (under water), 2 feign death. Drowning, exhaustion, lava and slime damage come
+// as SMSG_ENVIRONMENTALDAMAGELOG (u64 victim, u8 type, u32 damage, absorb, resist; type 0 exhausted, 1 drowning,
+// 2 fall, 3 lava, 4 slime, 5 fire).
+struct MirrorTimer {
+    bool active = false, paused = false;
+    uint32_t maxMs = 0, value = 0, baseMs = 0, spell = 0;
+    int32_t scale = -1;
+    uint32_t valueAt(uint32_t nowMs) const;   // ms left now
+};
+enum : uint8_t { kMirrorFatigue = 0, kMirrorBreath = 1, kMirrorFeign = 2, kMirrorTimers = 3 };
+const char* mirrorTimerName(uint32_t type);   // "Fatigue", "Breath", "Feign Death"
+
 // ---------------------------------------------------------------- death (stage 5.10)
 enum class Life : uint8_t { Alive, Dead, Ghost };
 struct CorpseInfo {
@@ -583,6 +598,19 @@ public:
     uint32_t questsAccepted = 0, questsCompleted = 0, questQueries = 0, questUpdates = 0;
     uint32_t lastQuestInvalid = 0xFFFFFFFFu;
 
+    // ---- liquids and fishing (stage 5.26)
+    MirrorTimer mirror[kMirrorTimers];
+    uint32_t envDamageTaken = 0, lastEnvDamageMs = 0;
+    uint8_t lastEnvDamageType = 0;
+    // Our fishing bobber (GAMEOBJECT_TYPE_FISHINGNODE 17 created by us) in range, 0 = none. When a fish bites the server
+    // plays the splash animation (SMSG_GAMEOBJECT_CUSTOM_ANIM u64 guid, u32 anim) and the bobber must be used within
+    // a few seconds (CMSG_GAMEOBJ_USE -> the loot window); too early or too late: SMSG_FISH_NOT_HOOKED / _ESCAPED.
+    uint64_t fishingBobber() const;
+    bool fishBiting(uint32_t nowMs) const;             // a bite on our bobber in the last kFishBiteMs
+    static constexpr uint32_t kFishBiteMs = 5000, kFishingRange = 45;
+    uint32_t fishBiteMs = 0, fishBites = 0, fishCaughtTries = 0, fishEscaped = 0, fishNotHooked = 0;
+    uint64_t fishBiteGuid = 0;
+
     // ---- party (stage 5.17)
     Party party;
     std::string groupInviteFrom;                       // SMSG_GROUP_INVITE: who invites us (empty = no invitation)
@@ -695,6 +723,7 @@ private:
     bool handleMail(uint16_t opcode, const Bytes& data, uint32_t nowMs);
     bool handleAuction(uint16_t opcode, const Bytes& data, uint32_t nowMs);
     bool handleTrade(uint16_t opcode, const Bytes& data, uint32_t nowMs);
+    bool handleWater(uint16_t opcode, const Bytes& data, uint32_t nowMs);
     std::unordered_map<uint32_t, std::string> mailTexts_;
     std::unordered_set<uint32_t> mailTextAsked_;
     void updateServices(uint32_t nowMs);                 // windows of NPCs / objects we walked away from close

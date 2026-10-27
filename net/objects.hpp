@@ -46,7 +46,7 @@ enum : uint16_t {
     ITEM_FIELD_MAXDURABILITY = 47, CONTAINER_FIELD_NUM_SLOTS = 48, CONTAINER_FIELD_SLOT_1 = 50,
     // corpses
     CORPSE_FIELD_OWNER = 6,
-    GAMEOBJECT_DISPLAYID = 8, GAMEOBJECT_FLAGS = 9, GAMEOBJECT_STATE = 14, GAMEOBJECT_DYN_FLAGS = 19, GAMEOBJECT_TYPE_ID = 21,
+    GAMEOBJECT_CREATED_BY = 6, GAMEOBJECT_DISPLAYID = 8, GAMEOBJECT_FLAGS = 9, GAMEOBJECT_STATE = 14, GAMEOBJECT_DYN_FLAGS = 19, GAMEOBJECT_TYPE_ID = 21,
 };
 }
 
@@ -84,6 +84,7 @@ struct WorldObject {
     uint8_t hitReact = 0;            // 1 wound, 2 critical, 3 dodge, 4 parry, 5 block
     uint32_t emoteMs = 0, emote = 0; // SMSG_EMOTE: a one-shot Emotes.dbc id
     uint32_t castGoMs = 0;           // a spell went off (SMSG_SPELL_GO)
+    uint32_t customAnimMs = 0;       // game objects: SMSG_GAMEOBJECT_CUSTOM_ANIM (the bobber's splash when a fish bites)
     uint32_t castGoSpell = 0;
     bool castGoDirected = false;     // at someone else (the hands point) or around itself
     bool taxiFlight() const { return isUnitLike() && (field(UF::UNIT_FLAGS) & 0x00100000u) != 0; }   // UNIT_FLAG_TAXI_FLIGHT
