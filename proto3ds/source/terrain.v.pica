@@ -1,0 +1,74 @@
+; Terrain / water / sky vertex shader (shared W3dTerrainVertex layout).
+; v0 = s16 position (xyz), v1 = u8 colour (rgb baked light, a = layer-1 weight / opacity), v2 = s16 uv
+; Positions are tile-local after posScale/posOffset; modelView already contains the
+; camera-relative tile translation (computed on the CPU in float32).
+;
+; Fog is computed here, per vertex, from the true view distance (the PICA fog LUT
+; is indexed by depth and misbehaved on hardware). Output colour for world geometry:
+;   x = baked light, y = fog visibility (1 = clear), z = 0, w = vertex alpha
+; and the fragment stages do light * texture, then lerp(fogColour, colour, y).
+; For the sky (fogParams.z = 0) the vertex colour is passed through unchanged.
+
+.fvec projection[4], modelView[4]
+.fvec posScale          ; xyz = position scale, w = uv scale
+.fvec posOffset         ; xyz = position offset
+.fvec uvOffset          ; xy = UV scroll (water), 0 otherwise
+.fvec fogParams         ; x = 1/(end-start), y = end/(end-start), z = 1 world / 0 raw colour
+
+.constf myconst(0.0, 1.0, 0.00392156862745, 0.0)
+.alias  zeros   myconst.xxxx
+.alias  ones    myconst.yyyy
+.alias  inv255  myconst.zzzz
+
+.out outpos position
+.out outtc0 texcoord0
+.out outtc1 texcoord1
+.out outclr color
+
+.alias inpos v0
+.alias inclr v1
+.alias intc  v2
+
+.proc main
+	; r0 = inpos * posScale + posOffset, w = 1
+	mul r0.xyz, posScale.xyz, inpos.xyz
+	add r0.xyz, posOffset.xyz, r0.xyz
+	mov r0.w, ones
+
+	; r1 = modelView * r0  (view space, camera at the origin)
+	dp4 r1.x, modelView[0], r0
+	dp4 r1.y, modelView[1], r0
+	dp4 r1.z, modelView[2], r0
+	dp4 r1.w, modelView[3], r0
+
+	dp4 outpos.x, projection[0], r1
+	dp4 outpos.y, projection[1], r1
+	dp4 outpos.z, projection[2], r1
+	dp4 outpos.w, projection[3], r1
+
+	mul r2, posScale.wwww, intc
+	add r2.xy, uvOffset.xy, r2.xy
+	mov outtc0, r2
+	mov outtc1, r2
+
+	; fog visibility = clamp(y - dist * x, 0, 1), dist = |r1.xyz|
+	dp3 r3.x, r1, r1
+	rsq r3.y, r3.x
+	mul r3.x, r3.x, r3.y          ; dist = d2 * rsq(d2)
+	mul r3.x, fogParams.xxxx, r3.x
+	add r3.x, fogParams.yyyy, -r3.x
+	max r3.x, zeros, r3.x
+	min r3.x, ones, r3.x
+
+	; world colour r4 = (light, fog, 0, alpha); raw colour r5 = inclr / 255
+	mul r5, inv255, inclr
+	mov r4, zeros
+	mov r4.x, r5.x
+	mov r4.y, r3.x
+	mov r4.w, r5.w
+	; outclr = r5 + (r4 - r5) * fogParams.z
+	add r4, r4, -r5
+	mul r4, fogParams.zzzz, r4
+	add outclr, r5, r4
+	end
+.end
