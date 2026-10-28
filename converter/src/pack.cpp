@@ -512,6 +512,16 @@ int printPackInfo(const std::string& path) {
             }
             std::printf("  spell fx: %u spells (%zu with a missile speed), %u visuals (%zu with a missile), %u effect models\n",
                         h.spellCount, withSpeed, h.visualCount, missiles, h.effectCount);
+            {   // 5.35f: a few well-known spells (Fireball, Frostbolt, Smite, Lesser Heal, Wrath, Immolate, Shadow Bolt, Lightning Bolt)
+                const W3dSpellRef* sr = reinterpret_cast<const W3dSpellRef*>(p + h.offSpells);
+                std::printf("  spell fx known:");
+                for (uint32_t id : {133u, 116u, 585u, 2050u, 5176u, 348u, 686u, 403u}) {
+                    bool found = false;
+                    for (uint32_t k = 0; k < h.spellCount && !found; ++k) found = sr[k].spell == id;
+                    std::printf(" %u:%s", id, found ? "yes" : "NO");
+                }
+                std::printf("\n");
+            }
             std::printf("  spell fx: %zu auras, %zu channels, level-up %s, loot sparkle %s\n", states, channels,
                         h.levelUp != W3D_SFX_NONE ? "yes" : "no", h.loot != W3D_SFX_NONE ? "yes" : "no");
         } else if (e[i].type == W3D_ENTRY_COLLISION) {

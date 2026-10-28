@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <map>
 #include <set>
 
@@ -235,7 +236,92 @@ bool convertSpellEffects(const Options& oIn, const DataDir& data, PackWriter& pa
     progressDone("spell effects: %zu spells, %zu visuals, %zu effect models (%zu failed), missile speed column %d, level-up %s, loot %s",
                  outSpells.size(), outVis.size(), effects.size(), failed, spCol, levelUp != W3D_SFX_NONE ? "yes" : "no",
                  loot != W3D_SFX_NONE ? "yes" : "no");
+    std::printf("  spell effects: %zu spells, %zu visuals, %zu effect models (%zu failed), missile speed column %d, level-up %s, loot %s\n",
+                 outSpells.size(), outVis.size(), effects.size(), failed, spCol, levelUp != W3D_SFX_NONE ? "yes" : "no",
+                 loot != W3D_SFX_NONE ? "yes" : "no");
+    std::printf("  spell effects: %zu particle emitters dropped (no rate / life)\n", st.fxEmittersDropped);
     return true;
+}
+
+// 5.35f: what the chain Spell -> SpellVisual -> SpellVisualKit -> SpellVisualEffectName says for some spells (the
+// conversion of real data showed no visual for Fireball): every column of each row on the way, to see where it breaks.
+int explainSpells(const DataDir& data, const std::vector<uint32_t>& ids) {
+    DbcTable spell, sv, svk, fxn;
+    const bool ok = spell.load(data, "Spell.dbc") & sv.load(data, "SpellVisual.dbc") & svk.load(data, "SpellVisualKit.dbc") &
+                    fxn.load(data, "SpellVisualEffectName.dbc");
+    std::printf("Spell.dbc %u x %u, SpellVisual.dbc %u x %u, SpellVisualKit.dbc %u x %u, SpellVisualEffectName.dbc %u x %u\n",
+                spell.records, spell.fields, sv.records, sv.fields, svk.records, svk.fields, fxn.records, fxn.fields);
+    if (!ok) { std::puts("a table is missing"); return 1; }
+    int nameCol = spellNameColumn(spell);
+    std::printf("Spell name column %d -> visual column %d\n", nameCol, nameCol - 5);
+    if (nameCol < 0) nameCol = 120;
+    auto row = [](const DbcTable& t, uint32_t id) -> int {
+        for (uint32_t r = 0; r < t.records; ++r) if (t.u32(r, 0) == id) return (int)r;
+        return -1;
+    };
+    auto dump = [](const char* what, const DbcTable& t, int r, uint32_t from, uint32_t to) {
+        std::printf("  %s row %d:", what, r);
+        for (uint32_t c = from; c < std::min(to, t.fields); ++c) std::printf(" [%u]=%u", c, t.u32((uint32_t)r, c));
+        std::printf("\n");
+    };
+    auto effect = [&](uint32_t e) {
+        const int r = e ? row(fxn, e) : -1;
+        if (r < 0) { std::printf("      effect %u: not in SpellVisualEffectName\n", e); return; }
+        std::printf("      effect %u: name '%s' file '%s'\n", e, fxn.str((uint32_t)r, 1).c_str(), fxn.str((uint32_t)r, 2).c_str());
+        // the model itself: geometry and particle emitters as the converter sees them
+        const std::string m2 = wowee::pipeline::modelPathToM2(fxn.str((uint32_t)r, 2));
+        std::vector<uint8_t> bytes;
+        if (!data.read(m2, bytes)) { std::printf("        %s: not in the data\n", m2.c_str()); return; }
+        wowee::pipeline::M2Model mdl = wowee::pipeline::M2Loader::load(bytes);
+        uint32_t ver = 0;
+        if (bytes.size() >= 8) std::memcpy(&ver, bytes.data() + 4, 4);
+        std::printf("        %s: version %u, %zu vertices, %zu batches, %zu bones, %zu sequences, %zu particle emitters, %zu ribbons\n",
+                    m2.c_str(), ver, mdl.vertices.size(), mdl.batches.size(), mdl.bones.size(), mdl.sequences.size(),
+                    mdl.particleEmitters.size(), mdl.ribbonEmitters.size());
+        auto tr = [](const wowee::pipeline::M2AnimationTrack& t) {
+            char b[96];
+            size_t seqs = t.sequences.size(), keys = 0;
+            float first = 0;
+            bool have = false;
+            for (const auto& q : t.sequences) {
+                keys += q.floatValues.size();
+                if (!have && !q.floatValues.empty()) { first = q.floatValues[0]; have = true; }
+            }
+            std::snprintf(b, sizeof b, "%zu seq / %zu keys, first %s%.2f, global %d", seqs, keys, have ? "" : "none ", first,
+                          (int)t.globalSequence);
+            return std::string(b);
+        };
+        for (size_t k = 0; k < mdl.particleEmitters.size() && k < 6; ++k) {
+            const auto& pe = mdl.particleEmitters[k];
+            std::printf("          emitter %zu: bone %u, tex %u, blend %u, type %u, rate [%s], life [%s], speed [%s]\n", k, pe.bone,
+                        pe.texture, pe.blendingType, pe.emitterType, tr(pe.emissionRate).c_str(), tr(pe.lifespan).c_str(),
+                        tr(pe.emissionSpeed).c_str());
+        }
+    };
+    for (uint32_t id : ids) {
+        std::printf("spell %u\n", id);
+        const int r = row(spell, id);
+        if (r < 0) { std::puts("  not in Spell.dbc"); continue; }
+        std::printf("  name '%s'\n", spell.str((uint32_t)r, (uint32_t)nameCol).c_str());
+        dump("Spell", spell, r, (uint32_t)nameCol - 8, (uint32_t)nameCol);
+        const uint32_t vis = spell.u32((uint32_t)r, (uint32_t)nameCol - 5);
+        const int vr = row(sv, vis);
+        if (vr < 0) { std::printf("  visual %u: not in SpellVisual.dbc\n", vis); continue; }
+        dump("SpellVisual", sv, vr, 0, 16);
+        for (uint32_t c : {1u, 2u, 3u, 4u, 6u}) {
+            const uint32_t kit = sv.u32((uint32_t)vr, c);
+            if (!kit) continue;
+            const int kr = row(svk, kit);
+            std::printf("    kit column %u = %u%s\n", c, kit, kr < 0 ? " (not in SpellVisualKit)" : "");
+            if (kr < 0) continue;
+            dump("  SpellVisualKit", svk, kr, 0, std::min<uint32_t>(svk.fields, 20));
+            for (uint32_t k = 3; k <= 14 && k < svk.fields; ++k)
+                if (const uint32_t e = svk.u32((uint32_t)kr, k); e && row(fxn, e) >= 0) { std::printf("    [%u] ", k); effect(e); }
+        }
+        for (uint32_t c = 7; c <= 8; ++c)
+            if (const uint32_t m = sv.u32((uint32_t)vr, c); m && row(fxn, m) >= 0) { std::printf("    missile column %u ", c); effect(m); }
+    }
+    return 0;
 }
 
 }  // namespace w3d

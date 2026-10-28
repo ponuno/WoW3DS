@@ -235,6 +235,18 @@ float trackMean(const wowee::pipeline::M2AnimationTrack& t, float def) {
     }
     return def;
 }
+// 5.35f: emission rate / life: the first sequence that says something positive (a spell's hand glow keys its rate to 0
+// in some sequences: the mean of the first one could be 0 and the emitter was dropped)
+float trackPositive(const wowee::pipeline::M2AnimationTrack& t, float def) {
+    for (const auto& sq : t.sequences) {
+        if (sq.floatValues.empty()) continue;
+        double sum = 0;
+        for (float v : sq.floatValues) sum += v;
+        const float m = (float)(sum / sq.floatValues.size());
+        if (std::isfinite(m) && m > 0.01f) return m;
+    }
+    return def;
+}
 uint32_t rgba8(const glm::vec3& c, float a) {
     auto b = [](float v) { return (uint32_t)std::clamp((int)std::lround(v * 255.0f), 0, 255); };
     return b(c.r) | b(c.g) << 8 | b(c.b) << 16 | b(a) << 24;
@@ -524,9 +536,9 @@ static uint32_t addModelFromGameImpl(PackWriter& pack, const DataDir& data, cons
             W3dFxEmitter e{};
             e.pos[0] = pe.position.x; e.pos[1] = pe.position.y; e.pos[2] = pe.position.z;
             // (bind pose: the bone matrix is the identity, the position is in model space - as WoWee emitParticles)
-            e.rate = trackMean(pe.emissionRate, 0);
-            e.life = trackMean(pe.lifespan, 0);
-            if (!(e.rate > 0.01f) || !(e.life > 0.01f)) continue;
+            e.rate = trackPositive(pe.emissionRate, 0);
+            e.life = trackPositive(pe.lifespan, 0);
+            if (!(e.rate > 0.01f) || !(e.life > 0.01f)) { ++st.fxEmittersDropped; continue; }
             e.rate = std::min(e.rate, 60.0f);
             e.life = std::min(e.life, 8.0f);
             e.speed = trackMean(pe.emissionSpeed, 0);

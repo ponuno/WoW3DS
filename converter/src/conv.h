@@ -229,7 +229,7 @@ struct ConvStats {
     size_t wmoPlacements = 0, wmoPlacedGroups = 0, wmoDoodads = 0, duplicatesSkipped = 0;
     size_t m2SubsFlipped = 0, wmoSubsFlipped = 0;
     size_t fxModels = 0, fxEmitters = 0, fxGlows = 0;   // stage 5.32
-    size_t fxAnimated = 0;                                // stage 5.35: effect models with baked bone animation
+    size_t fxAnimated = 0, fxEmittersDropped = 0;   // 5.35f: emitters without a rate or a life                                // stage 5.35: effect models with baked bone animation
     size_t creatureModelsOk = 0, creatureModelsFailed = 0, displaysOk = 0, displaysFailed = 0, creatureTris = 0;
     size_t creatureSeqs = 0, creatureKeyBytes = 0, creaturePalettes = 0, creatureBones = 0;
     size_t creatureSrcVerts = 0, creatureLossyVerts = 0;
@@ -349,6 +349,7 @@ bool convertCreatures(const Options& o, const DataDir& data, PackWriter& pack, C
 bool convertGlueScenes(const Options& o, const DataDir& data, PackWriter& pack, ConvStats& st);
 // Spell visuals (stage 5.33, spellfx.cpp): effect models + the SVFX table, into the pack (the pool with --all).
 bool convertSpellEffects(const Options& o, const DataDir& data, PackWriter& pack, ConvStats& st);
+int explainSpells(const DataDir& data, const std::vector<uint32_t>& ids);   // --explain-spell (5.35f)
 // Collision of one doodad placement (st.m2Coll of its model, matrix T(pos)*Rz*Ry*Rx*S like the renderer).
 void addPlacementCollision(const Options& o, ConvStats& st, const W3dPlacement& p);
 // Writes the COLL entries collected by placeWmo / addPlacementCollision (one per tile).

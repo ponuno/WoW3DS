@@ -40,6 +40,7 @@ static void usage() {
         "  --no-doodad-coll      no collision of doodads (fences, tree trunks, model bridges)\n"
         "  --no-fx               no particle emitters and lamp glows on doodads (stage 5.32)\n"
         "  --no-spell-fx         no spell effects with the creatures (stage 5.33)\n"
+        "  --explain-spell L     print the Spell -> SpellVisual -> Kit -> EffectName chain of these spell ids (comma list)\n"
         "  --spell-fx            only the spell effects into -o pack (normally with the creatures / --all)\n"
         "  --doodad-coll-tris N  collision triangle budget per doodad model (96; 0 = all)\n"
         "  --world               every tile of the map (0..63; missing ones are skipped), big packs go through a spill file\n"
@@ -87,6 +88,7 @@ int main(int argc, char** argv) {
     Options o;
     std::string info;
     bool textsOnly = false, uiMode = false, soundMode = false, spellFxMode = false;
+    std::vector<uint32_t> explainIds;
     SoundOptions so;
     UiOptions uo;
     AllOptions ao;
@@ -179,6 +181,15 @@ int main(int argc, char** argv) {
         else if (a == "--ui") uiMode = true;
         else if (a == "--sound") soundMode = true;
         else if (a == "--spell-fx") spellFxMode = true;
+        else if (a == "--explain-spell") {   // 5.35f: comma list of Spell.dbc ids
+            for (const char* q = next(); *q;) {
+                char* e = nullptr;
+                const unsigned long v = std::strtoul(q, &e, 10);
+                if (e == q) break;
+                explainIds.push_back((uint32_t)v);
+                q = *e == ',' ? e + 1 : e;
+            }
+        }
         else if (a == "--sound-events") so.eventsFile = next();
         else if (a == "--no-music") so.music = false;
         else if (a == "--no-ambience") so.ambience = false;
@@ -217,6 +228,10 @@ int main(int argc, char** argv) {
         size_t cut = o.out.find_last_of("\\/");
         return cut == std::string::npos ? std::string() : o.out.substr(0, cut + 1);
     };
+    if (!explainIds.empty()) {
+        if (o.synthetic) { std::fputs("--explain-spell needs --data\n", stderr); return 1; }
+        return explainSpells(data, explainIds);
+    }
     if (allMode) {   // stage 5.27: everything, one shared asset pool
         if (o.synthetic) { std::fputs("--all needs --data\n", stderr); return 1; }
         ao.folder = o.out == "test.w3dp" ? std::string(".") : o.out;
@@ -230,7 +245,7 @@ int main(int argc, char** argv) {
         ConvStats st;
         if (!convertSpellEffects(o, data, pack, st)) return 4;
         if (!pack.write(o.out)) { std::fprintf(stderr, "cannot write %s\n", o.out.c_str()); return 3; }
-        std::printf("  effects: %zu models with %zu particle emitters and %zu glow sprites (%zu animated)\n", st.fxModels, st.fxEmitters, st.fxGlows, st.fxAnimated);
+        std::printf("  effects: %zu models with %zu particle emitters and %zu glow sprites (%zu animated), %zu emitters dropped (no rate / life)\n", st.fxModels, st.fxEmitters, st.fxGlows, st.fxAnimated, st.fxEmittersDropped);
         std::printf("wrote %s\n", o.out.c_str());
         return 0;
     }
@@ -395,7 +410,7 @@ int main(int argc, char** argv) {
                     st.itemDisplays, st.itemLayers, st.itemLayerBytes / 1048576.0, st.itemModels, st.itemModelsFailed,
                     st.itemModelTris, st.itemHelms, st.itemCapes);
     std::printf("  winding: %zu M2 and %zu WMO submeshes flipped to match their normals\n", st.m2SubsFlipped, st.wmoSubsFlipped);
-    std::printf("  effects: %zu models with %zu particle emitters and %zu glow sprites (%zu animated)\n", st.fxModels, st.fxEmitters, st.fxGlows, st.fxAnimated);
+    std::printf("  effects: %zu models with %zu particle emitters and %zu glow sprites (%zu animated), %zu emitters dropped (no rate / life)\n", st.fxModels, st.fxEmitters, st.fxGlows, st.fxAnimated, st.fxEmittersDropped);
     if (st.duplicatesSkipped) std::printf("  %zu duplicate placements skipped (same uniqueId listed by several tiles)\n", st.duplicatesSkipped);
     std::printf("  models: %zu ok, %zu failed, %zu tris total (unique)\n", st.modelsOk, st.modelsFailed, st.modelTrisTotal);
     std::printf("  placements: %zu\n", st.placements);
