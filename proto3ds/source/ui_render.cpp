@@ -16,7 +16,12 @@ struct UiVertex {
 };   // 12 bytes
 
 constexpr int kMaxQuads = 8000;              // per frame, both screens
-constexpr uint32_t kPageBudget = 1600 * 1024; // icon and map pages resident at once (skin and fonts are extra)
+// Icon and map pages resident at once (skin and fonts are extra). 5.35i: the touch screen is drawn only when it changes
+// (~4 times a second), so its pages looked unused between two of its draws and were evicted and read back from the SD
+// card at every redraw (the spell book, the bags and the map show icons of many pages): a stall several times a second.
+// Now a page goes only when it was not drawn for kPageIdleMs, or the hard limit is passed.
+constexpr uint32_t kPageBudget = 4 * 1024 * 1024, kPageHardLimit = 8 * 1024 * 1024;
+constexpr uint64_t kPageIdleMs = 4000;
 
 struct Tex {
     C3D_Tex t;
@@ -24,6 +29,7 @@ struct Tex {
     uint8_t kind = 0;
     int w = 0, h = 0;
     uint32_t bytes = 0, lastFrame = 0;
+    uint64_t lastMs = 0;
 };
 
 DVLB_s* g_dvlb = nullptr;
@@ -88,6 +94,7 @@ Tex* resolve(uint16_t id) {
     if (g_tex.size() < a.packTextures()) g_tex.resize(a.packTextures());
     Tex& t = g_tex[i];
     t.lastFrame = g_frame;
+    t.lastMs = osGetTime();
     if (t.ok) return &t;
     if (t.failed) return nullptr;
     std::vector<uint8_t> blob;
@@ -171,11 +178,16 @@ void uiEndFrame() {
     ++g_frame;
     g_used = 0;
     if (g_stats.bytes <= kPageBudget) return;
-    // least recently drawn icon / map pages first; never one drawn in the last two frames (the GPU may still read it)
+    // least recently drawn icon / map pages first; never one drawn in the last two frames (the GPU may still read it);
+    // under the hard limit only pages idle for kPageIdleMs
+    const uint64_t now = osGetTime();
+    const bool hard = g_stats.bytes > kPageHardLimit;
     std::vector<Tex*> cand;
     for (Tex& t : g_tex)
-        if (t.ok && (t.kind == W3D_UITEX_ICONS || t.kind == W3D_UITEX_MAP) && g_frame - t.lastFrame > 2) cand.push_back(&t);
-    std::sort(cand.begin(), cand.end(), [](const Tex* a, const Tex* b) { return a->lastFrame < b->lastFrame; });
+        if (t.ok && (t.kind == W3D_UITEX_ICONS || t.kind == W3D_UITEX_MAP) && g_frame - t.lastFrame > 2 &&
+            (hard || now - t.lastMs > kPageIdleMs))
+            cand.push_back(&t);
+    std::sort(cand.begin(), cand.end(), [](const Tex* a, const Tex* b) { return a->lastMs < b->lastMs; });
     for (Tex* t : cand) {
         if (g_stats.bytes <= kPageBudget) break;
         freeTex(*t);

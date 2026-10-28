@@ -299,6 +299,11 @@ static void writeReport(const Bench* b, float drawDist, const RenderSettings& rs
         fprintf(f, "  lasting (stage 5.34): now %lu auras, %lu channels, %lu loot sparkles; level-up flashes %lu\n",
                 (unsigned long)la.auras(), (unsigned long)la.channels(), (unsigned long)la.loot(), (unsigned long)la.levelUps());
     }
+    {   // 5.35i: icon / map pages of the interface (a load is a read from the SD card on the main thread)
+        const UiTexStats& u = uiTexStats();
+        fprintf(f, "interface pages: %d resident (%lu KB), %d loads, %d evictions, %d failed\n", u.resident,
+                (unsigned long)(u.bytes / 1024), u.loads, u.evictions, u.failed);
+    }
     fprintf(f, "effects (stage 5.32, level %d): %lu frames with particles / glows, CPU avg %.2f ms, max %.2f ms; peak %lu quads, %lu particles\n\n",
             rs.effects, (unsigned long)g_report.fxFrames, g_report.fxFrames ? g_report.fxMs / g_report.fxFrames : 0.0, g_report.fxPeakMs,
             (unsigned long)g_report.fxPeakQuads, (unsigned long)g_report.fxPeakParticles);
