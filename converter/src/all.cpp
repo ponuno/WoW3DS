@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <thread>
 #include <cstdio>
 #include <cstring>
 #include <random>
@@ -141,6 +142,7 @@ int convertAll(const Options& oIn, const DataDir& data, const AllOptions& ao, Ui
         mi.mapId = id;
         mp.setInfo(mi);
         const size_t tilesBefore = st.tiles;
+        const auto mapStart = std::chrono::steady_clock::now();
         if (isDungeonMap(data, dir)) {
             std::printf("== map %u (%s): an instance (one building)\n", id, dir.c_str());
             if (!convertDungeon(m, data, mp, st)) continue;
@@ -179,6 +181,8 @@ int convertAll(const Options& oIn, const DataDir& data, const AllOptions& ao, Ui
         uint64_t sz = 0;
         if (f) { std::fseek(f, 0, SEEK_END); sz = (uint64_t)std::ftell(f); std::fclose(f); }
         done.push_back({id, dir, file, st.tiles - tilesBefore, sz});
+        std::printf("  map %u (%s) took %.0f s\n", id, dir.c_str(),
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - mapStart).count());
         progressDone("map %u (%s): %zu tiles, %.1f MB; pool so far %.1f MB", id, dir.c_str(), st.tiles - tilesBefore,
                      sz / 1048576.0, pool.storedBytes() / 1048576.0);
     }
@@ -210,6 +214,11 @@ int convertAll(const Options& oIn, const DataDir& data, const AllOptions& ao, Ui
     progressDone("all: %zu maps, pool %.1f MB in %d part(s), maps %.1f MB, in %d min %02d s", done.size(), pool.storedBytes() / 1048576.0,
                  parts, mapBytes / 1048576.0, (int)secs / 60, (int)secs % 60);
     std::printf("all: build %08x, %zu maps:\n", buildId, done.size());
+    {   // 5.35h: where the time went (texture encoding runs on a pool of threads: its CPU seconds overlap the rest)
+        const TexTiming& tt = textureTiming();
+        std::printf("  timing: %.0f s total; game textures %zu: read+decode %.0f s, encode %.0f s of CPU (on %u threads); creature models %.0f s\n",
+                    secs, tt.count, tt.readDecodeSec, tt.encodeSec, std::thread::hardware_concurrency(), st.creatureSec);
+    }
     for (const Done& d : done)
         std::printf("  map%-4u %-24s %5zu tiles %9.1f MB\n", d.id, d.dir.c_str(), d.tiles, d.bytes / 1048576.0);
     std::printf("  pool: %zu textures, %zu models, %zu creature models, %zu displays; %.1f MB; %zu name collisions resolved\n",

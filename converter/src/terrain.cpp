@@ -79,7 +79,7 @@ bool convertTile(const Options& o, const DataDir& data, PackWriter& pack, ConvSt
     for (size_t i = 0; i < adt.textures.size(); ++i) {
         uint32_t id = addTextureFromGame(pack, data, adt.textures[i], o.terrainTex, o.texFormat, false, o.verbose);
         if (id) {
-            if (!pack.has(W3D_ENTRY_TEXTURE, id))
+            if (!textureInPack(pack, id))
                 std::fprintf(stderr, "  BUG: terrain texture %s (id %08x) is not in the pack after adding it\n", adt.textures[i].c_str(), id);
             ++st.texturesOk; mtexToSlot[i] = (uint16_t)texIds.size(); texIds.push_back(id);
         }

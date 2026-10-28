@@ -18,6 +18,7 @@ namespace w3d {
 PackWriter::PackWriter() = default;
 
 PackWriter::~PackWriter() {
+    textureFlush();   // 5.35h: no texture of the pool may still be on its way to this pack
     if (spill_) {
         std::fclose(spill_);
         std::remove(spillPath_.c_str());
@@ -198,6 +199,7 @@ bool PackWriter::writeItems(const std::string& path, const std::vector<const Ite
 }
 
 bool PackWriter::write(const std::string& path) const {
+    textureFlush();
     if (pool_) {   // a map pack: its tiles only, and the PINF naming the pool
         std::vector<const Item*> order = fileOrder();
         return writeItems(path, order, haveInfo_ ? &info_ : nullptr);
@@ -206,6 +208,7 @@ bool PackWriter::write(const std::string& path) const {
 }
 
 int PackWriter::writeParts(const std::string& basePath, uint64_t partBytes) const {
+    textureFlush();
     const std::vector<const Item*> order = fileOrder();
     std::vector<std::vector<const Item*>> parts(1);
     uint64_t used = 0;

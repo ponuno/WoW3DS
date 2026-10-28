@@ -378,7 +378,7 @@ struct Frames { std::vector<uint32_t> ids; float tint = 1.0f; bool game = false;
 const Frames& liquidFrames(const Options& o, const DataDir* data, PackWriter& pack, int liquid, ConvStats& st) {
     static Frames cache[4];
     Frames& f = cache[liquid];
-    if (!f.ids.empty() && pack.has(W3D_ENTRY_TEXTURE, f.ids[0])) return f;   // (a new pack, e.g. the next dungeon: again)
+    if (!f.ids.empty() && textureInPack(pack, f.ids[0])) return f;   // (a new pack, e.g. the next dungeon: again)
     f = Frames();
     static const char* kFmt[4] = {"XTextures\\river\\lake_a.%d.blp", "XTextures\\ocean\\ocean_h.%d.blp",
                                   "XTextures\\lava\\lava.%d.blp", "XTextures\\slime\\slime.%d.blp"};

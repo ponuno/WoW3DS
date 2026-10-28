@@ -194,6 +194,10 @@ struct Image {
 void setEtcQuality(int q);
 struct TexTiming { double readDecodeSec = 0, encodeSec = 0; size_t count = 0; };
 TexTiming& textureTiming();
+// 5.35h: textures are encoded on a thread pool; this waits for all of them and adds them to their packs (PackWriter::write
+// and writeParts call it, and so does a PackWriter going away).
+void textureFlush();
+bool textureInPack(PackWriter& pack, uint32_t id);   // in it, or on its way (being encoded)
 std::vector<uint8_t> encodeTexture(const Image& src, int maxSize, uint8_t fmt, bool wantAlpha);
 // Box-filter downscale by integer factors / pad up: result is w x h.
 Image resizeImage(const Image& src, int w, int h);
