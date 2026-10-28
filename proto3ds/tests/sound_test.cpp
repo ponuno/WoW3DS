@@ -79,11 +79,13 @@ int main(int argc, char** argv) {
     CHECK(d.music().find("/music/m101_0.mp3") != std::string::npos, "night music: %s", d.music().c_str());
     d.musicEnded(5000);
     CHECK(d.music().empty(), "silence after a track");
-    d.update(mt, 87, true, 5500);
-    CHECK(d.music().empty(), "still silent before silMin");
-    d.update(mt, 87, true, 7100);
+    d.update(mt, 87, true, 9500);    // a quarter of silMin, at least 5 s (stage 5.31)
+    CHECK(d.music().empty(), "still silent before the pause ends");
+    d.update(mt, 87, true, 10100);
     CHECK(!d.music().empty(), "next track after the pause");
-    d.update(mt, 1519, false, 8000);
+    CHECK(mt.glue() && mt.glue()->files.size() == 1 && mt.path(mt.glue()->files[0]).find("/music/glue_0.mp3") != std::string::npos,
+          "login screen music");
+    d.update(mt, 1519, false, 11000);
     CHECK(d.ambience().empty() && !d.music().empty(), "Stormwind: own music, no ambience");
 
     // streams

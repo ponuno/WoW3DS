@@ -492,8 +492,19 @@ int main() {
     C3D_RenderTarget* topWide = nullptr;
     C3D_RenderTarget* topRight = nullptr;
     int topModeNow = 0;
+    // VRAM the other modes need, held back from the textures (stage 5.31: a city fills VRAM with textures, and switching to
+    // 800x240 in the settings failed with "not enough VRAM"). 800x240 needs 1.5 MB more than the plain 400x240 target,
+    // 3D 0.75 MB; what the current mode does not use stays reserved so switching works at any time.
+    constexpr size_t kWideBytes = 240 * 800 * 4 * 2, kRightBytes = 240 * 400 * 4 * 2;
+    void* vramReserve = nullptr;
+    auto reserveVram = [&]() {
+        if (vramReserve) { vramFree(vramReserve); vramReserve = nullptr; }
+        const size_t need = topModeNow == 1 ? 0 : topModeNow == 2 ? kWideBytes - kRightBytes : kWideBytes;
+        if (need) vramReserve = vramAlloc(need);
+    };
     auto applyTopMode = [&](int want) {
-        if (want == topModeNow) return;
+        if (want == topModeNow) { if (!vramReserve) reserveVram(); return; }
+        if (vramReserve) { vramFree(vramReserve); vramReserve = nullptr; }
         // leave the old mode
         if (topModeNow == 1) {
             gfxSetWide(false);
@@ -529,6 +540,7 @@ int main() {
                 netNote = "3D: not enough VRAM";
             }
         }
+        reserveVram();
     };
     applyTopMode(padCfg.topMode);
     // Sound: sdmc:/3ds/w3dproto/sound/ from w3dconv --sound (else built-in blips); needs the DSP firmware dump

@@ -243,6 +243,12 @@ void threadMain(void*) {
             m.wanted = inWorld && mv > 0 ? g_dir.music() : std::string();
             a.wanted = inWorld && av > 0 ? g_dir.ambience() : std::string();
             m.gain = mv * g_dir.musicVolume();
+            if (!inWorld && mv > 0 && g_music.glue()) {   // the login / character screens: their theme, looping
+                const snd::SoundSet* gs = g_music.glue();
+                m.wanted = m.playing.find("/music/glue_") != std::string::npos ? m.playing : g_music.path(gs->files[0]);
+                m.gain = mv * gs->volume;
+            }
+            m.loop = !inWorld;
             a.gain = av * g_dir.ambienceVolume();
             steer(m, 1, dt);
             steer(a, 1, dt);

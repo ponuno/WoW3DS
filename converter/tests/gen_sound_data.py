@@ -41,6 +41,8 @@ for name, hz in (("day1", 440), ("day2", 330), ("night1", 220)):
     src = os.path.join(out, "tmp", name + ".wav"); tone_wav(src, hz, 3.0, ch=2)
     ffmpeg(src, path("Sound\\Music\\ZoneMusic\\" + name + ".mp3"), "-c:a", "libmp3lame", "-b:a", "128k")
 tone_wav(path("Sound\\Ambience\\forest.wav"), 300, 2.0, rate=44100)
+src = os.path.join(out, "tmp", "glue.wav"); tone_wav(src, 550, 2.0, ch=2)   # the login screen theme
+ffmpeg(src, path("Sound\\Music\\GlueScreenMusic\\wow_main_theme.mp3"), "-c:a", "libmp3lame", "-b:a", "128k")
 
 S = [b"\0"]
 def s(t):
@@ -68,6 +70,7 @@ rows = [
     se(100, "Zone-ElwynnDay", ["day1.mp3", "day2.mp3"], "Sound\\Music\\ZoneMusic", 0.7),
     se(101, "Zone-ElwynnNight", ["night1.mp3"], "Sound\\Music\\ZoneMusic"),
     se(200, "ForestDay", ["forest.wav"], "Sound\\Ambience"),
+    se(400, "GS_LoginScreen", ["wow_main_theme.mp3"], "Sound\\Music\\GlueScreenMusic", 0.8),
 ]
 # world sounds: a wolf's cries, weapon impacts, a fire spell, footsteps (pitches 2000 + k * 100 Hz)
 WORLD = [(300, "WolfAggro"), (301, "WolfDeath"), (302, "WolfWoundA"), (303, "WolfWoundCrit"), (304, "WolfAttackA"),

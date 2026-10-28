@@ -157,6 +157,11 @@ bool MusicTable::load(const char* dir) {
             for (size_t k = 3; k < c.size(); ++k)
                 if (!c[k].empty()) s.files.push_back(c[k]);
         } else if (c[0] == "M" && c.size() >= 3) mapArea_[num(c[1])] = num(c[2]);
+        else if (c[0] == "G" && c.size() >= 3) {
+            glue_.volume = std::clamp(num(c[1]) / 100.0f, 0.05f, 1.0f);
+            for (size_t k = 2; k < c.size(); ++k)
+                if (!c[k].empty()) glue_.files.push_back(c[k]);
+        }
     }
     fclose(f);
     return !areas_.empty();
@@ -259,7 +264,10 @@ void Director::update(const MusicTable& t, uint32_t area, bool night, uint32_t n
 
 void Director::musicEnded(uint32_t nowMs) {
     music_.clear();
-    uint32_t lo = std::min<uint32_t>(zone_.silMinMs, 180000u), hi = std::min<uint32_t>(std::max(zone_.silMaxMs, lo), 240000u);
+    // ZoneMusic asks for 2-5 minutes of silence between tracks; on a handheld that felt like the music had stopped
+    // (stage 5.31): a quarter of it, 5..45 s.
+    uint32_t lo = std::clamp<uint32_t>(zone_.silMinMs / 4, 5000u, 30000u);
+    uint32_t hi = std::clamp<uint32_t>(std::max(zone_.silMaxMs, zone_.silMinMs) / 4, lo, 45000u);
     silenceUntil_ = nowMs + lo + (hi > lo ? rng_() % (hi - lo + 1) : 0);
     pendingTrack_ = true;
 }

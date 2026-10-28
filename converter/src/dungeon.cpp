@@ -105,8 +105,14 @@ bool convertDungeon(const Options& optIn, const DataDir& data, PackWriter& pack,
     const uint32_t placeholder = addPlaceholderTexture(pack, o.texFormat);
     auto modelFor = [&](const std::string& name) { return addModelFromGame(pack, data, name, o, st); };
 
-    auto w = wowee::core::coords::adtToWorld(info.position[0], info.position[1], info.position[2]);
-    float pos[3] = {w.x, w.y, w.z}, rot[3];
+    // As WoWee world_loader.cpp: the real instance WDTs (Deeprun Tram, the dungeons) place their building at (0,0,0) and the
+    // server's coordinates are relative to it - no map-corner offset then (adtToWorld would put it in the corner tile 0_0,
+    // 24000 yd from the player: an empty map). Only a non-zero MODF position is in ADT space.
+    float pos[3] = {0, 0, 0}, rot[3];
+    if (info.position[0] != 0.0f || info.position[1] != 0.0f || info.position[2] != 0.0f) {
+        auto w = wowee::core::coords::adtToWorld(info.position[0], info.position[1], info.position[2]);
+        pos[0] = w.x; pos[1] = w.y; pos[2] = w.z;
+    }
     eulerFromAdt(info.rotation, rot);
     std::vector<W3dPlacement> all;
     placeWmo(pack, data, info.rootWMOPath, pos, rot, info.doodadSet, o, st, modelFor, all);

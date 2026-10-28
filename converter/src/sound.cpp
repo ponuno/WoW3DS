@@ -756,6 +756,36 @@ bool convertSound(const SoundOptions& so, const DataDir& data, bool verbose) {
     };
     for (uint32_t id : musicSounds) emit(id, false);
     for (uint32_t id : ambSounds) emit(id, true);
+    // the login / character screens' music (stage 5.31): the SoundEntries row playing a GlueScreenMusic file (the original
+    // GlueXML plays it by name; "login" / "main theme" rows first), else the file itself. "G vol*100 files" in music.txt.
+    if (so.music) {
+        int best = -1, bestScore = -1;
+        for (uint32_t r = 0; r < se.records; ++r) {
+            SoundRow s = soundRow(se, r);
+            bool glue = false;
+            for (const std::string& f : s.files) glue |= lower(f).find("gluescreenmusic") != std::string::npos;
+            if (!glue) continue;
+            const std::string nm = lower(se.str(r, 2));
+            int score = 1 + (nm.find("login") != std::string::npos ? 4 : 0) + (nm.find("main") != std::string::npos ? 2 : 0);
+            for (const std::string& f : s.files) score += lower(f).find("main_theme") != std::string::npos ? 2 : 0;
+            if (score > bestScore) { bestScore = score; best = (int)r; }
+        }
+        SoundRow g;
+        if (best >= 0) g = soundRow(se, (uint32_t)best);
+        else g.files = {"Sound\\Music\\GlueScreenMusic\\wow_main_theme.mp3"};
+        std::string line = "G\t" + std::to_string(std::lround(g.volume * 100));
+        int k = 0;
+        for (const std::string& path : g.files) {
+            std::vector<uint8_t> f;
+            if (!data.read(path, f) || f.size() < 1024) continue;
+            const std::string name = "glue_" + std::to_string(k++) + ".mp3";
+            if (!writeFile(base + "music/" + name, f.data(), f.size())) continue;
+            bytes += f.size();
+            line += "\t" + name;
+        }
+        if (k) txt += line + "\n";
+        std::printf("  login screen music: %s\n", k ? (best >= 0 ? se.str((uint32_t)best, 2).c_str() : "wow_main_theme.mp3") : "not found");
+    }
     progressDone("music: %zu music + %zu ambience sounds, %zu files, %.0f MB", musicSounds.size(), ambSounds.size(), files,
                  bytes / 1048576.0);
 

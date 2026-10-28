@@ -55,6 +55,8 @@ public:
     // Music and ambience of an area (its parent's when it has none of its own).
     ZoneSound zone(uint32_t area) const;
     std::string path(const std::string& file) const { return dir_ + "/music/" + file; }
+    // The login / character screens' music ("G" in music.txt, stage 5.31); null when the converter found none.
+    const SoundSet* glue() const { return glue_.files.empty() ? nullptr : &glue_; }
 private:
     struct Area { uint32_t parent = 0, music = 0, ambience = 0; };
     struct Zm { uint32_t silMin = 0, silMax = 0, day = 0, night = 0; };
@@ -66,6 +68,7 @@ private:
     std::unordered_map<uint32_t, SoundSet> sounds_;
     std::unordered_map<uint32_t, uint32_t> mapArea_;
     std::unordered_map<uint32_t, Grid> grids_;
+    SoundSet glue_;
 };
 
 // What should play: zone music with pauses between tracks, ambience looping.

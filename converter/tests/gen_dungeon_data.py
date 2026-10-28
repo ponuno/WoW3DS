@@ -18,7 +18,9 @@ def write(path, data):
     os.makedirs(os.path.dirname(p), exist_ok=True)
     open(p, "wb").write(data)
 
-modf = struct.pack("<II3f3f6fHHHH", 0, 1234, ZP, 100.0, ZP, 0.0, 0.0, 0.0, -50, -50, 90, 50, 50, 120, 0, 0, 0, 0)
+# DUNGEON_ZERO=1: the building at (0,0,0) like the real instance WDTs (Deeprun Tram): no map-corner offset then
+P = (0.0, 0.0, 0.0) if os.environ.get("DUNGEON_ZERO") else (ZP, 100.0, ZP)
+modf = struct.pack("<II3f3f6fHHHH", 0, 1234, *P, 0.0, 0.0, 0.0, -50, -50, 90, 50, 50, 120, 0, 0, 0, 0)
 assert len(modf) == 64
 wdt = (chunk("MVER", struct.pack("<I", 18)) + chunk("MPHD", struct.pack("<8I", 1, 0, 0, 0, 0, 0, 0, 0)) +
        chunk("MAIN", bytes(64 * 64 * 8)) + chunk("MWMO", b"World\\wmo\\Test\\House.wmo\0") + chunk("MODF", modf))

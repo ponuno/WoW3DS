@@ -198,8 +198,19 @@ float tunable(const char* name, float def) {
 float g_cam[3] = {0, 0, 0};
 float g_fwd[2] = {0, 0};
 bool g_haveFwd = false, g_boost = false;
+bool groundClass(uint8_t cls) { return cls == kClsTile || cls == kClsColl || cls == kClsTerrainTex; }
 float readKey(const float a[3], uint8_t cls) {
     if (cls == kClsUnit) return 0.0f;
+    if (cls == kClsTile || cls == kClsTerrainTex) {
+        // anchored at the tile's centre: the distance to the tile itself (0 for the one under the camera; its centre can be
+        // 370 yd away, which put the ground under the player behind the doodads of the next tile - report: ground 3.4 s)
+        const float h = kTileSize * 0.5f;
+        const float dx = fmaxf(fabsf(a[0] - g_cam[0]) - h, 0.0f), dy = fmaxf(fabsf(a[1] - g_cam[1]) - h, 0.0f);
+        // x2: a neighbour tile's ground does not overtake the models standing near the camera (tests/run_streaming.sh:
+        // at a tile corner the first ground 1.0 s instead of 1.4 s, in the middle of a tile as before)
+        static const float w = tunable("W3D_TILEW", 2.0f);
+        return sqrtf(dx * dx + dy * dy) * w;
+    }
     const float dx = a[0] - g_cam[0], dy = a[1] - g_cam[1], dz = a[2] - g_cam[2];
     const float d = sqrtf(dx * dx + dy * dy + dz * dz);
     float front = 1.0f;
@@ -208,9 +219,7 @@ float readKey(const float a[3], uint8_t cls) {
         front = c > 0.4f ? 1.0f : c > -0.3f ? 1.35f : 1.8f;
     }
     switch (cls) {
-        case kClsTile: { static const float w = tunable("W3D_TILEW", 1.0f); return d * w; }
         case kClsColl: return d * 0.4f;
-        case kClsTerrainTex: { static const float w = tunable("W3D_TILEW", 1.0f); return 5.0f + d * w; }
         case kClsObject: return 10.0f + d * front;
         case kClsBuilding: return 10.0f + d * front;
         default: return 40.0f + d * front * 1.6f;
@@ -1142,7 +1151,9 @@ void scheduleJobs() {
         static const float kBand = tunable("W3D_BAND", 96.0f), kGrow = tunable("W3D_GROW", 1.5f);
         // bands widen with the distance: what is near is read nearest first, what is far mostly in file order
         auto band = [](float key) { return (int)(logf(1.0f + key / kBand) * (1.0f / logf(1.0f + kGrow))); };
-        for (Job* j : g_requests) j->key = (float)band(j->key);
+        // the ground (terrain, its textures, collision) before the models of the same band: a district shows its streets first
+        static const int kTier = (int)tunable("W3D_GTIER", 1.0f);
+        for (Job* j : g_requests) j->key = (float)(kTier ? band(j->key) * 2 + (groundClass(j->cls) ? 0 : 1) : band(j->key));
         std::sort(g_requests.begin(), g_requests.end(), [](const Job* a, const Job* b) {
             const int ba = (int)a->key, bb = (int)b->key;
             if (ba != bb) return ba > bb;                 // the most wanted last
