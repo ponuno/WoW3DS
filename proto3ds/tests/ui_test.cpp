@@ -341,6 +341,11 @@ int main(int argc, char** argv) {
         setOk = setOk && r.cfg.musicVol == mv + 1;
         r.tap(GameUi::Act::Setting, 140);
         setOk = setOk && r.cfg.musicVol == mv;
+        // Interface page (5.35e): FPS / ping on and off (the button must be on the page: tap finds it in the draw list)
+        r.tap(GameUi::Act::SubView, 2);
+        setOk = setOk && r.tap(GameUi::Act::Setting, 180) && r.cfg.showStats;
+        r.draw("settings_iface");
+        setOk = setOk && r.tap(GameUi::Act::Setting, 181) && !r.cfg.showStats;
         r.tap(GameUi::Act::ClosePanel);
         r.s.setTarget(wolf ? wolf->guid : 0, r.in.nowMs);
         PadOut ctx;
