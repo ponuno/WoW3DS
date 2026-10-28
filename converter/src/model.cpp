@@ -322,7 +322,7 @@ static uint32_t addModelFromGameImpl(PackWriter& pack, const DataDir& data, cons
 
     std::map<uint32_t, uint32_t> texSlot;  // TEX entry id -> slot
     const std::string lowerPath = lowerStr(m2Path);
-    const bool fire = fireLike(lowerPath);
+    const bool fire = !o.fxSpell && fireLike(lowerPath);   // "Spells\\Fireball..." is not a torch
     std::vector<W3dFxGlow> glows;
     for (const auto& b : mdl.batches) {
         if (b.submeshLevel != 0) continue;
@@ -413,7 +413,7 @@ static uint32_t addModelFromGameImpl(PackWriter& pack, const DataDir& data, cons
     std::vector<uint32_t> fxTex;
     if (!o.noFx) {
         for (const auto& pe : mdl.particleEmitters) {
-            if (emitters.size() >= 8) break;   // a doodad with more is a spell-like showpiece: the first eight
+            if (emitters.size() >= (o.fxSpell ? 12u : 8u)) break;   // a doodad with more is a showpiece: the first eight
             W3dFxEmitter e{};
             e.pos[0] = pe.position.x; e.pos[1] = pe.position.y; e.pos[2] = pe.position.z;
             // (bind pose: the bone matrix is the identity, the position is in model space - as WoWee emitParticles)
@@ -443,6 +443,7 @@ static uint32_t addModelFromGameImpl(PackWriter& pack, const DataDir& data, cons
             e.rows = (uint8_t)std::clamp<int>(pe.textureRows, 1, 16);
             e.cols = (uint8_t)std::clamp<int>(pe.textureCols, 1, 16);
             e.flags = (uint16_t)(((pe.flags & 0x40) ? W3D_FXF_RANDOM_TILE : 0) | (fire ? W3D_FXF_FIRE : 0) |
+                                 (o.fxSpell ? W3D_FXF_SPELL : 0) |
                                  ((pe.flags & 0x1) && !fire ? W3D_FXF_LIT : 0));
             e.tex = 0xFFFF;
             if (pe.texture < mdl.textures.size() && mdl.textures[pe.texture].type == 0 && !mdl.textures[pe.texture].filename.empty()) {

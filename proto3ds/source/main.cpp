@@ -15,6 +15,7 @@
 #include "audio.hpp"
 #include "unit_state.hpp"
 #include "sound_world.hpp"
+#include "spell_view.hpp"
 #include "world.h"
 #include "glue_data.hpp"
 #include "login.hpp"
@@ -78,6 +79,7 @@ struct Report {
     double worldMs = 0, fxMs = 0, fxPeakMs = 0, gpuMs = 0;
 };
 static Report g_report;
+static const SpellView* g_spellViewPtr = nullptr;   // stage 5.33: for report.txt
 static LoginFlow g_login;
 
 // Marker colours (0xAABBGGRR).
@@ -278,6 +280,13 @@ static void writeReport(const Bench* b, float drawDist, const RenderSettings& rs
         fprintf(f, "in the world: %lu frames, avg FPS %.1f, GPU avg %.1f ms, frames over 33 ms %lu\n", (unsigned long)g_report.worldFrames,
                 1000.0 * g_report.worldFrames / std::max(g_report.worldMs, 1.0), g_report.gpuMs / g_report.worldFrames,
                 (unsigned long)g_report.slowFrames);
+    if (g_spellViewPtr) {
+        const sfx::Stats& ss = g_spellViewPtr->stats();
+        fprintf(f, "spell effects (stage 5.33): table %s, %lu started (%lu missiles, %lu impacts), %lu effect models loaded, "
+                   "skipped: %lu too far, %lu over the limit\n", g_spellViewPtr->loaded() ? "loaded" : "NOT in the pack (convert again)",
+                (unsigned long)ss.started, (unsigned long)ss.missiles, (unsigned long)ss.impacts, (unsigned long)g_spellViewPtr->models(),
+                (unsigned long)ss.skippedFar, (unsigned long)ss.skippedFull);
+    }
     fprintf(f, "effects (stage 5.32, level %d): %lu frames with particles / glows, CPU avg %.2f ms, max %.2f ms; peak %lu quads, %lu particles\n\n",
             rs.effects, (unsigned long)g_report.fxFrames, g_report.fxFrames ? g_report.fxMs / g_report.fxFrames : 0.0, g_report.fxPeakMs,
             (unsigned long)g_report.fxPeakQuads, (unsigned long)g_report.fxPeakParticles);
@@ -486,6 +495,9 @@ int main() {
     uint32_t glueRevShown = 0;
     GameUi gameUi;
     SoundWorld soundWorld;           // melee, spells, deaths, aggro, footsteps -> positioned sounds
+    SpellView spellView;             // stage 5.33: what spells look like
+    std::vector<SceneModel> spellModels;
+    g_spellViewPtr = &spellView;
     std::vector<SoundReq> soundReqs;
     // Controller (stage 5.11): scheme + settings from pad.txt (Old 3DS without ZL/ZR/C-Stick defaults to Classic),
     // hotbars per character, the character's own facing (Forever: separate from the camera).
@@ -642,6 +654,8 @@ int main() {
         char oldPath[128];
         snprintf(oldPath, sizeof oldPath, "%s", index.path);
         creatureView.clear();
+        spellView.clear();
+        spellModels.clear();
         streamerShutdown();
         index = PackIndex();
         char e[160];
@@ -1212,6 +1226,8 @@ int main() {
                     LiquidHere lw;
                     if (streamerLiquidAt(pl[0], pl[1], pl[2], &lw) && lw.level > pl[2] + 0.15f && lw.kind() <= W3D_LIQUID_OCEAN) inWater = 1;
                 }
+                if (rs.effects > 0) spellView.update(*game, netMs, cam.pos, spellModels);   // before the sounds take the events
+                else spellModels.clear();
                 soundWorld.update(*game, pl, dir != 0, !airborne, po.walk, netMs, soundReqs, inWater);
                 for (const SoundReq& q : soundReqs) {
                     if (q.stop) audio::stopTag(q.tag);
@@ -1297,6 +1313,7 @@ int main() {
             markers.clear();
             creatures.clear();
             if (creatureView.tracked()) creatureView.clear();
+            if (spellView.loaded() || !spellModels.empty()) { spellView.clear(); spellModels.clear(); }
         }
 
         // --- top-screen HUD: unit frames, minimap, name plates, cast bar, chat
@@ -1481,7 +1498,7 @@ int main() {
                     if (glueScene) rendererDrawScene(glueCam, glueFov, glueNear, glueFar, glueModels, &glueCreatures, fc);
                     uiDraw(g_login.glueTop(), kHudW);
                 } else {
-                    rendererDraw(t, cam, rs, fc, &markers, &creatures);
+                    rendererDraw(t, cam, rs, fc, &markers, &creatures, &spellModels);
                     uiDraw(hud, kHudW);
                 }
             }
@@ -1564,8 +1581,8 @@ int main() {
             printf("\x1b[14;1H%s dist %3.0f doodads %-3s %-4s fog %-3s  ",
                    walk ? (g_login.online() && g_login.game().mover.swimming() ? "SWIM " : onFloor ? "FLOOR" : "WALK ") : "FLY  ", cam.drawDist,
                    rs.doodads ? "on" : "off", kDetail[detailIdx], rs.fog ? "on" : "off");
-            printf("\x1b[15;1Hfx %3lu prt %3lu glow %3lu src %4.1fms  ", (unsigned long)fc.fxQuads, (unsigned long)fc.fxParticles,
-                   (unsigned long)fc.fxGlows, fc.fxMs);
+            printf("\x1b[15;1Hfx %3lu prt %3lu glow %3lu %4.1fms sp %2lu ", (unsigned long)fc.fxQuads, (unsigned long)fc.fxParticles,
+                   (unsigned long)fc.fxGlows, fc.fxMs, (unsigned long)spellView.active());
 
             printf("\x1b[17;1HCirclePad move/turn CStick look   ");
             printf("\x1b[18;1HL/R down/up  B fast%s SELECT walk/fly", g_login.online() ? "/jump" : "     ");
@@ -1617,6 +1634,8 @@ int main() {
     writeReport(bench.frameMs.empty() ? nullptr : &bench, cam.drawDist, rs);
     g_login.shutdown();
     creatureView.clear();
+    spellView.clear();
+    spellModels.clear();
     streamerShutdown();
     audio::shutdown();
     uiRenderShutdown();

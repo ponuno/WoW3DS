@@ -1,5 +1,6 @@
 #include "conv.h"
 #include "w3d_liquid.h"
+#include "w3d_fx.h"
 #include <unordered_set>
 #include "w3d_ui.h"
 
@@ -290,6 +291,7 @@ const char* typeName(uint32_t t) {
         case W3D_ENTRY_CHARIMG: return "CIMG";
         case W3D_ENTRY_ITEM: return "ITEM";
         case W3D_ENTRY_GLUE: return "GLUE";
+        case W3D_ENTRY_SPELLFX: return "SVFX";
         case W3D_ENTRY_UI_DIR: return "UIDR";
         case W3D_ENTRY_UI_TEX: return "UITX";
     }
@@ -370,7 +372,7 @@ int printPackInfo(const std::string& path) {
     for (auto& [t, n] : countBy)
         std::printf("  %s x%-4zu %8.1f KB\n", typeName(t), n, bytesBy[t] / 1024.0);
 
-    size_t texGpu = 0, missingTex = 0, totalPlacements = 0;
+    size_t texGpu = 0, missingTex = 0, totalPlacements = 0, fxModels = 0, fxEmitters = 0, fxGlows = 0;
     std::map<uint8_t, size_t> fmtCount;
     for (uint32_t i = 0; i < h.entryCount; ++i) {
         const uint8_t* p = b.data() + e[i].offset;
@@ -449,6 +451,42 @@ int printPackInfo(const std::string& path) {
             }
             const uint32_t* ids = reinterpret_cast<const uint32_t*>(p + m.offTexIds);
             for (uint32_t k = 0; k < m.texCount; ++k) if (!texOk(ids[k])) ++missingTex;
+            if (const W3dFxHeader* fx = w3d_model_fx(p, e[i].size)) {   // stage 5.32: effects behind the footer
+                ++fxModels;
+                fxEmitters += fx->emitterCount;
+                fxGlows += fx->glowCount;
+                const uint32_t* fid = reinterpret_cast<const uint32_t*>(p + fx->offTexIds);
+                for (uint32_t k = 0; k < fx->texCount; ++k) if (!texOk(fid[k])) ++missingTex;
+                const W3dFxEmitter* em = reinterpret_cast<const W3dFxEmitter*>(p + fx->offEmitters);
+                for (uint32_t k = 0; k < fx->emitterCount; ++k)
+                    if ((em[k].tex != 0xFFFF && em[k].tex >= fx->texCount) || !em[k].rows || !em[k].cols || !(em[k].life > 0))
+                        return fail("fx emitter");
+            }
+        } else if (e[i].type == W3D_ENTRY_SPELLFX) {   // stage 5.33
+            W3dSpellFxHeader h; std::memcpy(&h, p, sizeof h);
+            if (h.magic != W3D_SVFX_MAGIC || h.offEffects + (uint64_t)h.effectCount * sizeof(W3dSpellEffect) > e[i].size ||
+                h.offVisuals + (uint64_t)h.visualCount * sizeof(W3dSpellVisual) > e[i].size ||
+                h.offSpells + (uint64_t)h.spellCount * sizeof(W3dSpellRef) > e[i].size) return fail("spell fx range");
+            const W3dSpellEffect* ef = reinterpret_cast<const W3dSpellEffect*>(p + h.offEffects);
+            const W3dSpellVisual* vi = reinterpret_cast<const W3dSpellVisual*>(p + h.offVisuals);
+            const W3dSpellRef* sr = reinterpret_cast<const W3dSpellRef*>(p + h.offSpells);
+            for (uint32_t k = 0; k < h.effectCount; ++k) if (!byKey.count({W3D_ENTRY_MODEL, ef[k].model})) return fail("spell effect model not packed");
+            size_t missiles = 0;
+            for (uint32_t k = 0; k < h.visualCount; ++k) {
+                if (k && vi[k].id <= vi[k - 1].id) return fail("spell visuals not sorted");
+                for (int s = 0; s < 4; ++s)
+                    for (int j = 0; j < 2; ++j)
+                        if (vi[k].effect[s][j] != 0xFFFF && vi[k].effect[s][j] >= h.effectCount) return fail("spell visual effect index");
+                missiles += vi[k].effect[W3D_SFX_MISSILE][0] != 0xFFFF;
+            }
+            size_t withSpeed = 0;
+            for (uint32_t k = 0; k < h.spellCount; ++k) {
+                if (k && sr[k].spell <= sr[k - 1].spell) return fail("spell refs not sorted");
+                if (sr[k].visual >= h.visualCount) return fail("spell ref visual index");
+                withSpeed += sr[k].speed > 0;
+            }
+            std::printf("  spell fx: %u spells (%zu with a missile speed), %u visuals (%zu with a missile), %u effect models\n",
+                        h.spellCount, withSpeed, h.visualCount, missiles, h.effectCount);
         } else if (e[i].type == W3D_ENTRY_COLLISION) {
             W3dCollHeader c; std::memcpy(&c, p, sizeof c);
             uint64_t cells = (uint64_t)c.gridN * c.gridN + 1;
@@ -565,6 +603,7 @@ int printPackInfo(const std::string& path) {
         }
     }
     std::printf("  placements: %zu\n", totalPlacements);
+    if (fxModels) std::printf("  effects: %zu models, %zu particle emitters, %zu glow sprites\n", fxModels, fxEmitters, fxGlows);
     std::printf("  texture GPU memory: %.1f KB (", texGpu / 1024.0);
     for (auto& [fmt, n] : fmtCount) std::printf(" %s:%zu", fmtName(fmt), n);
     std::printf(" )\n");

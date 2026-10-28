@@ -29,6 +29,7 @@ struct Source {                   // one instance with effects near the camera, 
     float pos[3] = {0, 0, 0};
     float rot[3] = {0, 0, 0};     // as the mesh: world = pos + Rz(rot[2]) * Ry(rot[1]) * Rx(rot[0]) * (scale * local)
     float scale = 1;
+    bool priority = false;        // a spell effect (stage 5.33): no thinning by distance or a filling pool
 };
 
 struct Quad {                     // camera-facing, view space (x right, y up, the camera looks along -z)

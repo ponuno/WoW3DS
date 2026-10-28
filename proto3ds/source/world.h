@@ -123,6 +123,7 @@ struct CreatureDisplay {
 // What the renderer needs for one animated creature this frame.
 struct CreatureInstance {
     const CreatureDisplay* disp;
+    uint64_t guid = 0;               // stage 5.33: the unit (0 for a mount): the renderer records its hands / chest / head
     float pos[3];                    // feet, render space
     float yaw;
     float scale;                     // object scale (display scale is applied by the renderer)
@@ -245,6 +246,7 @@ CreatureDisplay* streamerAcquirePlayerDisplay(const W3dLook& look, const uint32_
 int streamerCharInfo(uint32_t race, uint32_t sex, const uint8_t** blob, uint32_t* size);
 // Reads the first 'size' bytes of an entry right away (small entries only: the GLUE scenes).
 bool streamerReadEntry(uint32_t type, uint32_t id, void* dst, uint32_t size);
+uint32_t streamerEntrySize(uint32_t type, uint32_t id);   // 0 = not in the pack (stage 5.33)
 // Worn items (stage 5.19): an ITEM entry (nullptr if the pack has none; check state / ok) and the item models.
 struct ItemDisplay {
     uint32_t id = 0;
@@ -310,9 +312,19 @@ void rendererSetEye(float iod);               // stereoscopic 3D: the projection
 u32 rendererClearColor(const RenderSettings& rs);
 // Stage 5.29: a login / character screen scene: static models and creatures only (no terrain, sky, water or fog), seen
 // through a camera with its own vertical field of view and clip planes.
-struct SceneModel { Model* model = nullptr; float pos[3] = {0, 0, 0}; float rot[3] = {0, 0, 0}; float scale = 1; };
+struct SceneModel {
+    Model* model = nullptr; float pos[3] = {0, 0, 0}; float rot[3] = {0, 0, 0}; float scale = 1;
+    // stage 5.33, spell effects in the world (rendererDraw's effects): fxKey identifies the effect between frames for its
+    // particle emitters; emit = false while it lingers (no mesh, no new particles: the ones thrown fade out)
+    uint32_t fxKey = 0;
+    bool emit = true;
+};
+// Stage 5.33: where a point of a unit drawn in the last frames is (W3dSpellSlot: hands, chest, head, feet), from its
+// animated skeleton; false when the unit was not drawn lately or its model has no such attachment.
+bool rendererUnitPoint(uint64_t guid, int slot, float out[3]);
 void rendererDrawScene(const Camera& cam, float vfovDeg, float nearZ, float farZ, const std::vector<SceneModel>& models,
                        const std::vector<CreatureInstance>* creatures, FrameCounters& fc);   // the sky's colour behind everything (RGBA8), water when under it
 void rendererDraw(C3D_RenderTarget* target, const Camera& cam, const RenderSettings& rs, FrameCounters& fc,
                   const std::vector<Marker>* markers = nullptr,
-                  const std::vector<CreatureInstance>* creatures = nullptr);
+                  const std::vector<CreatureInstance>* creatures = nullptr,
+                  const std::vector<SceneModel>* effects = nullptr);   // stage 5.33: spell effects (spell_view.cpp)

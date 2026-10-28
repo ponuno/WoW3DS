@@ -1530,6 +1530,11 @@ bool streamerReadEntry(uint32_t type, uint32_t id, void* dst, uint32_t size) {
     return ok;
 }
 
+uint32_t streamerEntrySize(uint32_t type, uint32_t id) {
+    const W3dEntry* e = g_index ? g_index->find(type, id) : nullptr;
+    return e ? e->size : 0;
+}
+
 CreatureDisplay* streamerAcquirePlayerDisplay(const W3dLook& look, const uint32_t* equip) {
     uint32_t eq[W3D_BODY_EQ] = {};
     uint64_t key = w3d_look_key(&look);

@@ -453,6 +453,7 @@ void CreatureView::update(const std::vector<CreatureSeen>& seen, uint32_t nowMs,
         const uint8_t* blob = u.disp->model->blob;
         CreatureInstance ci;
         ci.disp = u.disp;
+        ci.guid = c.guid;
         ci.pos[0] = c.pos[0]; ci.pos[1] = c.pos[1]; ci.pos[2] = c.pos[2];
         ci.yaw = c.yaw;
         ci.scale = c.scale;
@@ -469,6 +470,7 @@ void CreatureView::update(const std::vector<CreatureSeen>& seen, uint32_t nowMs,
             AnimChoice ma = u.mountAnim.update(mb, mc, false, nowMs);
             CreatureInstance mi = ci;
             mi.disp = u.mount;
+            mi.guid = 0;
             mi.seq = ma.seq;
             mi.timeMs = u.mountAnim.timeMs();
             mi.loop = ma.loop;

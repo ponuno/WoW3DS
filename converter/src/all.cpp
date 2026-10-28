@@ -193,6 +193,7 @@ int convertAll(const Options& oIn, const DataDir& data, const AllOptions& ao, Ui
     resetMapState(st);
     convertCreatures(o, data, pool, st);
     convertGlueScenes(o, data, pool, st);   // stage 5.29: login / character screen scenes
+    if (o.spellFx) convertSpellEffects(o, data, pool, st);   // stage 5.33: what spells look like
     exportTransports(data, folder + "transports.txt", o.verbose);
 
     // ---- 5. the pool

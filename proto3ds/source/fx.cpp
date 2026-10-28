@@ -133,13 +133,14 @@ void System::frame(float dt, float timeSec, const float cam[3], const float view
         const W3dFxEmitter* em = (const W3dFxEmitter*)(s.blob + h->offEmitters);
         bool fire = false;
         for (unsigned k = 0; k < h->emitterCount; ++k) fire |= (em[k].flags & W3D_FXF_FIRE) != 0;
-        if (h->emitterCount && maxP > 0 && dist < budget_.emitRange) {
+        if (h->emitterCount && maxP > 0 && (dist < budget_.emitRange || (s.priority && dist < 80.0f))) {
             EmitterState& st = state_[s.key];
             st.frame = frame_;
             // farther away: fewer (a third at the edge of the range); a filling pool thins every emitter alike
             float f = 1.0f - 0.65f * std::clamp((dist - 15.0f) / std::max(budget_.emitRange - 15.0f, 1.0f), 0.0f, 1.0f);
             const float fill = (float)parts_.size() / (float)maxP;
             if (fill > 0.75f) f *= std::max(0.0f, (1.0f - fill) / 0.25f);
+            if (s.priority) f = 1.0f;   // spells: what the player is looking at (the pool's hard cap still holds)
             for (unsigned k = 0; k < h->emitterCount && k < 8; ++k) {
                 const W3dFxEmitter& e = em[k];
                 float rate = e.rate;
@@ -168,7 +169,8 @@ void System::frame(float dt, float timeSec, const float cam[3], const float view
                 q.c[2] += q.half * 0.6f;   // a little toward the camera: not cut by the lamp's own glass
                 float flick = 1.0f;
                 if (fire) flick = 0.9f + 0.1f * sinf(timeSec * 11.0f + (float)((uintptr_t)s.key % 97));
-                q.color = scaleColor(g[k].color, flick, 0.85f * fade);
+                const float nearFade = std::clamp((-q.c[2] - 0.4f) / 1.6f, 0.0f, 1.0f);
+                q.color = scaleColor(g[k].color, flick * nearFade, 0.85f * fade * nearFade);
                 q.u0 = 0; q.v0 = 0; q.u1 = 1; q.v1 = 1;
                 q.tex = nullptr;
                 q.blend = W3D_BLEND_ADD;
@@ -208,6 +210,7 @@ void System::frame(float dt, float timeSec, const float cam[3], const float view
             col = lerpColor(e.color[1], e.color[2], u);
         }
         if (e.flags & W3D_FXF_FIRE) size = std::clamp(size, 0.1f, 0.9f);
+        else if (e.flags & W3D_FXF_SPELL) size = std::clamp(size, 0.12f, 2.5f);   // spells: few, short, may be big
         else size = std::min(size, 1.5f);   // big smoke is the fill-rate killer
         Quad q;
         toView(p.p, q.c);
@@ -221,7 +224,10 @@ void System::frame(float dt, float timeSec, const float cam[3], const float view
         q.u1 = (float)(cx + 1) / e.cols;
         q.v1 = 1.0f - (float)cy / e.rows;        // top of the cell
         q.v0 = 1.0f - (float)(cy + 1) / e.rows;
-        q.color = col;
+        // near the eye (our own hands in the first person, a spell right at the camera): fade out - a particle filling
+        // the screen costs a whole frame of fill rate
+        const float nearFade = std::clamp((-q.c[2] - 0.4f) / 1.6f, 0.0f, 1.0f);
+        q.color = nearFade < 1.0f ? scaleColor(col, e.blend == W3D_BLEND_ADD ? nearFade : 1.0f, nearFade) : col;
         q.tex = p.tex;
         q.blend = e.blend == W3D_BLEND_ADD ? W3D_BLEND_ADD : W3D_BLEND_ALPHA;
         out.push_back(q);

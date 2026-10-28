@@ -39,6 +39,8 @@ static void usage() {
         "  --no-walls            COLL with floors only (walking passes through walls)\n"
         "  --no-doodad-coll      no collision of doodads (fences, tree trunks, model bridges)\n"
         "  --no-fx               no particle emitters and lamp glows on doodads (stage 5.32)\n"
+        "  --no-spell-fx         no spell effects with the creatures (stage 5.33)\n"
+        "  --spell-fx            only the spell effects into -o pack (normally with the creatures / --all)\n"
         "  --doodad-coll-tris N  collision triangle budget per doodad model (96; 0 = all)\n"
         "  --world               every tile of the map (0..63; missing ones are skipped), big packs go through a spill file\n"
         "  --creatures           add creature displays + skinned animated models (all of CreatureDisplayInfo)\n"
@@ -84,7 +86,7 @@ int main(int argc, char** argv) {
     w3d::installCrashGuard();
     Options o;
     std::string info;
-    bool textsOnly = false, uiMode = false, soundMode = false;
+    bool textsOnly = false, uiMode = false, soundMode = false, spellFxMode = false;
     SoundOptions so;
     UiOptions uo;
     AllOptions ao;
@@ -134,6 +136,7 @@ int main(int argc, char** argv) {
         else if (a == "--no-walls") o.noWalls = true;
         else if (a == "--no-doodad-coll") o.noDoodadColl = true;
         else if (a == "--no-fx") o.noFx = true;
+        else if (a == "--no-spell-fx") o.spellFx = false;
         else if (a == "--doodad-coll-tris") o.doodadCollTris = std::atoi(next());
         else if (a == "--creatures") o.creatures = true;
         else if (a == "--players") o.players = true;
@@ -175,6 +178,7 @@ int main(int argc, char** argv) {
         else if (a == "--texts-only") textsOnly = true;
         else if (a == "--ui") uiMode = true;
         else if (a == "--sound") soundMode = true;
+        else if (a == "--spell-fx") spellFxMode = true;
         else if (a == "--sound-events") so.eventsFile = next();
         else if (a == "--no-music") so.music = false;
         else if (a == "--no-ambience") so.ambience = false;
@@ -219,6 +223,16 @@ int main(int argc, char** argv) {
         std::error_code ec;
         std::filesystem::create_directories(ao.folder, ec);
         return convertAll(o, data, ao, uo, so);
+    }
+    if (spellFxMode) {   // stage 5.33: a pack with the spell effects only (tests; --all puts them into the pool)
+        if (o.synthetic) { std::fputs("--spell-fx needs --data\n", stderr); return 1; }
+        PackWriter pack;
+        ConvStats st;
+        if (!convertSpellEffects(o, data, pack, st)) return 4;
+        if (!pack.write(o.out)) { std::fprintf(stderr, "cannot write %s\n", o.out.c_str()); return 3; }
+        std::printf("  effects: %zu models with %zu particle emitters and %zu glow sprites\n", st.fxModels, st.fxEmitters, st.fxGlows);
+        std::printf("wrote %s\n", o.out.c_str());
+        return 0;
     }
     if (soundMode) {
         if (o.synthetic) { std::fputs("--sound needs --data\n", stderr); return 1; }
@@ -321,6 +335,7 @@ int main(int argc, char** argv) {
         std::printf(o.creatures ? "creatures...\n" : "players...\n");
         convertCreatures(o, data, pack, st);
         if (o.players) convertGlueScenes(o, data, pack, st);   // stage 5.29: the login / character screen scenes
+        if (o.spellFx) convertSpellEffects(o, data, pack, st);   // stage 5.33
     }
     if (o.creatures && !o.synthetic) {   // the 3DS action bar reads spells.txt next to the pack, the reactions factions.txt
         exportSpellNames(data, textDir() + "spells.txt", o.verbose);

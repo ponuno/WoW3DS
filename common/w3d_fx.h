@@ -25,6 +25,7 @@ enum W3dFxEmitterType { W3D_FX_PLANE = 1, W3D_FX_SPHERE = 2 };
 #define W3D_FXF_RANDOM_TILE 0x01u   // each particle a random cell of the texture atlas (else: cells along its life)
 #define W3D_FXF_FIRE        0x02u   // a flame (lamp / torch / brazier / candle): kept dense, small and bright
 #define W3D_FXF_LIT         0x04u   // follows the day light (smoke, dust); unlit particles glow on their own
+#define W3D_FXF_SPELL       0x08u   // a spell effect's emitter (stage 5.33): bigger allowed, no flame floor
 
 typedef struct {
     float pos[3];                 // model space
@@ -66,3 +67,34 @@ static inline const W3dFxHeader* w3d_model_fx(const uint8_t* blob, uint32_t size
     if ((h->offEmitters | h->offGlows | h->offTexIds) & 3) return 0;
     return h;
 }
+
+// ---------------------------------------------------------------- spell visuals (stage 5.33)
+// One SVFX entry (id 0) in the pool: what a spell shows, from Spell.dbc -> SpellVisual.dbc -> SpellVisualKit.dbc ->
+// SpellVisualEffectName.dbc. Each visual has four stages - precast (while casting), cast (when it goes off), impact (on
+// each target) and missile (flying from the caster to each target) - with up to two effect models each, hung on a point
+// of the unit. The models are ordinary MODL entries (static mesh + particles + glows at the end of the blob).
+#define W3D_SVFX_MAGIC 0x58465653u   // 'SVFX'
+enum W3dSpellStage { W3D_SFX_PRECAST = 0, W3D_SFX_CAST = 1, W3D_SFX_IMPACT = 2, W3D_SFX_MISSILE = 3 };
+enum W3dSpellSlot {               // where on the unit (SpellVisualKit's effect columns)
+    W3D_SLOT_NONE = 0, W3D_SLOT_HEAD = 1, W3D_SLOT_CHEST = 2, W3D_SLOT_BASE = 3, W3D_SLOT_LHAND = 4, W3D_SLOT_RHAND = 5
+};
+typedef struct {
+    uint32_t magic;               // W3D_SVFX_MAGIC
+    uint32_t effectCount, visualCount, spellCount;
+    uint32_t offEffects, offVisuals, offSpells;   // from the start of the entry
+} W3dSpellFxHeader;               // 28 bytes
+typedef struct {
+    uint32_t model;               // MODL id
+    float scale;                  // SpellVisualEffectName scale (1 when absent)
+} W3dSpellEffect;                 // 8 bytes
+typedef struct {
+    uint32_t id;                  // SpellVisual id
+    uint16_t effect[4][2];        // index into the effect table per stage, 0xFFFF = none
+    uint8_t slot[4][2];           // W3dSpellSlot of each
+} W3dSpellVisual;                 // 28 bytes, sorted by id
+typedef struct {
+    uint32_t spell;               // Spell.dbc id
+    uint16_t visual;              // index into the visual table
+    uint16_t pad;
+    float speed;                  // missile speed, yd/s (0 = not known: the client takes 20)
+} W3dSpellRef;                    // 12 bytes, sorted by spell

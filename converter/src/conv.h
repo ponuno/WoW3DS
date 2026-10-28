@@ -56,6 +56,8 @@ struct Options {
     bool noFloors = false;      // skip COLL entirely (no floors, no walls)
     bool noWalls = false;       // COLL with floors only (walking passes through walls)
     bool noFx = false;          // stage 5.32: no particle emitters / glow sprites on doodads (--no-fx)
+    bool fxSpell = false;       // stage 5.33: the model being converted is a spell effect (internal)
+    bool spellFx = true;        // stage 5.33: spell visuals with the creatures (--no-spell-fx)
     bool noDoodadColl = false;  // no M2 doodad collision (fences, trunks, bridges) in COLL
     int doodadCollTris = 96;    // collision triangle budget per doodad model (0 = keep all)
     // Creatures (stage 5.3): every CreatureDisplayInfo row -> CDSP + CMDL (skinned, animated)
@@ -340,6 +342,8 @@ bool convertItems(const Options& o, const DataDir& data, PackWriter& pack, ConvS
 bool convertCreatures(const Options& o, const DataDir& data, PackWriter& pack, ConvStats& st);
 // Stage 5.29: the login / character screen scenes (MODL + GLUE entries), with the player models.
 bool convertGlueScenes(const Options& o, const DataDir& data, PackWriter& pack, ConvStats& st);
+// Spell visuals (stage 5.33, spellfx.cpp): effect models + the SVFX table, into the pack (the pool with --all).
+bool convertSpellEffects(const Options& o, const DataDir& data, PackWriter& pack, ConvStats& st);
 // Collision of one doodad placement (st.m2Coll of its model, matrix T(pos)*Rz*Ry*Rx*S like the renderer).
 void addPlacementCollision(const Options& o, ConvStats& st, const W3dPlacement& p);
 // Writes the COLL entries collected by placeWmo / addPlacementCollision (one per tile).

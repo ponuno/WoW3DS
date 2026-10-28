@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include <algorithm>
+#include <unordered_map>
 
 #include "w3d_anim.h"
 
@@ -585,6 +586,43 @@ void drawWorn(const RenderSettings& rs, FrameCounters& fc) {
     C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_ALL);
 }
 
+// Stage 5.33: the points spell effects hang on, per unit drawn: from its attachments (hands 1 / 2, helm 11, shoulders
+// 5 / 6 -> chest) through the animated pose; feet = the unit's position.
+struct UnitPoints { float p[6][3]; uint8_t has = 0; u32 frame = 0; };
+std::unordered_map<uint64_t, UnitPoints> g_unitPts;
+u32 g_ptsFrame = 0;
+
+void recordUnitPoints(const CreatureInstance& ci, const W3dCreatureHeader* h, const uint8_t* blob, float s) {
+    UnitPoints& u = g_unitPts[ci.guid];
+    u.frame = g_ptsFrame;
+    u.has = 1u << W3D_SLOT_BASE;
+    memcpy(u.p[W3D_SLOT_BASE], ci.pos, sizeof ci.pos);
+    if (!h->attachCount || !h->offAttach) return;
+    const W3dAttach* at = (const W3dAttach*)(blob + h->offAttach);
+    const float cy = cosf(ci.yaw), sy = sinf(ci.yaw);
+    float sh[2][3];
+    int shoulders = 0;
+    for (u32 k = 0; k < h->attachCount; ++k) {
+        const W3dAttach& a = at[k];
+        int slot = a.id == W3D_ATT_RHAND ? W3D_SLOT_RHAND : a.id == W3D_ATT_LHAND ? W3D_SLOT_LHAND : a.id == W3D_ATT_HELM ? W3D_SLOT_HEAD : -1;
+        const bool shoulder = a.id == W3D_ATT_RSHOULDER || a.id == W3D_ATT_LSHOULDER;
+        if (slot < 0 && !shoulder) continue;
+        if (a.bone < 0 || (u32)a.bone >= h->boneCount) continue;
+        const float* M = g_pose[a.bone].m;
+        float m[3];
+        for (int r = 0; r < 3; ++r) m[r] = (M[r * 4] * a.pos[0] + M[r * 4 + 1] * a.pos[1] + M[r * 4 + 2] * a.pos[2] + M[r * 4 + 3]) * s;
+        const float w[3] = {ci.pos[0] + cy * m[0] - sy * m[1], ci.pos[1] + sy * m[0] + cy * m[1], ci.pos[2] + m[2]};
+        if (shoulder) { if (shoulders < 2) memcpy(sh[shoulders++], w, sizeof w); continue; }
+        memcpy(u.p[slot], w, sizeof w);
+        u.has |= (uint8_t)(1u << slot);
+    }
+    if (shoulders == 2) {   // the chest: between the shoulders, a little lower
+        for (int k = 0; k < 3; ++k) u.p[W3D_SLOT_CHEST][k] = 0.5f * (sh[0][k] + sh[1][k]);
+        u.p[W3D_SLOT_CHEST][2] -= 0.25f * (u.p[W3D_SLOT_CHEST][2] - ci.pos[2]);
+        u.has |= 1u << W3D_SLOT_CHEST;
+    }
+}
+
 void drawCreatures(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, const RenderSettings& rs,
                    const std::vector<CreatureInstance>& list, FrameCounters& fc) {
     if (list.empty()) return;
@@ -614,6 +652,7 @@ void drawCreatures(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, co
         u64 t0 = svcGetSystemTick();
         if (g_pose.size() < h->boneCount) g_pose.resize(h->boneCount);
         w3d_anim_pose(blob, ci.seq, ci.timeMs, ci.loop ? 1 : 0, g_pose.data());
+        if (ci.guid) recordUnitPoints(ci, h, blob, s);
         fc.poseMs += ticksToMs(svcGetSystemTick() - t0);
         ++fc.creatures;
 
@@ -806,7 +845,8 @@ void buildFx() {
     }
 }
 
-void drawFx(const Camera& cam, const C3D_Mtx& view, const RenderSettings& rs, FrameCounters& fc) {
+void drawFx(const Camera& cam, const C3D_Mtx& view, const RenderSettings& rs, FrameCounters& fc,
+            const std::vector<SceneModel>* effects) {
     if (rs.effects <= 0 || !g_fxIdx || !g_fxDotOk) {
         if (fx::global().alive()) fx::global().clear();
         return;
@@ -845,6 +885,22 @@ void drawFx(const Camera& cam, const C3D_Mtx& view, const RenderSettings& rs, Fr
                 g_fxSources.push_back(s);
             }
         }
+        if (effects)   // spell effects (stage 5.33): first served, the pool's hard cap still holds
+            for (const SceneModel& sm : *effects) {
+                const Model* m = sm.model;
+                if (!sm.emit || !m || !m->fx || !m->drawable) continue;
+                fx::Source s;
+                s.key = (const void*)(uintptr_t)sm.fxKey;   // small numbers: never an Instance's address
+                s.owner = m;
+                s.blob = m->blob;
+                s.h = m->fx;
+                s.tex = (const void* const*)(m->tex.data() + m->fxTexBase);
+                memcpy(s.pos, sm.pos, sizeof s.pos);
+                memcpy(s.rot, sm.rot, sizeof s.rot);
+                s.scale = sm.scale;
+                s.priority = true;
+                g_fxSources.push_back(s);
+            }
         sys.frame(dt, rs.timeSec, cam.pos, rows, g_fxSources, g_fxQuads);
         if ((int)g_fxQuads.size() > kFxMaxQuads) g_fxQuads.resize(kFxMaxQuads);
         // alpha-blended back to front, then the additive ones by texture
@@ -1012,8 +1068,17 @@ void rendererSetProjection(float drawDist) {
     g_fogY = end / (end - start);
 }
 
+bool rendererUnitPoint(uint64_t guid, int slot, float out[3]) {
+    if (slot < 0 || slot > 5) return false;
+    auto it = g_unitPts.find(guid);
+    if (it == g_unitPts.end() || g_ptsFrame - it->second.frame > 2 || !(it->second.has & (1u << slot))) return false;
+    memcpy(out, it->second.p[slot], sizeof it->second.p[slot]);
+    return true;
+}
+
 void rendererDraw(C3D_RenderTarget* target, const Camera& cam, const RenderSettings& rsIn, FrameCounters& fc,
-                  const std::vector<Marker>* markers, const std::vector<CreatureInstance>* creatures) {
+                  const std::vector<Marker>* markers, const std::vector<CreatureInstance>* creatures,
+                  const std::vector<SceneModel>* effects) {
     (void)target;
     RenderSettings rs = rsIn;
     if (rs.underwater) rs.fog = true;   // the water is never clear: the fog switch only concerns the open air
@@ -1039,13 +1104,40 @@ void rendererDraw(C3D_RenderTarget* target, const Camera& cam, const RenderSetti
 
     if (!rs.underwater) drawSky(view, fc);
     drawTerrain(cam, view, fr, rs, fc);
+    if (rs.timeSec != g_fxLastTime) {   // a new frame (not the second eye): unit points age; old ones go now and then
+        ++g_ptsFrame;
+        if ((g_ptsFrame & 127) == 0)
+            for (auto it = g_unitPts.begin(); it != g_unitPts.end();) it = g_ptsFrame - it->second.frame > 60 ? g_unitPts.erase(it) : std::next(it);
+    }
     collectModels(fr, rs, fc);   // doodads (if enabled) and buildings
+    static std::vector<Instance> effInst;   // spell effects' meshes (stage 5.33), drawn with the doodads
+    effInst.clear();
+    if (effects && rs.effects > 0) {
+        effInst.reserve(effects->size());
+        for (const SceneModel& sm : *effects) {
+            Model* m = sm.model;
+            if (!sm.emit || !m || !m->drawable || !m->h) continue;
+            Instance in{};
+            in.model = m;
+            memcpy(in.pos, sm.pos, sizeof in.pos);
+            memcpy(in.rot, sm.rot, sizeof in.rot);
+            in.scale = sm.scale;
+            in.radius = m->h->radius * sm.scale;
+            in.lightModel[0] = kSun[0]; in.lightModel[1] = kSun[1]; in.lightModel[2] = kSun[2];   // effects are mostly unlit
+            effInst.push_back(in);
+        }
+        for (const Instance& in : effInst) {
+            if (!fr.sphere(in.pos, std::max(in.radius, 0.5f))) continue;
+            if (in.model->visible.empty()) g_activeModels.push_back(in.model);
+            in.model->visible.push_back(&in);
+        }
+    }
     drawModels(cam, view, rs, false, fc);
     if (markers) drawMarkers(cam, view, fr, rs, *markers, fc);
     if (creatures && rs.creatures) drawCreatures(cam, view, fr, rs, *creatures, fc);
     drawWater(cam, view, fr, rs, fc);
     drawModels(cam, view, rs, true, fc);
-    drawFx(cam, view, rs, fc);
+    drawFx(cam, view, rs, fc, effects);
     // Drop per-frame instance pointers: tiles/models may be freed before the next frame.
     for (Model* m : g_activeModels) m->visible.clear();
     g_activeModels.clear();

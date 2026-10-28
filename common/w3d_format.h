@@ -39,6 +39,7 @@ enum W3dEntryType {
     W3D_ENTRY_LIQUID    = W3D_FOURCC('L', 'I', 'Q', 'D'),   // stage 5.26: where the liquids of a tile are (swimming, id = tile)
     W3D_ENTRY_PACKINFO  = W3D_FOURCC('P', 'I', 'N', 'F'),   // stage 5.27: what this file is in a set of packs (id 0)
     W3D_ENTRY_GLUE      = W3D_FOURCC('G', 'L', 'U', 'E'),   // stage 5.29: a login / character screen scene (W3dGlueScene)
+    W3D_ENTRY_SPELLFX   = W3D_FOURCC('S', 'V', 'F', 'X'),   // stage 5.33: spell visuals -> effect models (w3d_fx.h, id 0)
 };
 
 // ---------------------------------------------------------------- pack sets (stage 5.27)
