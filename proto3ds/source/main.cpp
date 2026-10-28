@@ -313,6 +313,12 @@ static void writeReport(const Bench* b, float drawDist, const RenderSettings& rs
             fprintf(f, "  in world as %s: map %lu, latency %lu ms, %llu bytes received, %u opcodes seen\n",
                     g_login.characterName().c_str(), (unsigned long)g_login.mapId(), (unsigned long)g_login.latencyMs(),
                     (unsigned long long)g_login.bytesReceived(), (unsigned)g_login.opcodesSeen());
+            {   // 5.35d: every ping of the session (one per 30 s, as the real client; the first right after entering the world)
+                const w3n::WorldClient& wc = g_login.worldClient();
+                fprintf(f, "  ping: %lu samples, min %lu / avg %lu / max %lu ms (includes up to one frame of waiting); Wi-Fi exclusive: %s\n",
+                        (unsigned long)wc.pongs(), (unsigned long)wc.latencyMin(), (unsigned long)wc.latencyAvg(),
+                        (unsigned long)wc.latencyMax(), w3n::netRadioExclusive() ? "yes" : "no");
+            }
             w3n::GameSession& g = g_login.game();
             const w3n::ObjectStats& os = g.objects.stats;
             fprintf(f, "  stage 5: objects %u (players %u, units %u, gameobjects %u), update packets %lu + %lu compressed, failed %lu%s%s\n",

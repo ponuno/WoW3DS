@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "client.hpp"
 
 #include <cstring>
@@ -218,6 +219,8 @@ bool WorldClient::start(const std::string& hostPort, const std::string& account,
     cipher_ = HeaderCipher{};
     headerDecrypted_ = 0;
     queuePos_ = map_ = pingSeq_ = latency_ = 0;
+    pongs_ = latMin_ = latMax_ = 0;
+    latSum_ = 0;
     lastPing_ = pingSent_ = 0;
     bytesIn_ = 0;
     wardenSeen_ = false;
@@ -438,7 +441,14 @@ void WorldClient::handle(Packet& p) {
             wardenSeen_ = true;
             break;   // passed on to onPacket; deliberately not answered
         case SMSG_PONG:
-            if (pingSent_) latency_ = (uint32_t)(nowMs() - pingSent_);
+            if (pingSent_) {
+                latency_ = (uint32_t)(nowMs() - pingSent_);
+                latMin_ = pongs_ ? std::min(latMin_, latency_) : latency_;
+                latMax_ = std::max(latMax_, latency_);
+                latSum_ += latency_;
+                ++pongs_;
+                pingSent_ = 0;
+            }
             return;
         case SMSG_LOGOUT_RESPONSE:
             if (r.u32() != 0) { state_ = State::InWorld; err_ = "logout refused (in combat?)"; }

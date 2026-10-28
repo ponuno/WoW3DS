@@ -126,6 +126,11 @@ public:
     const float* position() const { return pos_; }
     float orientation() const { return orient_; }
     uint32_t lastLatencyMs() const { return latency_; }
+    // 5.35d: every pong of the session (one per pingIntervalMs): count, min, max, sum
+    uint32_t pongs() const { return pongs_; }
+    uint32_t latencyMin() const { return latMin_; }
+    uint32_t latencyMax() const { return latMax_; }
+    uint32_t latencyAvg() const { return pongs_ ? (uint32_t)(latSum_ / pongs_) : 0; }
     const Timings& timings() const { return t_; }
     const std::map<uint16_t, uint32_t>& opcodeCounts() const { return opCounts_; }
     uint64_t bytesReceived() const { return bytesIn_; }
@@ -150,6 +155,8 @@ private:
     std::vector<Character> chars_;
     uint64_t playerGuid_ = 0;
     uint32_t queuePos_ = 0, map_ = 0, pingSeq_ = 0, latency_ = 0;
+    uint32_t pongs_ = 0, latMin_ = 0, latMax_ = 0;
+    uint64_t latSum_ = 0;
     float pos_[3] = {0, 0, 0}, orient_ = 0;
     uint64_t t0_ = 0, tStep_ = 0, lastPing_ = 0, pingSent_ = 0, deadline_ = 0;
     Timings t_;

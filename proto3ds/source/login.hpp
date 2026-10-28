@@ -50,6 +50,7 @@ public:
     const w3n::Timings& authTimings() const { return auth_.timings(); }
     const w3n::Timings& worldTimings() const { return world_.timings(); }
     uint32_t latencyMs() const { return world_.lastLatencyMs(); }
+    const w3n::WorldClient& worldClient() const { return world_; }
     uint64_t bytesReceived() const { return world_.bytesReceived(); }
     size_t opcodesSeen() const { return world_.opcodeCounts().size(); }
     const std::string& characterName() const { return charName_; }
