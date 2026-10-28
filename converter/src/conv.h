@@ -229,7 +229,7 @@ struct ConvStats {
     size_t wmoPlacements = 0, wmoPlacedGroups = 0, wmoDoodads = 0, duplicatesSkipped = 0;
     size_t m2SubsFlipped = 0, wmoSubsFlipped = 0;
     size_t fxModels = 0, fxEmitters = 0, fxGlows = 0;   // stage 5.32
-    size_t fxAnimated = 0, fxEmittersDropped = 0;   // 5.35f: emitters without a rate or a life                                // stage 5.35: effect models with baked bone animation
+    size_t fxAnimated = 0, fxEmittersDropped = 0, fxParticleOnly = 0;   // 5.35f: emitters without a rate or a life                                // stage 5.35: effect models with baked bone animation
     size_t creatureModelsOk = 0, creatureModelsFailed = 0, displaysOk = 0, displaysFailed = 0, creatureTris = 0;
     size_t creatureSeqs = 0, creatureKeyBytes = 0, creaturePalettes = 0, creatureBones = 0;
     size_t creatureSrcVerts = 0, creatureLossyVerts = 0;

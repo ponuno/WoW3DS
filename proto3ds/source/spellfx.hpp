@@ -75,7 +75,7 @@ public:
     void clear() { active_.clear(); }
     // Stage 5.34, effects that last as long as something on the unit does (an aura, a channel, a lootable corpse): the
     // stage's effects of the visual on the unit until stop(); keys[] gets their keys (0 = not started). Returns how many.
-    int startLoop(const W3dSpellVisual* v, int stage, uint64_t unit, uint32_t nowMs, uint32_t keys[2]);
+    int startLoop(const W3dSpellVisual* v, int stage, uint64_t unit, uint32_t nowMs, uint32_t keys[2], int tagStage = -1);   // tagStage: what it counts as
     uint32_t startEffect(uint16_t effect, uint64_t unit, uint8_t slot, uint32_t nowMs, uint32_t durMs, uint8_t stage);
     void stop(uint32_t key, uint32_t nowMs);         // ends it (it lingers, then goes)
     bool running(uint32_t key) const;                // started and not stopped / dropped

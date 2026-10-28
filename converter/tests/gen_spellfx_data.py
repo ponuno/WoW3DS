@@ -53,19 +53,21 @@ rows += [spell(585, "Smite", 13, 0)]
 rows += [spell(17, "Power Word: Shield", 14, 0), spell(689, "Drain Life", 15, 0)]   # stage 5.34: an aura, a channel
 dbc("Spell.dbc", 173, rows)
 
-# ---- SpellVisual: id, precast kit, cast kit, impact kit, state, statedone, channel, has missile, missile model, ...
+# ---- SpellVisual as 1.12 has it (5.35f, from a real client): id, precast kit, cast kit, impact kit, state kit, state
+#      done kit, has missile (0/1), missile model, path type, destination attachment, missile sound ...
 dbc("SpellVisual.dbc", 16, [
-    [10, 100, 101, 102, 0, 0, 0, 1, 1003],
-    [11, 0, 0, 0, 0, 0, 0, 1, 1007],
+    [10, 100, 101, 102, 0, 0, 1, 1003, 0, 1],
+    [11, 0, 0, 0, 0, 0, 1, 1007, 0, 1],
     [12, 103, 0, 104],
     [13, 0, 0, 105],
     [14, 0, 0, 0, 106],               # state kit (column 4): the shield around the unit while the aura lasts
-    [15, 0, 0, 0, 0, 0, 107],         # channel kit (column 6): in the hands while channelling
+    [15, 107],                        # 1.12 has no channel kit: a channel shows the precast kit (in the hands)
 ])
 # ---- SpellVisualKit: id, start anim, anim, head 3, chest 4, base 5, left hand 6, right hand 7, breath 8, weapons 9/10,
 #      special 9..11 (1.12 has no weapon effects), world 12, sound 13 (11 is still a special: the test keeps it)
 def kit(kid, **eff):
     r = [0] * 20; r[0] = kid
+    for c in range(3, 13): r[c] = 0xFFFFFFFF   # 1.12: an empty effect cell is -1
     cols = dict(head=3, chest=4, base=5, lhand=6, rhand=7, breath=8, special=11)
     for k, v in eff.items(): r[cols[k]] = v
     return r
@@ -104,7 +106,12 @@ effect("Fire_Cast_Base", dict(fire, rate=40.0, type=2, areaL=0.5))
 effect("Fireball_Missile", dict(fire, rate=50.0, life=0.4, scales=(0.7, 0.5, 0.2)), glow=True)
 effect("Fire_Impact_Chest", dict(fire, rate=60.0, type=2, speed=3.0))
 effect("Holy_Precast_Chest", dict(fire, colors=[(255, 255, 200, 255), (255, 240, 160, 180), (200, 180, 80, 0)]))
-effect("Holy_Impact_Base", dict(fire, rate=25.0))
+# 5.35f: particles only, no vertex (as Fire_Precast_Hand, LesserHeal_Base of the real data)
+def effect_particles(name, emitter):
+    m = m2(name, [], [], [], [], [(0, "Spells\\Fire.blp")], [0], [(0, 3)], [(-1, (0, 0, 0), {})],
+           [(0, 0, 0, 1000, 0.0)], [], emitters=[emitter])
+    open(path("Spells\\" + name + ".m2"), "wb").write(m)
+effect_particles("Holy_Impact_Base", dict(fire, rate=25.0))
 effect("Frostbolt_Missile", dict(fire, colors=[(180, 220, 255, 255), (120, 180, 255, 200), (40, 80, 160, 0)]))
 # stage 5.35: a shield with a ring that turns once a second (bone 1, about Z) and an emitter riding that bone
 def effect_anim(name, emitter):

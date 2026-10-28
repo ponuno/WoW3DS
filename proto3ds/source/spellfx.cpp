@@ -91,7 +91,8 @@ uint32_t Director::startEffect(uint16_t effect, uint64_t unit, uint8_t slot, uin
     return add(a) ? active_.back().key : 0;
 }
 
-int Director::startLoop(const W3dSpellVisual* v, int stage, uint64_t unit, uint32_t nowMs, uint32_t keys[2]) {
+int Director::startLoop(const W3dSpellVisual* v, int stage, uint64_t unit, uint32_t nowMs, uint32_t keys[2], int tagStage) {
+    if (tagStage < 0) tagStage = stage;
     keys[0] = keys[1] = 0;
     if (!v || stage < 0 || stage >= W3D_SFX_STAGES) return 0;
     int n = 0;
@@ -99,7 +100,7 @@ int Director::startLoop(const W3dSpellVisual* v, int stage, uint64_t unit, uint3
         if (v->effect[stage][k] == W3D_SFX_NONE) continue;
         uint8_t slot = v->slot[stage][k];
         if (slot == W3D_SLOT_NONE) slot = W3D_SLOT_CHEST;
-        keys[k] = startEffect(v->effect[stage][k], unit, slot, nowMs, 0x40000000u, (uint8_t)stage);   // until stopped
+        keys[k] = startEffect(v->effect[stage][k], unit, slot, nowMs, 0x40000000u, (uint8_t)tagStage);   // until stopped
         n += keys[k] != 0;
     }
     return n;
@@ -272,8 +273,9 @@ void Lasting::set(Director& d, const Table& t, std::unordered_map<uint64_t, Loop
     const W3dSpellVisual* v = t.visualOf(spell, nullptr);
     if (!v) return;
     int st = stage;
-    if (stage == W3D_SFX_CHANNEL && v->effect[W3D_SFX_CHANNEL][0] == W3D_SFX_NONE) st = W3D_SFX_PRECAST;   // no channel kit
-    d.startLoop(v, st, guid, nowMs, l.keys);
+    // no channel kit (1.12 has none): the precast kit, still a channel (a precast would end with the spell's own events)
+    if (stage == W3D_SFX_CHANNEL && v->effect[W3D_SFX_CHANNEL][0] == W3D_SFX_NONE) st = W3D_SFX_PRECAST;
+    d.startLoop(v, st, guid, nowMs, l.keys, stage);
 }
 
 void Lasting::update(Director& d, const Table& t, const std::vector<UnitState>& units, uint32_t nowMs) {

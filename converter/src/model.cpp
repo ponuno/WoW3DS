@@ -388,16 +388,28 @@ static uint32_t addModelFromGameImpl(PackWriter& pack, const DataDir& data, cons
         return 0;
     }
     wowee::pipeline::M2Model mdl = wowee::pipeline::M2Loader::load(bytes);
-    if (mdl.vertices.empty()) {
+    // 5.35f: most spell effects are particles only - no vertex at all (Fire_Precast_Hand, MoltenBlast_Impact_Chest,
+    // LesserHeal_Base ...): they were refused as broken models, so Fireball and Heal showed nothing. With effects on, such a
+    // model becomes one degenerate triangle carrying its emitters.
+    const bool particlesOnly = !o.noFx && mdl.vertices.empty() && !mdl.particleEmitters.empty();
+    if (mdl.vertices.empty() && !particlesOnly) {
         ++st.modelsFailed;
         return 0;
     }
-    if (mdl.batches.empty() || mdl.indices.empty()) {
+    if (!particlesOnly && (mdl.batches.empty() || mdl.indices.empty())) {
         // Post-vanilla layout keeps LOD 0 in an external .skin.
         std::vector<uint8_t> skin;
         if (data.read(wowee::pipeline::skinPathForM2(m2Path), skin)) wowee::pipeline::M2Loader::loadSkin(skin, mdl);
     }
-    if (!mdl.isValid() || mdl.batches.empty()) {
+    if (particlesOnly) {
+        mdl.vertices.resize(1);
+        mdl.vertices[0] = {};
+        mdl.vertices[0].boneWeights[0] = 255;
+        mdl.vertices[0].normal = glm::vec3(0, 0, 1);
+        mdl.batches.clear();
+        mdl.indices.clear();
+        ++st.fxParticleOnly;
+    } else if (!mdl.isValid() || mdl.batches.empty()) {
         if (o.verbose) std::fprintf(stderr, "  model invalid: %s\n", m2Path.c_str());
         ++st.modelsFailed;
         return 0;
@@ -512,7 +524,7 @@ static uint32_t addModelFromGameImpl(PackWriter& pack, const DataDir& data, cons
         if (animOk) s.tag = tagFor(dominantBone(b));
         src.subs.push_back(std::move(s));
     }
-    if (src.subs.empty() && !glows.empty()) {   // nothing but glow cards (a light halo): one empty triangle carries them
+    if (src.subs.empty() && (!glows.empty() || particlesOnly)) {   // nothing but glow cards / particles: one empty triangle carries them
         ModelSource::Sub s;
         s.texId = UINT32_MAX;
         s.blend = W3D_BLEND_ADD;

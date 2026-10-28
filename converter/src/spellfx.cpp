@@ -85,7 +85,7 @@ bool convertSpellEffects(const Options& oIn, const DataDir& data, PackWriter& pa
         if (c.c >= svk.fields || c.c >= 64) continue;
         uint32_t nz = 0, ok = 0;
         for (uint32_t r = 0; r < svk.records; ++r)
-            if (const uint32_t e = svk.u32(r, c.c)) { ++nz; ok += names.count(e) ? 1 : 0; }
+            if (const uint32_t e = svk.u32(r, c.c); e && e != 0xFFFFFFFFu) { ++nz; ok += names.count(e) ? 1 : 0; }   // -1 = none
         colOk[c.c] = nz && ok * 2 >= nz;
     }
     std::map<uint32_t, KitFx> kits;
@@ -103,7 +103,31 @@ bool convertSpellEffects(const Options& oIn, const DataDir& data, PackWriter& pa
         }
         if (n) kits[svk.u32(r, 0)] = k;
     }
-    // ---- SpellVisual: four stages
+    // ---- SpellVisual. 1.12 as the data shows it (--explain-spell on a real client): 1 precast, 2 cast, 3 impact, 4 state,
+    // 5 state done kit, 6 "has a missile" (0/1), 7 the missile model, 8 path type, 9 destination attachment, 10 missile
+    // sound. (5.35f: the missile was read from 8 and the flag in 6 as a channel kit - no Fireball had a missile.) The
+    // missile column is the one of 7 / 8 whose values name effects; a channel kit column only when one really holds kits
+    // (many different ones) - else a channel shows the precast kit.
+    auto empty = [](uint32_t v) { return v == 0 || v == 0xFFFFFFFFu; };
+    int misCol = -1;
+    {
+        uint32_t best = 0;
+        for (uint32_t c : {7u, 8u}) {
+            if (c >= sv.fields) continue;
+            uint32_t nz = 0, ok = 0;
+            for (uint32_t r = 0; r < sv.records; ++r)
+                if (const uint32_t v = sv.u32(r, c); !empty(v)) { ++nz; ok += names.count(v) ? 1 : 0; }
+            if (nz && ok * 2 >= nz && ok > best) { best = ok; misCol = (int)c; }
+        }
+    }
+    int chanCol = -1;
+    if (sv.fields > 6) {
+        uint32_t nz = 0, ok = 0;
+        std::set<uint32_t> distinct;
+        for (uint32_t r = 0; r < sv.records; ++r)
+            if (const uint32_t v = sv.u32(r, 6); !empty(v)) { ++nz; ok += kits.count(v) ? 1 : 0; distinct.insert(v); }
+        if (nz && ok * 2 >= nz && distinct.size() >= 3) chanCol = 6;
+    }
     struct Vis { uint32_t id; KitFx st[W3D_SFX_STAGES]; };
     std::map<uint32_t, Vis> visuals;
     std::set<uint32_t> missileVisuals;
@@ -111,16 +135,15 @@ bool convertSpellEffects(const Options& oIn, const DataDir& data, PackWriter& pa
         Vis v{};
         v.id = sv.u32(r, 0);
         bool any = false;
-        // 1 precast, 2 cast, 3 impact kit; 4 state kit (the aura on a unit), 6 channel kit (stage 5.34)
-        const struct { uint32_t col; int stage; } kitCol[5] = {{1, W3D_SFX_PRECAST}, {2, W3D_SFX_CAST}, {3, W3D_SFX_IMPACT},
-                                                                {4, W3D_SFX_STATE}, {6, W3D_SFX_CHANNEL}};
+        const struct { int col; int stage; } kitCol[5] = {{1, W3D_SFX_PRECAST}, {2, W3D_SFX_CAST}, {3, W3D_SFX_IMPACT},
+                                                           {4, W3D_SFX_STATE}, {chanCol, W3D_SFX_CHANNEL}};
         for (const auto& kc : kitCol) {
-            if (kc.col >= sv.fields) continue;
-            auto it = kits.find(sv.u32(r, kc.col));
+            if (kc.col < 0 || (uint32_t)kc.col >= sv.fields) continue;
+            auto it = kits.find(sv.u32(r, (uint32_t)kc.col));
             if (it != kits.end()) { v.st[kc.stage] = it->second; any = true; }
         }
-        const uint32_t mis = sv.u32(r, 8);
-        if (mis && names.count(mis)) {
+        const uint32_t mis = misCol >= 0 ? sv.u32(r, (uint32_t)misCol) : 0;
+        if (!empty(mis) && names.count(mis)) {
             v.st[W3D_SFX_MISSILE].effect[0] = mis;
             v.st[W3D_SFX_MISSILE].slot[0] = W3D_SLOT_NONE;
             missileVisuals.insert(v.id);
@@ -128,6 +151,7 @@ bool convertSpellEffects(const Options& oIn, const DataDir& data, PackWriter& pa
         }
         if (any && v.id) visuals[v.id] = v;
     }
+    std::printf("  spell effects: SpellVisual missile column %d, channel kit column %d\n", misCol, chanCol);
     // ---- Spell.dbc: spell -> visual (5 columns before the name, as the sounds), missile speed
     int nameCol = spellNameColumn(spell);
     if (nameCol < 0) nameCol = 120;
@@ -239,7 +263,7 @@ bool convertSpellEffects(const Options& oIn, const DataDir& data, PackWriter& pa
     std::printf("  spell effects: %zu spells, %zu visuals, %zu effect models (%zu failed), missile speed column %d, level-up %s, loot %s\n",
                  outSpells.size(), outVis.size(), effects.size(), failed, spCol, levelUp != W3D_SFX_NONE ? "yes" : "no",
                  loot != W3D_SFX_NONE ? "yes" : "no");
-    std::printf("  spell effects: %zu particle emitters dropped (no rate / life)\n", st.fxEmittersDropped);
+    std::printf("  spell effects: %zu particle emitters dropped (no rate / life), %zu models of particles only\n", st.fxEmittersDropped, st.fxParticleOnly);
     return true;
 }
 
