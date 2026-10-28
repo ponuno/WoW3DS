@@ -415,8 +415,15 @@ void drawModels(const Camera& cam, const C3D_Mtx& view, const RenderSettings& rs
     C3D_TexEnvFunc(env, C3D_RGB, GPU_MODULATE);
     C3D_TexEnvSrc(env, C3D_Alpha, GPU_TEXTURE0, GPU_TEXTURE0, GPU_TEXTURE0);
     C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
-    fogStage(1);
-    resetStages(2);
+    // 5.35j: stage 1 multiplies by a constant - white, except the parts of effect models that fade / are tinted
+    C3D_TexEnv* tintEnv = C3D_GetTexEnv(1);
+    C3D_TexEnvInit(tintEnv);
+    C3D_TexEnvSrc(tintEnv, C3D_Both, GPU_PREVIOUS, GPU_CONSTANT, GPU_PRIMARY_COLOR);
+    C3D_TexEnvFunc(tintEnv, C3D_Both, GPU_MODULATE);
+    C3D_TexEnvColor(tintEnv, 0xFFFFFFFFu);
+    bool tintWhite = true;
+    fogStage(2);
+    resetStages(3);
     setFogUniform(g_modelSh, rs.fog, true);
 
     BindCache bc;
@@ -452,6 +459,20 @@ void drawModels(const Camera& cam, const C3D_Mtx& view, const RenderSettings& rs
                     for (int r = 0; r < 3; ++r) { bm.r[r].x = a[r * 4]; bm.r[r].y = a[r * 4 + 1]; bm.r[r].z = a[r * 4 + 2]; bm.r[r].w = a[r * 4 + 3]; }
                     Mtx_Multiply(&out, &mv, &bm);
                     mv = out;
+                }
+                if (m->fxAnim.tint && s < m->fxAnim.a->subCount) {   // 5.35j: the part's colour and opacity now
+                    float c[4];
+                    w3d_fx_anim_tint(&m->fxAnim, (int)s, in->animMs, c);
+                    if (sm.blend == W3D_BLEND_ADD) for (int k = 0; k < 3; ++k) c[k] *= c[3];   // additive: fades by darkening
+                    if (sm.blend == W3D_BLEND_ADD && c[0] + c[1] + c[2] < 0.01f) continue;   // invisible now
+                    if (sm.blend == W3D_BLEND_ALPHA && c[3] < 0.01f) continue;
+                    const u32 rgba = (u32)(c[0] * 255.0f + 0.5f) | (u32)(c[1] * 255.0f + 0.5f) << 8 | (u32)(c[2] * 255.0f + 0.5f) << 16 |
+                                     (u32)(c[3] * 255.0f + 0.5f) << 24;
+                    C3D_TexEnvColor(C3D_GetTexEnv(1), rgba);
+                    tintWhite = false;
+                } else if (!tintWhite) {
+                    C3D_TexEnvColor(C3D_GetTexEnv(1), 0xFFFFFFFFu);
+                    tintWhite = true;
                 }
                 C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_modelSh.uMV, &mv);
                 C3D_FVUnifSet(GPU_VERTEX_SHADER, g_modelSh.uLight, in->lightModel[0], in->lightModel[1], in->lightModel[2], 0);

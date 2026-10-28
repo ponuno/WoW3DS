@@ -83,8 +83,13 @@ typedef struct {
     uint32_t magic;
     uint16_t boneCount, frames;
     uint32_t durationMs;          // one loop
-    uint16_t subCount, emitterCount, glowCount, pad;
+    uint16_t subCount, emitterCount, glowCount;
+    uint16_t flags;               // W3D_FXA_TINT (5.35j; 0 in 5.35 blocks)
 } W3dFxAnim;                      // 16 bytes
+// 5.35j: after the matrices, uint32 tint[frames][subCount] (RGBA8, r in the low byte): each part's colour and opacity
+// over the loop (its transparency track times its colour's alpha). The client multiplies the part by it (additive
+// parts by the opacity too: they fade by getting darker).
+#define W3D_FXA_TINT 1u
 
 typedef struct {
     const W3dFxAnim* a;
@@ -92,11 +97,12 @@ typedef struct {
     const uint8_t* emitterBone;
     const uint8_t* glowBone;
     const float* mat;             // [frames][boneCount][12]
+    const uint32_t* tint;         // [frames][subCount] or null
 } W3dFxAnimView;
 
 // The animation block of a model with fx (validated against the blob size), or a view with a == null.
 static inline W3dFxAnimView w3d_fx_anim(const uint8_t* blob, uint32_t size, const W3dFxHeader* fx) {
-    W3dFxAnimView v = {0, 0, 0, 0, 0};
+    W3dFxAnimView v = {0, 0, 0, 0, 0, 0};
     if (!blob || !fx || !fx->animOff4) return v;
     const uint64_t off = (uint64_t)fx->animOff4 * 4u;
     if (off + sizeof(W3dFxAnim) > size - 8u) return v;
@@ -106,13 +112,15 @@ static inline W3dFxAnimView w3d_fx_anim(const uint8_t* blob, uint32_t size, cons
         return v;
     const uint64_t t1 = (a->subCount + 3u) & ~3u, t2 = (a->emitterCount + 3u) & ~3u, t3 = (a->glowCount + 3u) & ~3u;
     const uint64_t offMat = off + sizeof(W3dFxAnim) + t1 + t2 + t3;
-    const uint64_t end = offMat + (uint64_t)a->frames * a->boneCount * 12u * 4u;
+    const uint64_t endMat = offMat + (uint64_t)a->frames * a->boneCount * 12u * 4u;
+    const uint64_t end = endMat + ((a->flags & W3D_FXA_TINT) ? (uint64_t)a->frames * a->subCount * 4u : 0u);
     if (end > size - 8u || (offMat & 3)) return v;
     v.a = a;
     v.subBone = blob + off + sizeof(W3dFxAnim);
     v.emitterBone = v.subBone + t1;
     v.glowBone = v.emitterBone + t2;
     v.mat = (const float*)(blob + offMat);
+    if (a->flags & W3D_FXA_TINT) v.tint = (const uint32_t*)(blob + endMat);
     return v;
 }
 
@@ -129,6 +137,23 @@ static inline void w3d_fx_anim_matrix(const W3dFxAnimView* v, int bone, uint32_t
     const float* m0 = v->mat + ((size_t)i0 * v->a->boneCount + (size_t)bone) * 12;
     const float* m1 = v->mat + ((size_t)i1 * v->a->boneCount + (size_t)bone) * 12;
     for (int k = 0; k < 12; ++k) out[k] = m0[k] + (m1[k] - m0[k]) * f;
+}
+
+// A part's tint (r, g, b, a in 0..1) at ageMs into the loop; white when the block has none.
+static inline void w3d_fx_anim_tint(const W3dFxAnimView* v, int sub, uint32_t ageMs, float out[4]) {
+    out[0] = out[1] = out[2] = out[3] = 1.0f;
+    if (!v->a || !v->tint || sub < 0 || sub >= v->a->subCount) return;
+    const uint32_t d = v->a->durationMs, F = v->a->frames;
+    const float pos = (float)(ageMs % d) / (float)d * (float)F;
+    uint32_t i0 = (uint32_t)pos;
+    if (i0 >= F) i0 = F - 1;
+    const uint32_t i1 = (i0 + 1) % F;
+    const float f = pos - (float)i0;
+    const uint32_t c0 = v->tint[(size_t)i0 * v->a->subCount + (size_t)sub], c1 = v->tint[(size_t)i1 * v->a->subCount + (size_t)sub];
+    for (int k = 0; k < 4; ++k) {
+        const float a = (float)((c0 >> (8 * k)) & 255) / 255.0f, b = (float)((c1 >> (8 * k)) & 255) / 255.0f;
+        out[k] = a + (b - a) * f;
+    }
 }
 
 // ---------------------------------------------------------------- spell visuals (stage 5.33, 5.34)

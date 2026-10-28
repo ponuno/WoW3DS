@@ -211,11 +211,11 @@ uint32_t addTextureFromGame(PackWriter& pack, const DataDir& data, const std::st
 // ------------------------------------------------------------ geometry
 struct ModelSource {               // engine-neutral mesh before packing
     struct V { float p[3]; float n[3]; float uv[2]; };
-    struct Sub { uint32_t texId; uint8_t blend, flags; std::vector<uint32_t> idx; uint8_t tag = 0; };   // tag: stage 5.35, kept apart in the merge
+    struct Sub { uint32_t texId; uint8_t blend, flags; std::vector<uint32_t> idx; uint16_t tag = 0; };   // tag: stage 5.35, kept apart in the merge
     std::vector<V> verts;
     std::vector<Sub> subs;
     std::vector<uint32_t> texIds;   // TEX entry ids referenced by Sub::texId (index)
-    std::vector<uint8_t> outTags;   // out (stage 5.35): the Sub::tag of every submesh of the blob, in order
+    std::vector<uint16_t> outTags;   // out (stage 5.35): the Sub::tag of every submesh of the blob, in order
     size_t dropped = 0;             // out: indices/triangles buildModelBlob had to throw away (partial triangle, index out of range)
 };
 // Flips idx (triangle list over m.verts) to be CCW seen from the vertex normals; true if flipped.

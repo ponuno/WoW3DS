@@ -30,7 +30,7 @@ struct Source {                   // one instance with effects near the camera, 
     float rot[3] = {0, 0, 0};     // as the mesh: world = pos + Rz(rot[2]) * Ry(rot[1]) * Rx(rot[0]) * (scale * local)
     float scale = 1;
     bool priority = false;        // a spell effect (stage 5.33): no thinning by distance or a filling pool
-    W3dFxAnimView anim = {0, 0, 0, 0, 0};   // stage 5.35: baked bone animation of the model (a == null: still)
+    W3dFxAnimView anim = {0, 0, 0, 0, 0, 0};   // stage 5.35: baked bone animation of the model (a == null: still)
     uint32_t animMs = 0;          // ... and how far into it
 };
 

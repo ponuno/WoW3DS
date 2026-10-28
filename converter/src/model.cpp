@@ -74,7 +74,7 @@ std::vector<uint8_t> buildModelBlob(ModelSource& m, int maxTris, size_t* trisOut
     if (flippedOut) *flippedOut = flipped;
 
     // ---- 1. merge submeshes sharing material
-    std::map<std::tuple<uint32_t, uint8_t, uint8_t, uint8_t>, ModelSource::Sub> merged;
+    std::map<std::tuple<uint32_t, uint8_t, uint8_t, uint16_t>, ModelSource::Sub> merged;
     for (auto& s : m.subs) {
         auto& d = merged[{s.texId, s.blend, s.flags, s.tag}];
         d.texId = s.texId; d.blend = s.blend; d.flags = s.flags; d.tag = s.tag;
@@ -208,8 +208,10 @@ static uint8_t mapBlend(uint16_t m2Blend) {
     switch (m2Blend) {
         case 0: return W3D_BLEND_OPAQUE;
         case 1: return W3D_BLEND_ALPHAKEY;
-        case 3: case 6: case 7: return W3D_BLEND_ADD;
-        default: return W3D_BLEND_ALPHA;   // 2 alpha, 4/5 modulate approximated
+        // 5.35j: 4 is "Add" (additive with the texture's alpha), the blend of nearly every spell effect and glow: it was
+        // drawn alpha-blended - black cards and cones over the scene (a level-up flash as huge black spikes)
+        case 3: case 4: case 6: case 7: return W3D_BLEND_ADD;
+        default: return W3D_BLEND_ALPHA;   // 2 alpha, 5 modulate approximated
     }
 }
 
@@ -285,13 +287,10 @@ static void appendFx(std::vector<uint8_t>& blob, std::vector<W3dFxEmitter>& em, 
 }
 
 
-// Stage 5.35: the animation of an effect model, baked per bone (see common/w3d_fx.h, W3dFxAnim). used = the M2 bones
-// that something hangs on (index = the tag the parts got); the loop is the first Stand sequence (else the first), or the
-// longest global sequence when the tracks run on those. Empty: nothing moves.
-static std::vector<uint8_t> bakeFxAnim(const wowee::pipeline::M2Model& m, const std::vector<int>& used,
-                                       const std::vector<uint8_t>& subBone, const std::vector<uint8_t>& emBone,
-                                       const std::vector<uint8_t>& glBone) {
-    if (used.empty() || used.size() > W3D_FXA_MAX_BONES || m.bones.empty() || m.sequences.empty()) return {};
+// Stage 5.35: the loop of an effect model: the first Stand sequence (else the first), or the longest global sequence
+// when the tracks run on those. False: no loop (nothing to animate).
+static bool fxLoop(const wowee::pipeline::M2Model& m, int* seqOut, uint32_t* loopOut) {
+    if (m.sequences.empty()) return false;
     int seq = 0;
     for (size_t i = 0; i < m.sequences.size(); ++i)
         if (m.sequences[i].id == 0 && (m.sequences[seq].id != 0 || m.sequences[i].variationIndex < m.sequences[seq].variationIndex))
@@ -299,12 +298,48 @@ static std::vector<uint8_t> bakeFxAnim(const wowee::pipeline::M2Model& m, const 
     uint32_t loop = m.sequences[seq].duration;
     if (loop < 100)
         for (uint32_t g : m.globalSequenceDurations) loop = std::max(loop, g);
-    if (loop < 100) return {};
-    loop = std::min<uint32_t>(loop, 8000);
+    if (loop < 100) return false;
+    *seqOut = seq;
+    *loopOut = std::min<uint32_t>(loop, 8000);
+    return true;
+}
+
+// 5.35j: how a mesh part of an effect fades and is tinted: its transparency track (batch -> textureWeightLookup ->
+// textureWeightTracks) times its colour's alpha, coloured by the colour's RGB (at rest: WoWee reads only that).
+struct FxFade { int weight = -1; int color = -1; };
+static void fxFadeAt(const wowee::pipeline::M2Model& m, const FxFade& f, int seq, float tms, float rgba[4]) {
+    rgba[0] = rgba[1] = rgba[2] = rgba[3] = 1.0f;
+    if (f.weight >= 0 && (size_t)f.weight < m.textureWeightTracks.size()) {
+        using namespace wowee::rendering::m2_track;
+        const float fallback = (size_t)f.weight < m.textureWeights.size() ? m.textureWeights[(size_t)f.weight] : 1.0f;
+        rgba[3] = std::clamp(sampleFloat(m.textureWeightTracks[(size_t)f.weight], seq, tms, tms, m.globalSequenceDurations, fallback), 0.0f, 1.0f);
+    }
+    if (f.color >= 0) {
+        if ((size_t)f.color < m.colorAlphas.size()) rgba[3] *= std::clamp(m.colorAlphas[(size_t)f.color], 0.0f, 1.0f);
+        if ((size_t)f.color < m.colorRGB.size()) {
+            const glm::vec3 c = m.colorRGB[(size_t)f.color];
+            if (c.r + c.g + c.b > 0.02f)
+                for (int k = 0; k < 3; ++k) rgba[k] = std::clamp(c[k], 0.0f, 1.0f);
+        }
+    }
+}
+
+// Stage 5.35: the animation of an effect model, baked per bone (see common/w3d_fx.h, W3dFxAnim). used = the M2 bones
+// that something hangs on (index = the tag the parts got; -1 = a part that stays). subTag: per submesh of the blob,
+// bone tag | fade index << 8 (fades[0] = none). Empty: nothing moves and nothing fades.
+static std::vector<uint8_t> bakeFxAnim(const wowee::pipeline::M2Model& m, const std::vector<int>& used,
+                                       const std::vector<uint16_t>& subTag, const std::vector<uint8_t>& emBone,
+                                       const std::vector<uint8_t>& glBone, const std::vector<FxFade>& fades) {
+    if (used.size() > W3D_FXA_MAX_BONES) return {};
+    int seq = 0;
+    uint32_t loop = 0;
+    if (!fxLoop(m, &seq, &loop)) return {};
     const uint32_t frames = std::clamp<uint32_t>((uint32_t)std::ceil(loop / 1000.0f * 16.0f), 2, W3D_FXA_MAX_FRAMES);
     const size_t nb = m.bones.size();
-    std::vector<float> mats((size_t)frames * used.size() * 12);
-    bool moves = false;
+    const size_t nbones = std::max<size_t>(used.size(), 1);
+    std::vector<float> mats((size_t)frames * nbones * 12);
+    std::vector<uint32_t> tints((size_t)frames * subTag.size(), 0xFFFFFFFFu);
+    bool moves = false, tinted = false;
     for (uint32_t f = 0; f < frames; ++f) {
         const float tms = loop * (float)f / (float)frames;
         std::vector<glm::mat4> world(nb);
@@ -325,10 +360,10 @@ static std::vector<uint8_t> bakeFxAnim(const wowee::pipeline::M2Model& m, const 
             done[b] = 1;
             return world[b] = local;
         };
-        for (size_t u = 0; u < used.size(); ++u) {
+        for (size_t u = 0; u < nbones; ++u) {
             glm::mat4 M(1.0f);
-            if (used[u] >= 0 && (size_t)used[u] < nb) M = get((size_t)used[u]);
-            float* o = &mats[((size_t)f * used.size() + u) * 12];
+            if (u < used.size() && used[u] >= 0 && (size_t)used[u] < nb) M = get((size_t)used[u]);
+            float* o = &mats[((size_t)f * nbones + u) * 12];
             for (int r = 0; r < 3; ++r)
                 for (int c = 0; c < 4; ++c) {
                     o[r * 4 + c] = M[c][r];
@@ -336,24 +371,39 @@ static std::vector<uint8_t> bakeFxAnim(const wowee::pipeline::M2Model& m, const 
                     if (std::fabs(M[c][r] - id) > 1e-3f) moves = true;
                 }
         }
+        for (size_t k = 0; k < subTag.size(); ++k) {   // 5.35j: the fade / tint of each part
+            const size_t fi = subTag[k] >> 8;
+            if (!fi || fi >= fades.size()) continue;
+            float c[4];
+            fxFadeAt(m, fades[fi], seq, tms, c);
+            uint32_t v = 0;
+            for (int q = 0; q < 4; ++q) v |= (uint32_t)std::lround(c[q] * 255.0f) << (8 * q);
+            tints[(size_t)f * subTag.size() + k] = v;
+            if (v != 0xFFFFFFFFu) tinted = true;
+        }
     }
-    if (!moves) return {};
+    if (!moves && !tinted) return {};
+    std::vector<uint8_t> subBone(subTag.size());
+    for (size_t k = 0; k < subTag.size(); ++k) subBone[k] = (uint8_t)std::min<size_t>(subTag[k] & 0xFF, nbones - 1);
     std::vector<uint8_t> out;
     auto put = [&](const void* p, size_t n) { const uint8_t* b = (const uint8_t*)p; out.insert(out.end(), b, b + n); };
     W3dFxAnim a{};
     a.magic = W3D_FXA_MAGIC;
-    a.boneCount = (uint16_t)used.size();
+    a.boneCount = (uint16_t)nbones;
     a.frames = (uint16_t)frames;
     a.durationMs = loop;
     a.subCount = (uint16_t)subBone.size();
     a.emitterCount = (uint16_t)emBone.size();
     a.glowCount = (uint16_t)glBone.size();
+    a.flags = tinted ? W3D_FXA_TINT : 0;
     put(&a, sizeof a);
-    for (const std::vector<uint8_t>* v : {&subBone, &emBone, &glBone}) {
+    const std::vector<uint8_t>* lists[3] = {&subBone, &emBone, &glBone};
+    for (const std::vector<uint8_t>* v : lists) {
         if (!v->empty()) put(v->data(), v->size());
         while (out.size() % 4) out.push_back(0);
     }
     put(mats.data(), mats.size() * 4);
+    if (tinted) put(tints.data(), tints.size() * 4);
     return out;
 }
 
@@ -449,9 +499,37 @@ static uint32_t addModelFromGameImpl(PackWriter& pack, const DataDir& data, cons
                 if (v.boneWeights[j]) w[v.boneIndices[j]] += v.boneWeights[j];
         }
         int best = 0;
-        float bw = -1;
-        for (auto& [bone, ww] : w) if (ww > bw) { bw = ww; best = bone; }
+        float bw = -1, sum = 0;
+        for (auto& [bone, ww] : w) { sum += ww; if (ww > bw) { bw = ww; best = bone; } }
+        // 5.35j: a part spread over several bones (a ray from a still root to a growing tip) cannot ride one of them
+        // rigidly - it was stretched across the scene; it stays still instead
+        if (sum > 0 && bw < 0.7f * sum) return -1;
         return best < (int)mdl.bones.size() ? best : 0;
+    };
+    // 5.35j: fades of the parts (index 0 = none), and whether a part is ever visible in the loop
+    std::vector<FxFade> fades(1);
+    int fxSeq = 0;
+    uint32_t fxLoopMs = 0;
+    const bool haveLoop = o.fxSpell && fxLoop(mdl, &fxSeq, &fxLoopMs);
+    auto fadeFor = [&](const wowee::pipeline::M2Batch& b, bool* invisible) -> uint8_t {
+        *invisible = false;
+        if (!o.fxSpell) return 0;
+        FxFade f;
+        if (b.transparencyIndex < mdl.textureWeightLookup.size()) f.weight = mdl.textureWeightLookup[b.transparencyIndex];
+        if (b.colorIndex < mdl.colorAlphas.size()) f.color = b.colorIndex;
+        if (f.weight < 0 && f.color < 0) return 0;
+        float peak = 0;
+        for (int k = 0; k <= 16; ++k) {
+            float c[4];
+            fxFadeAt(mdl, f, fxSeq, haveLoop ? fxLoopMs * k / 16.0f : 0.0f, c);
+            peak = std::max(peak, c[3]);
+        }
+        if (peak < 0.02f) { *invisible = true; return 0; }
+        for (size_t i = 1; i < fades.size(); ++i)
+            if (fades[i].weight == f.weight && fades[i].color == f.color) return (uint8_t)i;
+        if (fades.size() >= 255) return 0;
+        fades.push_back(f);
+        return (uint8_t)(fades.size() - 1);
     };
     for (const auto& b : mdl.batches) {
         if (b.submeshLevel != 0) continue;
@@ -522,6 +600,12 @@ static uint32_t addModelFromGameImpl(PackWriter& pack, const DataDir& data, cons
         }
         s.idx.assign(mdl.indices.begin() + b.indexStart, mdl.indices.begin() + b.indexStart + b.indexCount);
         if (animOk) s.tag = tagFor(dominantBone(b));
+        {
+            bool invisible = false;
+            const uint8_t fi = fadeFor(b, &invisible);
+            if (invisible) continue;   // never seen in its loop (a part faded in by another animation): not drawn
+            s.tag = (uint16_t)(s.tag | fi << 8);
+        }
         src.subs.push_back(std::move(s));
     }
     if (src.subs.empty() && (!glows.empty() || particlesOnly)) {   // nothing but glow cards / particles: one empty triangle carries them
@@ -593,8 +677,14 @@ static uint32_t addModelFromGameImpl(PackWriter& pack, const DataDir& data, cons
         }
     }
     std::vector<uint8_t> anim;
-    if (animOk && (!emitters.empty() || !glows.empty() || !src.outTags.empty())) {
-        anim = bakeFxAnim(mdl, animBones, src.outTags, emitterBone, glowBone);
+    if (o.fxSpell && !o.noFx && (animOk || fades.size() > 1) && (!emitters.empty() || !glows.empty() || !src.outTags.empty())) {
+        if (!animOk) {   // too many bones to animate: nothing moves, the fades still do
+            animBones.clear();
+            for (auto& t : src.outTags) t &= 0xFF00;
+            std::fill(emitterBone.begin(), emitterBone.end(), 0);
+            std::fill(glowBone.begin(), glowBone.end(), 0);
+        }
+        anim = bakeFxAnim(mdl, animBones, src.outTags, emitterBone, glowBone, fades);
         if (!anim.empty()) ++st.fxAnimated;
     }
     if (!emitters.empty() || !glows.empty() || !anim.empty()) {

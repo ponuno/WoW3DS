@@ -79,7 +79,7 @@ struct Model {
     // are tex[fxTexBase ...] (acquired with the model's own, so drawable covers them too)
     const W3dFxHeader* fx = nullptr;
     uint16_t fxTexBase = 0;
-    W3dFxAnimView fxAnim = {0, 0, 0, 0, 0};   // stage 5.35: baked bone animation of an effect model (a == null: none)
+    W3dFxAnimView fxAnim = {0, 0, 0, 0, 0, 0};   // stage 5.35: baked bone animation of an effect model (a == null: none)
     // per-frame visibility bucket (filled by the renderer)
     std::vector<const struct Instance*> visible;
     bool texturesReady() const;
