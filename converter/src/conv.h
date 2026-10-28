@@ -45,6 +45,7 @@ struct Options {
     uint8_t texFormat = W3D_TEX_ETC1;
     int maxModelTris = 400;     // per model after simplification
     int maxDoodads = -1;        // -1 = all placements on the tile
+    int syntheticVariety = 0;   // --synthetic-variety N: N distinct models + textures per synthetic tile (a city's load)
     // WMO buildings (stage 5.0)
     bool noWmo = false;         // skip buildings entirely
     bool noWmoDoodads = false;  // buildings without their furniture/lamps

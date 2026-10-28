@@ -27,6 +27,7 @@ static void usage() {
         "  --format etc1|rgb565  texture format (default etc1; alpha -> etc1a4/rgba4)\n"
         "  --max-tris N          triangle budget per model (default 400)\n"
         "  --max-doodads N       limit doodad placements (default all; synthetic 600)\n"
+        "  --synthetic-variety N with --synthetic: N distinct models and textures per tile (streaming tests)\n"
         "  --no-wmo              skip buildings (WMO)\n"
         "  --no-wmo-doodads      buildings without the models placed inside them\n"
         "  --wmo-exterior-only   drop interior-only WMO groups\n"
@@ -121,6 +122,7 @@ int main(int argc, char** argv) {
         }
         else if (a == "--max-tris") o.maxModelTris = std::atoi(next());
         else if (a == "--max-doodads") o.maxDoodads = std::atoi(next());
+        else if (a == "--synthetic-variety") o.syntheticVariety = std::atoi(next());
         else if (a == "--no-wmo") o.noWmo = true;
         else if (a == "--no-wmo-doodads") o.noWmoDoodads = true;
         else if (a == "--wmo-exterior-only") o.wmoExteriorOnly = true;

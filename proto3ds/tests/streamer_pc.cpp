@@ -1,3 +1,4 @@
+#include <algorithm>
 // Runs proto3ds/source/streamer.cpp on the PC with stubbed libctru: the camera
 // flies a circuit over a pack and every frame the resident data is checked the
 // way the GPU would use it (model indices within the vertex buffer, textures
@@ -22,6 +23,21 @@ size_t stubLinearUsed();
 size_t stubLinearPeak();
 size_t stubTexturesLive();
 
+// Stage 5.30: the reads as slow as an SD card when SD_KBPS is set (+ SD_SEEK_US for a jump in the file), so the order of
+// the reads shows in the timings.
+void pcTestIoDelay(int file, uint32_t offset, uint32_t size) {
+    static const char* kb = std::getenv("SD_KBPS");
+    static const char* sk = std::getenv("SD_SEEK_US");
+    if (!kb) return;
+    static int lastFile = -1;
+    static uint32_t lastEnd = 0;
+    double us = size * 1000.0 / std::atof(kb);
+    if (file != lastFile || offset != lastEnd) us += sk ? std::atof(sk) : 0.0;
+    lastFile = file;
+    lastEnd = offset + size;
+    std::this_thread::sleep_for(std::chrono::microseconds((long long)us));
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) return 2;
     PackIndex index;
@@ -37,6 +53,13 @@ int main(int argc, char** argv) {
         cx = (32.0f - ty - 0.5f) * kTileSize; cy = (32.0f - tx - 0.5f) * kTileSize; rad = kTileSize * 0.8f;
     }
     size_t checks = 0, problems = 0, maxInst = 0, maxModels = 0;
+    const auto tStart = std::chrono::steady_clock::now();
+    std::set<uint64_t> shownKey;            // placements already counted
+    std::vector<std::pair<double, float>> shownAt;   // (ms since start, distance then)
+    std::set<uint64_t> groundSeen;
+    std::vector<double> groundAt;                    // when each tile's ground first showed
+    std::set<uint64_t> firstShown;      // stage 5.30: placements in the order they showed ...
+    std::vector<float> shownOrder;      // ... and their distance from the camera then
     std::set<uint32_t> modelsSeen;
     // Creatures (stage 5.3): synthetic units cycling through every display in the pack,
     // appearing/disappearing, changing display, walking, running and dying.
@@ -77,14 +100,38 @@ int main(int argc, char** argv) {
         float a = (float)f / frames * 6.2831853f * 2;
         float r = rad * (0.25f + 0.75f * std::fabs(std::sin(a * 0.5f)));
         float cam[3] = {cx + std::cos(a) * r, cy + std::sin(a) * r, 120.0f};
-        float dist = (f / 500) % 2 ? 800.0f : 250.0f;   // switches the 3x3 / 5x5 radius too
+        if (std::getenv("CAM_WALK")) {   // stage 5.30: arrive in the middle and walk slowly east (a city visit)
+            cam[0] = cx; cam[1] = cy + f * std::atof(std::getenv("CAM_WALK")); cam[2] = 60.0f;
+        }
+        float dist = std::getenv("CAM_WALK") ? 250.0f : (f / 500) % 2 ? 800.0f : 250.0f;   // switches the 3x3 / 5x5 radius too
         streamerUpdate(cam, dist);
         size_t inst = 0;
+        for (Tile* t : streamerReadyTiles())
+            if (groundSeen.insert((uint64_t)t->tx << 8 | (uint64_t)t->ty).second)
+                groundAt.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tStart).count());
         for (Tile* t : streamerReadyTiles()) {
-            for (const Instance& in : t->instances) {
+            for (Instance& in : t->instances) {
                 ++inst;
                 Model* m = in.model;
-                if (m->state != AssetState::Ready || !m->h) continue;
+                // stage 5.30: as the renderer, each model once it and its textures are in (the tile shows its ground first)
+                if (!m->drawable) continue;
+                if (m->state != AssetState::Ready || !m->h || !m->texturesReady()) { ++problems; continue; }
+                if (in.radius <= 0) in.radius = m->h->radius * in.scale;
+                {
+                    const uint64_t k2 = (uint64_t)(uintptr_t)t << 20 ^ (uint64_t)(&in - t->instances.data());
+                    if (shownKey.insert(k2).second) {
+                        const float dx = in.pos[0] - cam[0], dy = in.pos[1] - cam[1];
+                        shownAt.push_back({std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tStart).count(),
+                                           std::sqrt(dx * dx + dy * dy)});
+                    }
+                }
+                {   // when each placement first showed, and how far from the camera it was then
+                    const uint64_t key = (uint64_t)(uintptr_t)t << 20 ^ (uint64_t)(&in - t->instances.data());
+                    if (firstShown.insert(key).second) {
+                        const float dx = in.pos[0] - cam[0], dy = in.pos[1] - cam[1];
+                        shownOrder.push_back(std::sqrt(dx * dx + dy * dy));
+                    }
+                }
                 const W3dModelHeader* h = m->h;
                 const uint16_t* idx = (const uint16_t*)(m->blob + h->offIndices);
                 for (u32 s = 0; s < h->submeshCount; ++s) {
@@ -236,8 +283,29 @@ int main(int argc, char** argv) {
     if (!charIds.empty() && playersDrawn == 0) ++problems;
     if (displayIds.size() > 1 && crtDrawn == 0) ++problems;
     const StreamStats& s = streamerStats();
+    {   // stage 5.30: how soon what is near shows (placements within 250 yd of the camera when they appeared)
+        std::vector<double> nearT, allT;
+        for (auto& [ms, d] : shownAt) { allT.push_back(ms); if (d < 250.0f) nearT.push_back(ms); }
+        std::sort(nearT.begin(), nearT.end());
+        std::sort(allT.begin(), allT.end());
+        auto pct = [](const std::vector<double>& v, double q) { return v.empty() ? 0.0 : v[std::min(v.size() - 1, (size_t)(q * v.size()))]; };
+        std::printf("ground: %zu tiles shown, first at %.0f ms, last at %.0f ms\n", groundAt.size(),
+                    groundAt.empty() ? 0.0 : groundAt.front(), groundAt.empty() ? 0.0 : groundAt.back());
+        std::printf("shown: near (<250 yd) %zu, 50%% at %.0f ms, 90%% at %.0f ms; all %zu, 50%% at %.0f ms, 90%% at %.0f ms, last at %.0f ms\n",
+                    nearT.size(), pct(nearT, 0.5), pct(nearT, 0.9), allT.size(), pct(allT, 0.5), pct(allT, 0.9), allT.empty() ? 0.0 : allT.back());
+    }
     std::printf("%d frames: tile loads %u, max resident instances %zu, models %zu, distinct models drawn %zu\n", frames,
                 s.tileLoads, maxInst, maxModels, modelsSeen.size());
+    std::printf("progressive: ground after avg %.0f ms, complete after avg %.0f ms (%u tiles); read queue max %d, dropped %u\n",
+                s.tileLoads ? s.sumTileMs / s.tileLoads : 0.0, s.tileFullLoads ? s.sumTileFullMs / s.tileFullLoads : 0.0,
+                s.tileFullLoads, s.maxQueued, s.jobsCancelled);
+    if (shownOrder.size() >= 10) {   // the nearest show first: the first fifth closer on average than the last fifth
+        const size_t q = shownOrder.size() / 5;
+        double a = 0, b = 0;
+        for (size_t i = 0; i < q; ++i) { a += shownOrder[i]; b += shownOrder[shownOrder.size() - 1 - i]; }
+        std::printf("show order: first fifth avg %.0f yd, last fifth avg %.0f yd (%zu placements)\n", a / q, b / q, shownOrder.size());
+        if (std::getenv("ORDER_EXPECT") && !(a < b)) { std::printf("show order: the far ones came first\n"); ++problems; }
+    }
     std::printf("submesh checks %zu, problems %zu; linear peak %.1f MB\n", checks, problems, stubLinearPeak() / 1048576.0);
     // every texture a tile or model asked for was in the pack(s) and was read (stage 5.27: also from the pool parts)
     std::printf("textures not in the pack %u, reads failed %u\n", (unsigned)s.texNotInPack, (unsigned)s.texReadFailed);

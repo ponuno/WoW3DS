@@ -375,9 +375,11 @@ std::vector<Model*> g_activeModels;   // models with visible instances this fram
 
 void collectModels(const Frustum& fr, const RenderSettings& rs, FrameCounters& fc) {
     for (Tile* t : streamerReadyTiles())
-        for (const Instance& in : t->instances) {
+        for (Instance& in : t->instances) {
             Model* m = in.model;
-            if (!m->h || in.radius <= 0) continue;
+            if (!m->drawable || !m->h) continue;   // stage 5.30: each model as soon as it and its textures are in
+            if (in.radius <= 0) in.radius = m->h->radius * in.scale;
+            if (in.radius <= 0) continue;
             if (!rs.doodads && !m->building) continue;
             // Small doodads fade out long before the draw distance (bushes ~110 yd,
             // big trees reach the fog); this is what keeps draw calls in budget.
@@ -703,7 +705,7 @@ void drawWater(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, const 
     BindCache bc;
     for (Tile* tile : streamerReadyTiles()) {
         const W3dWaterHeader* h = tile->wh;
-        if (!h) continue;
+        if (!h || !tile->waterReady) continue;
         C3D_BufInfo* buf = C3D_GetBufInfo();
         BufInfo_Init(buf);
         BufInfo_Add(buf, tile->water + h->offVertices, sizeof(W3dTerrainVertex), 3, 0x210);

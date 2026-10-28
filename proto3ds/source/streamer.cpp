@@ -25,6 +25,10 @@
 #include <deque>
 #include <unordered_map>
 
+#ifdef W3D_PC_TEST
+void pcTestIoDelay(int file, uint32_t offset, uint32_t size);   // tests/streamer_pc.cpp: an SD card's speed (SD_KBPS)
+#endif
+
 // ================================================================== index
 namespace {
 // One file's header, index and PINF (absent: a standalone pack, info.kind 0, buildId 0).
@@ -157,7 +161,61 @@ struct Job {
     uint8_t* dst;
     void* owner;
     bool ok = false;
+    // stage 5.30: what the read is for and where (the queue is ordered by readKey every frame)
+    float anchor[3] = {0, 0, 0};
+    uint8_t cls = 0;
+    float key = 0;
 };
+
+// Stage 5.30: the read order. Every queued read carries the spot it is needed at and a class; each frame the queue is
+// sorted by distance from the camera weighted by the class and by whether the spot is in front of the camera, reads of
+// equal rank in file order (the SD card reads faster forwards). Reads whose owner was let go meanwhile are dropped.
+enum : uint8_t {
+    kClsUnit = 0,        // creatures, players, worn items, the login scenes: wanted now, near the camera
+    kClsTile = 1,        // terrain, water, liquids, placements of a tile (small, everything else waits for them)
+    kClsColl = 2,        // floors and walls near the camera
+    kClsTerrainTex = 3,  // the ground's textures: the tile is drawn when they are in
+    kClsObject = 4,      // a placed model (building or doodad: not known before it is read)
+    kClsBuilding = 5,    // a building's textures
+    kClsDoodad = 6,      // a doodad's textures
+};
+struct Anchor { float p[3]; uint8_t cls; };
+Anchor g_anchor{{0, 0, 0}, kClsUnit};   // what submit() / acquire*() record; set around the calls that know better
+struct AnchorScope {
+    Anchor saved;
+    AnchorScope(const float p[3], uint8_t cls) : saved(g_anchor) { g_anchor = Anchor{{p[0], p[1], p[2]}, cls}; }
+    ~AnchorScope() { g_anchor = saved; }
+};
+// Tuning of the read order (the PC test can try other values: W3D_BAND, W3D_GROW, W3D_TILEW, W3D_TILES).
+float tunable(const char* name, float def) {
+#ifdef W3D_PC_TEST
+    if (const char* v = getenv(name)) return (float)atof(v);
+#else
+    (void)name;
+#endif
+    return def;
+}
+float g_cam[3] = {0, 0, 0};
+float g_fwd[2] = {0, 0};
+bool g_haveFwd = false, g_boost = false;
+float readKey(const float a[3], uint8_t cls) {
+    if (cls == kClsUnit) return 0.0f;
+    const float dx = a[0] - g_cam[0], dy = a[1] - g_cam[1], dz = a[2] - g_cam[2];
+    const float d = sqrtf(dx * dx + dy * dy + dz * dz);
+    float front = 1.0f;
+    if (g_haveFwd && d > 40.0f) {   // behind the camera: later
+        const float c = (dx * g_fwd[0] + dy * g_fwd[1]) / d;
+        front = c > 0.4f ? 1.0f : c > -0.3f ? 1.35f : 1.8f;
+    }
+    switch (cls) {
+        case kClsTile: { static const float w = tunable("W3D_TILEW", 1.0f); return d * w; }
+        case kClsColl: return d * 0.4f;
+        case kClsTerrainTex: { static const float w = tunable("W3D_TILEW", 1.0f); return 5.0f + d * w; }
+        case kClsObject: return 10.0f + d * front;
+        case kClsBuilding: return 10.0f + d * front;
+        default: return 40.0f + d * front * 1.6f;
+    }
+}
 
 struct CollLoad;
 struct TileExt : Tile {
@@ -189,7 +247,9 @@ Thread g_thread = nullptr;
 std::atomic<bool> g_quit{false};
 LightLock g_lock;
 LightEvent g_wake;
-std::deque<Job*> g_requests, g_done;   // guarded by g_lock
+std::vector<Job*> g_requests;   // guarded by g_lock; sorted so that the worker takes the back (the most wanted)
+std::deque<Job*> g_done;          // guarded by g_lock
+std::vector<Job*> g_incoming;     // main thread: submitted since the last sort
 
 std::unordered_map<uint32_t, GpuTex*> g_tex;
 std::unordered_map<uint32_t, Model*> g_models;
@@ -263,6 +323,9 @@ void buildHeightField(Tile* t) {
 void runJob(Job* j) {
     FILE* f = j->file < PackIndex::kMaxFiles ? g_ioFiles[j->file] : nullptr;
     j->ok = f && fseek(f, j->offset, SEEK_SET) == 0 && fread(j->dst, 1, j->size, f) == j->size;
+#ifdef W3D_PC_TEST
+    pcTestIoDelay(j->file, j->offset, j->size);
+#endif
     if (j->ok && j->kind != JobKind::Placement && j->kind != JobKind::Collision && j->kind != JobKind::Display &&
         j->kind != JobKind::CharInfo && j->kind != JobKind::CharImg && j->kind != JobKind::Item &&
         j->kind != JobKind::Liquid) {   // CPU-only data needs no flush
@@ -280,7 +343,7 @@ void workerMain(void*) {
         for (;;) {
             LightLock_Lock(&g_lock);
             Job* j = nullptr;
-            if (!g_requests.empty()) { j = g_requests.front(); g_requests.pop_front(); }
+            if (!g_requests.empty()) { j = g_requests.back(); g_requests.pop_back(); }
             LightLock_Unlock(&g_lock);
             if (!j) break;
             if (g_quit) {   // hand it back unrun so shutdown can free it
@@ -300,9 +363,15 @@ void workerMain(void*) {
 // 'e' must be an entry of g_index (its file comes from its position there); sizeOverride reads less than the entry holds.
 void submit(JobKind kind, const W3dEntry* e, uint8_t* dst, void* owner, uint32_t sizeOverride = 0) {
     Job* j = new Job{kind, (uint8_t)g_index->fileIndex(e), e->offset, sizeOverride ? sizeOverride : e->size, dst, owner};
+    memcpy(j->anchor, g_anchor.p, sizeof j->anchor);
+    j->cls = g_anchor.cls;
+    j->key = readKey(j->anchor, j->cls);
+    // an idle worker starts at once; otherwise the read joins the queue at the next sort (scheduleJobs)
     LightLock_Lock(&g_lock);
-    g_requests.push_back(j);
+    const bool idle = g_requests.empty();
+    if (idle) g_requests.push_back(j);
     LightLock_Unlock(&g_lock);
+    if (!idle) { g_incoming.push_back(j); return; }
     if (g_thread) LightEvent_Signal(&g_wake);
 }
 
@@ -311,12 +380,22 @@ void deferFree(FreeKind k, void* p, int slot = -1) { g_deferred.push_back({k, p,
 // ------------------------------------------------------------------ assets
 GpuTex* acquireTex(uint32_t id) {
     auto it = g_tex.find(id);
-    if (it != g_tex.end()) { it->second->refs++; return it->second; }
+    if (it != g_tex.end()) {
+        GpuTex* t = it->second;
+        t->refs++;
+        if (readKey(g_anchor.p, g_anchor.cls) < readKey(t->anchor, t->cls)) {   // a nearer user: uploaded sooner
+            memcpy(t->anchor, g_anchor.p, sizeof t->anchor);
+            t->cls = g_anchor.cls;
+        }
+        return t;
+    }
     const W3dEntry* e = g_index->find(W3D_ENTRY_TEXTURE, id);
     if (!e) { ++g_stats.texNotInPack; return &g_white; }
     GpuTex* t = new GpuTex;
     t->id = id;
     t->refs = 1;
+    memcpy(t->anchor, g_anchor.p, sizeof t->anchor);
+    t->cls = g_anchor.cls;
     t->stagingSize = e->size;
     g_tex[id] = t;
     t->staging = (uint8_t*)linearAlloc(e->size);
@@ -361,12 +440,22 @@ void releaseTex(GpuTex* t) {
 
 Model* acquireModel(uint32_t id) {
     auto it = g_models.find(id);
-    if (it != g_models.end()) { it->second->refs++; return it->second; }
+    if (it != g_models.end()) {
+        Model* m = it->second;
+        m->refs++;
+        if (readKey(g_anchor.p, g_anchor.cls) < readKey(m->anchor, m->cls)) {   // a nearer placement
+            memcpy(m->anchor, g_anchor.p, sizeof m->anchor);
+            m->cls = g_anchor.cls;
+        }
+        return m;
+    }
     const W3dEntry* e = g_index->find(W3D_ENTRY_MODEL, id);
     if (!e) return nullptr;
     Model* m = new Model;
     m->id = id;
     m->refs = 1;
+    memcpy(m->anchor, g_anchor.p, sizeof m->anchor);
+    m->cls = g_anchor.cls;
     m->size = e->size;
     m->blob = (uint8_t*)linearAlloc(e->size);
     if (!m->blob) { delete m; return nullptr; }
@@ -375,7 +464,10 @@ Model* acquireModel(uint32_t id) {
     return m;
 }
 
+std::vector<Model*> g_waitingModels;   // read, textures not all in yet (stage 5.30: drawn once they are)
+
 void destroyModelNow(Model* m) {
+    if (!m->drawable) g_waitingModels.erase(std::remove(g_waitingModels.begin(), g_waitingModels.end(), m), g_waitingModels.end());
     for (GpuTex* t : m->tex) releaseTex(t);
     m->tex.clear();
     g_stats.geomBytes -= m->size;
@@ -677,6 +769,8 @@ bool requestTile(int tx, int ty) {
     g_freeSlots.pop_back();
     t->terr = g_pool + (size_t)t->slot * g_slotSize;
     g_stats.geomBytes += g_slotSize;
+    const float centre[3] = {(32.0f - ty - 0.5f) * kTileSize, (32.0f - tx - 0.5f) * kTileSize, g_cam[2]};
+    AnchorScope as(centre, kClsTile);
     submit(JobKind::Terrain, te, t->terr, t);
     t->pendingJobs++;
     if (const W3dEntry* we = g_index->find(W3D_ENTRY_WATER, id)) {
@@ -758,7 +852,11 @@ void onJobDone(Job* j) {
             m->building = m->h->submeshCount && (m->subs[0].flags & W3D_SUBF_BUILDING);
             m->interior = m->h->submeshCount && (m->subs[0].flags & W3D_SUBF_INTERIOR);
             const uint32_t* ids = (const uint32_t*)(m->blob + m->h->offTexIds);
-            for (u32 i = 0; i < m->h->texCount; ++i) m->tex.push_back(acquireTex(ids[i]));
+            {   // its textures are read where the model is needed; a building's before a doodad's
+                AnchorScope as(m->anchor, m->cls == kClsUnit ? kClsUnit : m->building ? kClsBuilding : kClsDoodad);
+                for (u32 i = 0; i < m->h->texCount; ++i) m->tex.push_back(acquireTex(ids[i]));
+            }
+            g_waitingModels.push_back(m);
             break;
         }
         case JobKind::Display: {
@@ -836,6 +934,8 @@ void onJobDone(Job* j) {
                     t->th = (const W3dTerrainHeader*)t->terr;
                     t->batches = (const W3dTerrainBatch*)(t->terr + t->th->offBatches);
                     const uint32_t* ids = (const uint32_t*)(t->terr + t->th->offTexIds);
+                    const float c[3] = {(32.0f - t->ty - 0.5f) * kTileSize, (32.0f - t->tx - 0.5f) * kTileSize, g_cam[2]};
+                    AnchorScope as(c, kClsTerrainTex);
                     for (u32 i = 0; i < t->th->texCount; ++i) t->ttex.push_back(acquireTex(ids[i]));
                 } else if (j->kind == JobKind::Liquid) {
                     if (!w3d_liquid_valid(t->liq, t->liqSize)) { free(t->liq); t->liq = nullptr; }
@@ -844,6 +944,8 @@ void onJobDone(Job* j) {
                     t->wh = (const W3dWaterHeader*)t->water;
                     t->wbatches = (const W3dWaterBatch*)(t->water + t->wh->offBatches);
                     const uint32_t* ids = (const uint32_t*)(t->water + t->wh->offTexIds);
+                    const float c[3] = {(32.0f - t->ty - 0.5f) * kTileSize, (32.0f - t->tx - 0.5f) * kTileSize, g_cam[2]};
+                    AnchorScope as(c, kClsTerrainTex);
                     for (u32 i = 0; i < t->wh->texCount; ++i) t->wtex.push_back(acquireTex(ids[i]));
                 } else if (j->kind == JobKind::Placement) {
                     W3dPlacementHeader ph;
@@ -853,9 +955,12 @@ void onJobDone(Job* j) {
                     std::unordered_map<uint32_t, Model*> local;
                     for (u32 i = 0; i < ph.count; ++i) {
                         Model*& m = local[p[i].modelId];
+                        AnchorScope as(p[i].pos, kClsObject);   // read in order of distance from the camera
                         if (!m) {
                             m = acquireModel(p[i].modelId);
                             if (m) t->models.push_back(m);
+                        } else if (readKey(p[i].pos, kClsObject) < readKey(m->anchor, m->cls)) {
+                            memcpy(m->anchor, p[i].pos, sizeof m->anchor);   // a nearer copy of it on this tile
                         }
                         if (!m) continue;
                         Instance in;
@@ -967,6 +1072,10 @@ void retryTextures() {
 void uploadTextures(double budgetMs) {
     u64 t0 = svcGetSystemTick();
     retryTextures();
+    if (g_uploads.size() > 1)   // the nearest first (stage 5.30)
+        std::stable_sort(g_uploads.begin(), g_uploads.end(), [](const GpuTex* a, const GpuTex* b) {
+            return readKey(a->anchor, a->cls) < readKey(b->anchor, b->cls);
+        });
     while (!g_uploads.empty() && ticksToMs(svcGetSystemTick() - t0) < budgetMs) {
         GpuTex* t = g_uploads.front();
         g_uploads.pop_front();
@@ -982,6 +1091,69 @@ void uploadTextures(double budgetMs) {
         }
         t->state = AssetState::Ready;
     }
+}
+
+// A queued read nobody needs any more (its tile was let go, its model / texture released): dropped unread.
+bool orphaned(const Job* j) {
+    switch (j->kind) {
+        case JobKind::Texture: return ((const GpuTex*)j->owner)->refs <= 0;
+        case JobKind::Model: return ((const Model*)j->owner)->refs <= 0;
+        case JobKind::Creature: return ((const CreatureModel*)j->owner)->refs <= 0;
+        case JobKind::Display: return ((const CreatureDisplay*)j->owner)->refs <= 0;
+        case JobKind::Item: return ((const ItemDisplay*)j->owner)->refs <= 0;
+        case JobKind::CharImg: return ((const CharImg*)j->owner)->refs <= 0;
+        case JobKind::Terrain: case JobKind::Water: case JobKind::Liquid: case JobKind::Placement:
+            return ((const TileExt*)j->owner)->doomed;
+        case JobKind::Collision: {
+            const CollLoad* c = (const CollLoad*)j->owner;
+            return !c->tile || c->tile->doomed;
+        }
+        default: return false;
+    }
+}
+
+// The read queue in the order of readKey (stage 5.30): new reads join, dropped ones complete unread (onJobDone frees
+// them like any orphan), the most wanted ends at the back where the worker takes it. Reads are ranked in bands that
+// widen with the distance (96 yd near the camera, then x2.5 each): near the camera the nearest first, farther away mostly
+// in file order, which the SD card reads much faster (tests/run_streamer.sh with SD_KBPS, a synthetic city: the first
+// ground in about a third of the time, what stands near in about 60%, every tile's ground a third sooner, the last
+// far barrel about 10% later than in plain file order).
+void scheduleJobs() {
+    static u32 lastSort = 0;
+    LightLock_Lock(&g_lock);
+    const bool fresh = !g_incoming.empty();
+    g_requests.insert(g_requests.end(), g_incoming.begin(), g_incoming.end());
+    g_incoming.clear();
+    if (fresh || g_frame - lastSort >= 8) {
+        lastSort = g_frame;
+        size_t w = 0;
+        for (size_t i = 0; i < g_requests.size(); ++i) {
+            Job* j = g_requests[i];
+            if (orphaned(j)) {
+                j->ok = false;
+                g_done.push_back(j);
+                ++g_stats.jobsCancelled;
+                continue;
+            }
+            j->key = readKey(j->anchor, j->cls);
+            g_requests[w++] = j;
+        }
+        g_requests.resize(w);
+        static const float kBand = tunable("W3D_BAND", 96.0f), kGrow = tunable("W3D_GROW", 1.5f);
+        // bands widen with the distance: what is near is read nearest first, what is far mostly in file order
+        auto band = [](float key) { return (int)(logf(1.0f + key / kBand) * (1.0f / logf(1.0f + kGrow))); };
+        for (Job* j : g_requests) j->key = (float)band(j->key);
+        std::sort(g_requests.begin(), g_requests.end(), [](const Job* a, const Job* b) {
+            const int ba = (int)a->key, bb = (int)b->key;
+            if (ba != bb) return ba > bb;                 // the most wanted last
+            if (a->file != b->file) return a->file > b->file;
+            return a->offset > b->offset;                 // forwards through the file, from the back
+        });
+    }
+    g_stats.maxQueued = std::max(g_stats.maxQueued, (int)g_requests.size());
+    const bool any = !g_requests.empty();
+    LightLock_Unlock(&g_lock);
+    if (any && g_thread) LightEvent_Signal(&g_wake);
 }
 
 void processDeferred() {
@@ -1076,10 +1248,13 @@ void streamerShutdown() {
     // Completions may submit follow-up jobs (display -> model -> textures): loop until drained.
     for (;;) {
         for (Job* j : g_requests) j->ok = false;
+        for (Job* j : g_incoming) j->ok = false;
         std::deque<Job*> left;
         left.swap(g_done);
         left.insert(left.end(), g_requests.begin(), g_requests.end());
+        left.insert(left.end(), g_incoming.begin(), g_incoming.end());
         g_requests.clear();
+        g_incoming.clear();
         if (left.empty()) break;
         for (Job* j : left) onJobDone(j);
     }
@@ -1121,13 +1296,22 @@ void streamerShutdown() {
 
 bool streamerHasDisplay(uint32_t displayId) { return g_index && g_index->find(W3D_ENTRY_DISPLAY, displayId); }
 
+void streamerSetView(float yaw) {
+    g_fwd[0] = cosf(yaw);
+    g_fwd[1] = sinf(yaw);
+    g_haveFwd = true;
+}
+
+void streamerSetBoost(bool on) { g_boost = on; }
+
 void streamerUpdate(const float camPos[3], float drawDist) {
+    memcpy(g_cam, camPos, sizeof g_cam);
     // 1. Collect finished IO.
     if (!g_thread) {   // synchronous fallback: a few jobs per frame
         u64 t0 = svcGetSystemTick();
         while (ticksToMs(svcGetSystemTick() - t0) < 4.0) {
             Job* j = nullptr;
-            if (!g_requests.empty()) { j = g_requests.front(); g_requests.pop_front(); }
+            if (!g_requests.empty()) { j = g_requests.back(); g_requests.pop_back(); }
             if (!j) break;
             runJob(j);
             g_done.push_back(j);
@@ -1144,24 +1328,52 @@ void streamerUpdate(const float camPos[3], float drawDist) {
 
     pumpPlayers();
 
-    // 2. Texture uploads (GX copies) under a frame budget.
+    // 2. Texture uploads (GX copies) under a frame budget: more while many wait, most of the frame under a loading screen.
     u64 u0 = svcGetSystemTick();
-    uploadTextures(2.5);
+    uploadTextures(g_boost ? 14.0 : g_uploads.size() > 24 ? 5.0 : 2.5);
     g_stats.uploadMsLastFrame = ticksToMs(svcGetSystemTick() - u0);
 
-    // 3. Promote tiles whose dependencies are resident.
+    // 3. Progressive tiles (stage 5.30): the ground is drawn as soon as it and its textures are in, the water with its
+    // textures, each model as soon as it and its textures are (Model::drawable): a city's tile no longer waits for its
+    // last barrel before anything of it shows.
+    for (size_t i = 0; i < g_waitingModels.size();) {
+        Model* m = g_waitingModels[i];
+        if (m->texturesReady()) {
+            m->drawable = true;
+            g_waitingModels[i] = g_waitingModels.back();
+            g_waitingModels.pop_back();
+        } else {
+            ++i;
+        }
+    }
+    g_stats.modelsWaiting = (int)g_waitingModels.size();
     for (TileExt* t : g_tiles) {
-        if (t->doomed || t->state != TileState::WaitingDeps) continue;
-        if (!t->th) continue;   // terrain read failed: stays invisible
-        if (!tileDepsReady(t)) continue;
-        for (Instance& in : t->instances)
-            in.radius = in.model->h ? in.model->h->radius * in.scale : 0;
-        t->state = TileState::Ready;
-        double ms = ticksToMs(svcGetSystemTick() - t->requestTick);
-        g_stats.tileLoads++;
-        g_stats.lastTileMs = ms;
-        g_stats.maxTileMs = std::max(g_stats.maxTileMs, ms);
-        g_stats.sumTileMs += ms;
+        if (t->doomed || !t->th) continue;   // terrain read failed: stays invisible
+        if (t->state == TileState::WaitingDeps) {
+            bool ground = true;
+            for (GpuTex* x : t->ttex) if (x->state != AssetState::Ready) { ground = false; break; }
+            if (!ground) continue;
+            t->state = TileState::Ready;
+            double ms = ticksToMs(svcGetSystemTick() - t->requestTick);
+            g_stats.tileLoads++;
+            g_stats.lastTileMs = ms;
+            g_stats.maxTileMs = std::max(g_stats.maxTileMs, ms);
+            g_stats.sumTileMs += ms;
+        }
+        if (t->state != TileState::Ready || t->complete) continue;
+        if (!t->waterReady && t->wh) {
+            bool w = true;
+            for (GpuTex* x : t->wtex) if (x->state != AssetState::Ready) { w = false; break; }
+            t->waterReady = w;
+        }
+        if (tileDepsReady(t)) {
+            t->complete = true;
+            double ms = ticksToMs(svcGetSystemTick() - t->requestTick);
+            g_stats.tileFullLoads++;
+            g_stats.lastTileFullMs = ms;
+            g_stats.maxTileFullMs = std::max(g_stats.maxTileFullMs, ms);
+            g_stats.sumTileFullMs += ms;
+        }
     }
 
     // 3b. Collision near the camera only (load within kCollLoadDist of a tile, drop beyond kCollDropDist).
@@ -1179,6 +1391,8 @@ void streamerUpdate(const float camPos[3], float drawDist) {
             if (!buf) { buf = (uint8_t*)linearAlloc(ce->size); linear = true; }
             if (!buf) { ++g_stats.collFailed; continue; }
             t->collLoad = new CollLoad{t, buf, ce->size, linear};
+            const float near[3] = {std::clamp(camPos[0], x0, x0 + kTileSize), std::clamp(camPos[1], y0, y0 + kTileSize), camPos[2]};
+            AnchorScope as(near, kClsColl);
             submit(JobKind::Collision, ce, buf, t->collLoad);
         } else if (d > kCollDropDist && t->coll) {
             freeColl(t->coll, t->collLinear);
@@ -1214,7 +1428,8 @@ void streamerUpdate(const float camPos[3], float drawDist) {
     int loading = 0;
     for (TileExt* t : g_tiles) if (!t->doomed && t->state != TileState::Ready) ++loading;
     for (const Want& w : want) {
-        if (loading >= 2) break;   // keep latency low for the nearest tiles
+        static const int kMaxLoading = (int)tunable("W3D_TILES", 4.0f);
+        if (loading >= kMaxLoading) break;   // the read queue puts the nearest tile's contents first (stage 5.30)
         if (g_freeSlots.empty()) {
             // Evict the farthest tile outside the wanted radius.
             TileExt* victim = nullptr;
@@ -1230,7 +1445,10 @@ void streamerUpdate(const float camPos[3], float drawDist) {
         if (requestTile(w.tx, w.ty)) ++loading;
     }
 
-    // 5. Ready list + stats.
+    // 5. This frame's reads into the queue, in order.
+    scheduleJobs();
+
+    // 6. Ready list + stats.
     g_ready.clear();
     g_stats.tilesLoading = 0;
     for (TileExt* t : g_tiles) {

@@ -55,6 +55,9 @@ struct GpuTex {
     uint8_t* staging = nullptr;      // linear buffer filled by the worker
     uint32_t stagingSize = 0;
     bool retry = false;              // out of memory: drawn white meanwhile, streamer tries again (g_retry)
+    // stage 5.30: where it is needed (the nearest user known) and what for: the order of reads and uploads
+    float anchor[3] = {0, 0, 0};
+    uint8_t cls = 0;
 };
 
 struct Model {
@@ -67,6 +70,9 @@ struct Model {
     const W3dSubmesh* subs = nullptr;
     std::vector<GpuTex*> tex;
     bool building = false;           // WMO group (W3D_SUBF_BUILDING)
+    bool drawable = false;           // stage 5.30: the blob and every texture are in: drawn on its own, not with its tile
+    float anchor[3] = {0, 0, 0};     // the nearest placement known (read order of the model and its textures)
+    uint8_t cls = 0;
     bool interior = false;           // interior-only WMO group (W3D_SUBF_INTERIOR)
     // per-frame visibility bucket (filled by the renderer)
     std::vector<const struct Instance*> visible;
@@ -156,6 +162,10 @@ struct Tile {
     u32 liqSize = 0;
     std::vector<Instance> instances;
     std::vector<Model*> models;      // one reference per distinct model
+    // Stage 5.30: a tile is drawn as soon as its terrain and the terrain's textures are in (state Ready); its water when the
+    // water's textures are, every model when the model is (Model::drawable). complete = everything of it is in.
+    bool waterReady = false;
+    bool complete = false;
 };
 
 // ------------------------------------------------------------------ streamer
@@ -163,7 +173,7 @@ struct StreamStats {
     int tilesReady = 0, tilesLoading = 0, slotsUsed = 0, slotsTotal = 0;
     int jobsQueued = 0, models = 0, textures = 0, uploadsPending = 0, displays = 0, creatureModels = 0;
     u32 tileLoads = 0;
-    double lastTileMs = 0, maxTileMs = 0, sumTileMs = 0;
+    double lastTileMs = 0, maxTileMs = 0, sumTileMs = 0;   // request -> drawable (stage 5.30: the ground is drawn)
     u32 texVram = 0, texLinear = 0, geomBytes = 0;
     int texOom = 0;                  // textures waiting for memory (drawn white until it frees)
     u32 texNotInPack = 0;            // acquireTex: id not in the pack (drawn white)
@@ -175,12 +185,22 @@ struct StreamStats {
     u32 collFailed = 0;              // COLL entries dropped because malloc failed (no walls/floors there)
     int players = 0;                 // player displays (distinct looks) alive
     u32 composites = 0;              // body textures composited so far
+    // stage 5.30: progressive tiles and the read queue
+    u32 tileFullLoads = 0;           // tiles that became complete (every model and texture in)
+    double lastTileFullMs = 0, maxTileFullMs = 0, sumTileFullMs = 0;   // request -> complete
+    u32 jobsCancelled = 0;           // reads dropped before they ran (their tile / model / texture was let go)
+    int maxQueued = 0;               // longest read queue seen
+    int modelsWaiting = 0;           // models read whose textures are not all in yet (not drawn)
 };
 
 bool streamerInit(PackIndex* index, char* err, size_t errLen);
 void streamerShutdown();
 // Load/unload around the camera; call once per frame before rendering.
 void streamerUpdate(const float camPos[3], float drawDist);
+// Stage 5.30: the direction the camera looks (reads in front come first) and a loading screen being up (texture uploads may
+// take most of the frame then).
+void streamerSetView(float yaw);
+void streamerSetBoost(bool on);
 // Ready tiles for rendering.
 const std::vector<Tile*>& streamerReadyTiles();
 const StreamStats& streamerStats();

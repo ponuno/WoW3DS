@@ -264,8 +264,13 @@ static void writeReport(const Bench* b, float drawDist, const RenderSettings& rs
     fprintf(f, "  linear used since start %lu KB, VRAM used %lu KB\n",
             (unsigned long)((g_report.linearAtStart - linearSpaceFree()) / 1024),
             (unsigned long)((g_report.vramAtStart - vramSpaceFree()) / 1024));
-    fprintf(f, "tile loads so far: %lu, avg %.0f ms, max %.0f ms (request -> drawable)\n\n", (unsigned long)s.tileLoads,
+    fprintf(f, "tile loads so far: %lu, ground shown after avg %.0f ms, max %.0f ms (request -> terrain drawn)\n", (unsigned long)s.tileLoads,
             s.tileLoads ? s.sumTileMs / s.tileLoads : 0.0, s.maxTileMs);
+    fprintf(f, "  complete (every model and texture): %lu tiles, avg %.0f ms, max %.0f ms; models waiting for textures now %d\n",
+            (unsigned long)s.tileFullLoads, s.tileFullLoads ? s.sumTileFullMs / s.tileFullLoads : 0.0, s.maxTileFullMs,
+            s.modelsWaiting);
+    fprintf(f, "  read queue: longest %d, now %d; reads dropped (no longer needed) %lu\n\n", s.maxQueued, s.jobsQueued,
+            (unsigned long)s.jobsCancelled);
     if (g_login.authTimings().authTotal > 0) {
         const w3n::Timings& a = g_login.authTimings();
         const w3n::Timings& w = g_login.worldTimings();
@@ -637,6 +642,7 @@ int main() {
         float wp[3] = {at[0], at[1], at[2]};
         // the tile and its collision (a dungeon floor is only collision: without it the character would fall through)
         portalTick = svcGetSystemTick();
+        streamerSetBoost(true);
         while (aptMainLoop() && !(streamerTileReadyAt(wp[0], wp[1]) && streamerCollisionReadyAt(wp[0], wp[1])) &&
                ticksToMs(svcGetSystemTick() - w0) < 10000) {
             streamerUpdate(wp, cam.drawDist);
@@ -1428,7 +1434,10 @@ int main() {
             g_login.setSceneDrawn(glueScene);
         }
 
-        // --- stream, then draw
+        // --- stream, then draw (stage 5.30: reads in front of the camera first; under a loading screen textures may take
+        // most of the frame)
+        streamerSetView(cam.yaw);
+        streamerSetBoost(loadingWorld || portal.active());
         streamerUpdate(cam.pos, cam.drawDist);
         fc = FrameCounters();
         u64 beforeWait = svcGetSystemTick();
@@ -1502,8 +1511,8 @@ int main() {
                    s.slotsUsed, s.slotsTotal);
             printf("\x1b[8;1Hjobs %3d uploads %3d (%.1f ms) core %d  ", s.jobsQueued, s.uploadsPending,
                    s.uploadMsLastFrame, s.workerCore);
-            printf("\x1b[9;1Hloads %lu  last %4.0f ms  max %4.0f ms   ", (unsigned long)s.tileLoads, s.lastTileMs,
-                   s.maxTileMs);
+            printf("\x1b[9;1Hloads %lu grd %4.0f full %5.0f wait %3d ", (unsigned long)s.tileLoads, s.lastTileMs,
+                   s.lastTileFullMs, s.modelsWaiting);
             printf("\x1b[10;1Hmodels %3d tex %3d crt %2lu/%2d %4.1fms ", s.models, s.textures,
                    (unsigned long)fc.creatures, creatureView.ready(), fc.poseMs);
             printf("\x1b[11;1HVRAM tex %4lu KB  geom %5lu KB      ", (unsigned long)(s.texVram / 1024),
