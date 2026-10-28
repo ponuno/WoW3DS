@@ -219,6 +219,9 @@ bool orientByNormals(const ModelSource& m, std::vector<uint32_t>& idx);
 // Also normalises winding: CCW seen from the vertex normals' side (flippedOut = submeshes flipped).
 std::vector<uint8_t> buildModelBlob(ModelSource& m, int maxTris, size_t* trisOut, int* flippedOut = nullptr);
 
+// Whole file into memory in one read (the byte-by-byte istreambuf_iterator took minutes on a multi-GB map pack).
+bool readFileFast(const std::string& path, std::vector<uint8_t>& out);
+
 struct ConvStats {
     size_t collOrphanTiles = 0;   // collision tiles dropped because the map has no terrain tile there
     size_t tiles = 0, waterTris = 0, wmoSkipped = 0;

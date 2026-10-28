@@ -217,7 +217,11 @@ int convertAll(const Options& oIn, const DataDir& data, const AllOptions& ao, Ui
                 pool.count(W3D_ENTRY_DISPLAY), pool.storedBytes() / 1048576.0, pool.keyCollisions());
     std::printf("  copy everything in %s to sdmc:/3ds/w3dproto/ (map0.w3dp is the Eastern Kingdoms, map1.w3dp Kalimdor)\n",
                 folder.c_str());
-    for (const Done& d : done) problems += printPackInfo(d.file) != 0;   // checks their references into the pool too
+    std::printf("== checking the packs\n");
+    for (const Done& d : done) {
+        progress(true, "checking %s ...", d.file.c_str());
+        problems += printPackInfo(d.file) != 0;
+    }   // checks their references into the pool too
     return problems ? 4 : 0;
 }
 

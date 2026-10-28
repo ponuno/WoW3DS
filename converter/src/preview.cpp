@@ -470,8 +470,15 @@ int main(int argc, char** argv) {
                   "       w3dpreview <pack.w3dp> <outdir> --player race sex skin face hairStyle hairColor facialHair [--equip slot=display,...]");
         return 1;
     }
-    std::ifstream f(argv[1], std::ios::binary);
-    std::vector<uint8_t> b((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    std::vector<uint8_t> b;   // one read (byte by byte took minutes on a multi-GB map pack)
+    {
+        std::ifstream f(argv[1], std::ios::binary | std::ios::ate);
+        if (!f) { std::fprintf(stderr, "cannot open %s\n", argv[1]); return 1; }
+        const std::streamoff size = f.tellg();
+        f.seekg(0);
+        b.resize(size > 0 ? (size_t)size : 0);
+        if (size > 0) f.read(reinterpret_cast<char*>(b.data()), size);
+    }
     std::string outDir = argv[2];
     previewLod = argc > 3 && argv[3][0] != '-' ? std::clamp(std::atoi(argv[3]), 0, W3D_TERRAIN_LODS - 1) : 0;
     W3dPackHeader h;

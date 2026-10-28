@@ -268,10 +268,7 @@ bool DataDir::read(const std::string& gamePath, std::vector<uint8_t>& out) const
         it = files_.find("data/" + key);
         if (it == files_.end()) return false;
     }
-    std::ifstream f(it->second, std::ios::binary);
-    if (!f) return false;
-    out.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
-    return true;
+    return readFileFast(it->second, out);
 }
 
 // ------------------------------------------------------------ validator
@@ -304,10 +301,19 @@ const char* fmtName(uint8_t f) {
 }
 }  // namespace
 
+bool readFileFast(const std::string& path, std::vector<uint8_t>& out) {
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (!f) return false;
+    const std::streamoff size = f.tellg();
+    if (size < 0) return false;
+    f.seekg(0);
+    out.resize((size_t)size);
+    return size == 0 || (bool)f.read(reinterpret_cast<char*>(out.data()), size);
+}
+
 int printPackInfo(const std::string& path) {
-    std::ifstream f(path, std::ios::binary);
-    if (!f) { std::fprintf(stderr, "cannot open %s\n", path.c_str()); return 1; }
-    std::vector<uint8_t> b((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    std::vector<uint8_t> b;
+    if (!readFileFast(path, b)) { std::fprintf(stderr, "cannot open %s\n", path.c_str()); return 1; }
     auto fail = [](const char* m) { std::fprintf(stderr, "INVALID: %s\n", m); return 2; };
     if (b.size() < sizeof(W3dPackHeader)) return fail("too small");
     W3dPackHeader h;
