@@ -37,4 +37,6 @@ fi
 echo "negative control (--no-walls): $(tail -1 "$OUT/nowalls_check.txt")"
 "$B/w3dpreview" "$OUT/wmo.w3dp" "$OUT/prev"
 "$B/w3dpreview" "$OUT/wmo.w3dp" "$OUT/prev" --coll | grep -q "coll_32_48.png: .* walls"
+# stage 5.31: simplified building groups keep every wall closed (no cracks between panels)
+if [ -x "$B/wmo_hole_test" ]; then "$B/wmo_hole_test"; fi
 echo "WMO TESTS: PASS"

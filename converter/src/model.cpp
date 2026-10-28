@@ -13,6 +13,7 @@
 #include <exception>
 #include <map>
 #include <tuple>
+#include <unordered_map>
 
 namespace w3d {
 
@@ -80,6 +81,20 @@ std::vector<uint8_t> buildModelBlob(ModelSource& m, int maxTris, size_t* trisOut
     // ---- 2. simplify each submesh proportionally to hit the budget
     size_t total = 0;
     for (auto& s : subs) total += s.idx.size() / 3;
+    if (maxTris > 0 && total > (size_t)maxTris) {
+        // Weld before simplifying (stage 5.31): WMO panels each carry their own vertices whose positions differ from the
+        // neighbour's by float noise; seen as open borders, they were collapsed one panel at a time and cracks opened
+        // between panels (Stormwind's walls: holes that never closed). Positions within 2 mm become identical (seams the
+        // simplifier keeps together), and what is still a border is locked (meshopt_SimplifyLockBorder below).
+        std::unordered_map<uint64_t, uint32_t> cell;
+        auto q = [](float v) { return (uint64_t)(uint32_t)(int32_t)std::lround(v * 500.0f) & 0x1FFFFF; };
+        for (uint32_t i = 0; i < m.verts.size(); ++i) {
+            auto& v = m.verts[i];
+            const uint64_t k = q(v.p[0]) | q(v.p[1]) << 21 | q(v.p[2]) << 42;
+            auto [it, fresh] = cell.emplace(k, i);
+            if (!fresh) { const auto& w = m.verts[it->second]; v.p[0] = w.p[0]; v.p[1] = w.p[1]; v.p[2] = w.p[2]; }
+        }
+    }
     const float* pos = &m.verts[0].p[0];
     const size_t stride = sizeof(ModelSource::V);
     if (maxTris > 0 && total > (size_t)maxTris) {
@@ -93,7 +108,8 @@ std::vector<uint8_t> buildModelBlob(ModelSource& m, int maxTris, size_t* trisOut
             // within the error keeps more triangles.
             static const float attrW[2] = {0.5f, 0.5f};
             size_t n = meshopt_simplifyWithAttributes(out.data(), s.idx.data(), s.idx.size(), pos, m.verts.size(), stride,
-                                                      &m.verts[0].uv[0], stride, attrW, 2, nullptr, target, 0.02f, 0, &err);
+                                                      &m.verts[0].uv[0], stride, attrW, 2, nullptr, target, 0.02f,
+                                                      meshopt_SimplifyLockBorder, &err);
             out.resize(n);
             if (n >= 3) s.idx.swap(out);
         }

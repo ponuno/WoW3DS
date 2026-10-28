@@ -10,6 +10,7 @@ typedef struct { u16 width, height; u8 maxLevel; GPU_TEXCOLOR format; GPU_TEXTUR
 bool C3D_TexInitWithParams(C3D_Tex* t, void* cube, C3D_TexInitParams p);
 bool C3D_TexInit(C3D_Tex* t, u16 w, u16 h, GPU_TEXCOLOR f);
 void C3D_TexLoadImage(C3D_Tex* t, const void* data, GPU_TEXFACE face, int level);
+void C3D_TexFlush(C3D_Tex* t);
 void C3D_TexUpload(C3D_Tex* t, const void* data);
 void C3D_TexSetFilter(C3D_Tex* t, GPU_TEXTURE_FILTER_PARAM a, GPU_TEXTURE_FILTER_PARAM b);
 void C3D_TexSetFilterMipmap(C3D_Tex* t, GPU_TEXTURE_FILTER_PARAM a);

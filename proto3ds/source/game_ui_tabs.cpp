@@ -924,9 +924,8 @@ void GameUi::drawSettings(const Input& in) {
         opt(220, 96, tr("Off", "Выкл"), !c.questTracker, 61);
     }
     const int by = kTabY - 24;
-    btn(2, by, 100, 22, tr("Free camera", "Своб. камера"), Act::MenuItem, 7, Style::Normal, Font::Small);
-    btn(106, by, 100, 22, tr("Debug page", "Отладка"), Act::MenuItem, 8, Style::Normal, Font::Small);
-    btn(210, by, 106, 22, tr("Quit", "Выход"), Act::MenuItem, 9, Style::Danger, Font::Small);
+    btn(2, by, 156, 22, tr("Debug page", "Отладка"), Act::MenuItem, 8, Style::Normal, Font::Small);
+    btn(162, by, 154, 22, tr("Quit", "Выход"), Act::MenuItem, 9, Style::Danger, Font::Small);
 }
 
 // ------------------------------------------------------------------ START menu, the target's menu, buffs
@@ -936,8 +935,11 @@ void GameUi::drawMenu(w3n::GameSession& g) {
     const char* items[10] = {tr("Chat", "Чат"), tr("Bags", "Сумки"), tr("Equipment", "Экипировка"), tr("Spells", "Книга"),
                              tr("Quests", "Задания"), tr("Buffs", "Эффекты"), tr("Settings", "Настройки"), tr("Free camera", "Своб. камера"),
                              tr("Debug page", "Отладка"), tr("Quit", "Выход")};
-    for (int i = 0; i < 10; ++i)
-        btn(14 + (i % 2) * 148, kTop + 8 + (i / 2) * 27, 142, 24, items[i], Act::MenuItem, i, i == 9 ? Style::Danger : Style::Normal);
+    for (int i = 0, k = 0; i < 10; ++i) {
+        if (i == 7) continue;   // the free camera is gone (stage 5.31)
+        btn(14 + (k % 2) * 148, kTop + 8 + (k / 2) * 27, 142, 24, items[i], Act::MenuItem, i, i == 9 ? Style::Danger : Style::Normal);
+        ++k;
+    }
     btn(kTouchW - 80, kTabY - 28, 70, 22, tr("Close", "Закрыть"), Act::ClosePanel, 0, Style::Normal, Font::Small);
 }
 

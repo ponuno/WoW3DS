@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 
 #include "conv.h"
 #include "w3d_format.h"
@@ -118,6 +119,76 @@ static void pillars() {
     CHECK(far == 0, "pillars: %d surface points moved away (worst %.2f yd)", far, worst);
 }
 
+// WMO faces often come as islands: each wall panel has its own vertices (own normals / UVs) whose positions differ from
+// the neighbour's by float noise, so the simplifier sees open borders everywhere. In a big group the error bound (2% of
+// the group) is yards: borders of neighbouring panels collapsed independently and cracks opened between them.
+// A 300 yd group of 20 x 10 wavy panels (each its own island, the shared edges' heights off by up to 0.001 yd).
+static void islands() {
+    ModelSource m;
+    ModelSource::Sub s;
+    s.texId = 0;
+    s.blend = W3D_BLEND_OPAQUE;
+    s.flags = W3D_SUBF_BUILDING;
+    const int PX = 20, PY = 10, S = 8;
+    const float PW = 15, PH = 3;   // panel: 15 x 3 yd, the wall 300 x 30
+    auto z = [](float x, float y) { return 0.8f * std::sin(x * 0.7f) + 0.5f * std::cos(y * 1.9f); };
+    unsigned seed = 1;
+    auto jit = [&]() { seed = seed * 1103515245u + 12345u; return ((seed >> 16) % 2001 - 1000) * 1e-6f; };
+    for (int py = 0; py < PY; ++py)
+        for (int px = 0; px < PX; ++px) {
+            const uint32_t base = (uint32_t)m.verts.size();
+            for (int j = 0; j <= S; ++j)
+                for (int i = 0; i <= S; ++i) {
+                    const float x = (px + (float)i / S) * PW, y = (py + (float)j / S) * PH;
+                    ModelSource::V v{};
+                    const bool edge = i == 0 || j == 0 || i == S || j == S;
+                    v.p[0] = x; v.p[1] = y; v.p[2] = z(x, y) + (edge ? jit() : 0);   // not welded: the heights differ a little
+                    v.n[2] = 1;
+                    v.uv[0] = (float)i / S; v.uv[1] = (float)j / S;
+                    m.verts.push_back(v);
+                }
+            for (int j = 0; j < S; ++j)
+                for (int i = 0; i < S; ++i) {
+                    const uint32_t a = base + j * (S + 1) + i, b = a + 1, c = a + S + 1, d = c + 1;
+                    s.idx.insert(s.idx.end(), {a, b, d, a, d, c});
+                }
+        }
+    const size_t inTris = s.idx.size() / 3;
+    m.subs.push_back(s);
+    size_t tris = 0;
+    static const int budget = getenv("ISL_BUDGET") ? atoi(getenv("ISL_BUDGET")) : 3000;
+    auto blob = buildModelBlob(m, budget, &tris);
+    CHECK(!blob.empty(), "islands: no blob");
+    if (blob.empty()) return;
+    W3dModelHeader h;
+    std::memcpy(&h, blob.data(), sizeof h);
+    std::vector<float> P(h.vertexCount * 2);
+    for (uint32_t i = 0; i < h.vertexCount; ++i) {
+        W3dModelVertex q;
+        std::memcpy(&q, blob.data() + h.offVertices + i * sizeof q, sizeof q);
+        P[i * 2] = q.x * h.posScale[0] + h.posOffset[0];
+        P[i * 2 + 1] = q.y * h.posScale[1] + h.posOffset[1];
+    }
+    const uint16_t* idx = (const uint16_t*)(blob.data() + h.offIndices);
+    int samples = 0, holes = 0;
+    for (float y = 0.1f; y < PY * PH - 0.1f; y += 0.37f)
+        for (float x = 0.1f; x < PX * PW - 0.1f; x += 0.37f) {
+            ++samples;
+            bool in = false;
+            for (uint32_t t = 0; t + 2 < h.indexCount && !in; t += 3) {
+                const float* a = &P[idx[t] * 2]; const float* b = &P[idx[t + 1] * 2]; const float* c = &P[idx[t + 2] * 2];
+                const float d1 = (x - b[0]) * (a[1] - b[1]) - (a[0] - b[0]) * (y - b[1]);
+                const float d2 = (x - c[0]) * (b[1] - c[1]) - (b[0] - c[0]) * (y - c[1]);
+                const float d3 = (x - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (y - a[1]);
+                const float e = 1e-3f;
+                in = (d1 >= -e && d2 >= -e && d3 >= -e) || (d1 <= e && d2 <= e && d3 <= e);
+            }
+            holes += !in;
+        }
+    std::printf("islands: %zu -> %zu triangles, %d of %d sample points uncovered\n", inTris, tris, holes, samples);
+    CHECK(holes == 0, "islands: %d holes", holes);
+}
+
 int main() {
     const int N = 60;           // quads along x; 30 along y
     const float W = 60, H = 30;
@@ -181,6 +252,7 @@ int main() {
     CHECK(holes == 0, "%d holes in the wall", holes);
     CHECK(tris < 7200, "not simplified at all (%zu triangles)", tris);
     pillars();
+    islands();
     std::printf(fails ? "WMO HOLES: FAILED\n" : "WMO HOLES: PASS\n");
     return fails ? 1 : 0;
 }

@@ -656,6 +656,7 @@ GpuTex* compositeBody(const PlayerBuild* b) {
     if (!ok) { p.onVram = false; ok = C3D_TexInitWithParams(&t->tex, NULL, p); }
     if (ok) {
         C3D_TexLoadImage(&t->tex, staging, GPU_TEXFACE_2D, 0);
+        C3D_TexFlush(&t->tex);   // in linear memory the copy is a memcpy: still in the CPU cache (see tryUpload)
         C3D_TexSetFilter(&t->tex, GPU_LINEAR, GPU_NEAREST);
         C3D_TexSetWrap(&t->tex, GPU_REPEAT, GPU_REPEAT);
         t->bytes = A * A * 2;
@@ -1039,6 +1040,10 @@ bool tryUpload(GpuTex* t) {
         w >>= 1;
         h >>= 1;
     }
+    // A texture that did not fit in VRAM lives in linear memory, where C3D_TexLoadImage is a plain memcpy: without a
+    // flush the GPU read whatever was in RAM before - noise on objects and players once VRAM filled up (stage 5.31,
+    // the photo after the free camera's longer draw distance). VRAM textures are a DMA copy and need nothing.
+    C3D_TexFlush(&t->tex);
     C3D_TexSetFilter(&t->tex, GPU_LINEAR, GPU_NEAREST);
     C3D_TexSetFilterMipmap(&t->tex, th.mipCount > 1 ? GPU_LINEAR : GPU_NEAREST);
     C3D_TexSetWrap(&t->tex, GPU_REPEAT, GPU_REPEAT);

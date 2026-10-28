@@ -92,6 +92,7 @@ void C3D_TexLoadImage(C3D_Tex* t, const void* data, GPU_TEXFACE, int level) {
     sink ^= s[n - 1];
 }
 void C3D_TexUpload(C3D_Tex* t, const void* data) { C3D_TexLoadImage(t, data, GPU_TEXFACE_2D, 0); }
+void C3D_TexFlush(C3D_Tex*) {}
 void C3D_TexSetFilter(C3D_Tex*, GPU_TEXTURE_FILTER_PARAM, GPU_TEXTURE_FILTER_PARAM) {}
 void C3D_TexSetFilterMipmap(C3D_Tex*, GPU_TEXTURE_FILTER_PARAM) {}
 void C3D_TexSetWrap(C3D_Tex*, GPU_TEXTURE_WRAP_PARAM, GPU_TEXTURE_WRAP_PARAM) {}

@@ -76,7 +76,8 @@ void Pad::selectKeys(const PadInput& in, PadOut& o) {
         if (in.down & KEY_DLEFT) { o.tabDelta = -1; selectCombo_ = true; }
         if (in.down & KEY_DRIGHT) { o.tabDelta = 1; selectCombo_ = true; }
     }
-    o.freeCamera = (in.up & KEY_SELECT) && !selectCombo_;
+    // Stage 5.31: a tap no longer switches to the free camera (it went on by accident, the user asked for it gone).
+    o.freeCamera = false;
 }
 
 PadOut Pad::update(const PadInput& in, const PadConfig& cfg, bool inCombat, float camYaw, float dt) {

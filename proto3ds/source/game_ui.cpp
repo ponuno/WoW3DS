@@ -839,7 +839,6 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
                 case 4: setTab(Tab::Quests); logView_ = 0; break;
                 case 5: open_ = Panel::Buffs; buffSel_ = 0; break;
                 case 6: setTab(Tab::Settings); break;
-                case 7: out.freeCamera = true; break;
                 case 8: gamePage_ = false; out.showDebug = true; break;
                 case 9: out.quit = true; break;
                 case 10: setTab(Tab::Map); break;

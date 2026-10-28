@@ -427,10 +427,9 @@ void drawModels(const Camera& cam, const C3D_Mtx& view, const RenderSettings& rs
             const W3dSubmesh& sm = m->subs[s];
             bool isBlended = sm.blend == W3D_BLEND_ALPHA || sm.blend == W3D_BLEND_ADD;
             if (isBlended != blendedPass) continue;
-            // Buildings are drawn from both sides (stage 5.31), as WoWee does (VK_CULL_MODE_NONE for every WMO pass): the
-            // converter orients each batch by its vertex normals, and where a batch's normals point the wrong way its
-            // walls were culled away - holes in Stormwind's walls that never closed.
-            setModelBlend(sm.blend, sm.flags & W3D_SUBF_TWO_SIDED, rs.modelsNoCull || (sm.flags & W3D_SUBF_BUILDING));
+            // (5.31: drawing buildings from both sides did not close the holes in Stormwind's walls - they were cracks
+            // from the simplification, fixed in the converter - so buildings are culled again: the GPU time matters.)
+            setModelBlend(sm.blend, sm.flags & W3D_SUBF_TWO_SIDED, rs.modelsNoCull);
             bc.bind(0, sm.tex == W3D_NO_TEXTURE ? streamerWhiteTexture() : m->tex[sm.tex], fc);
             float unlit = (sm.flags & W3D_SUBF_UNLIT) ? 1.0f : 0.0f;
             for (const Instance* in : m->visible) {
