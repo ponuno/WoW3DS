@@ -913,21 +913,21 @@ void GameUi::drawSettings(const Input& in) {
         label(tr("Language", "Язык"));
         opt(120, 96, "English", c.lang == 0, 100);
         opt(220, 96, "Русский", c.lang == 1, 101);
-        y += 22;
+        y += 20;
         label(tr("Text size", "Размер текста"));
         opt(120, 96, tr("Normal", "Обычный"), !c.bigText, 110);
         opt(220, 96, tr("Large", "Крупный"), c.bigText, 110);
-        y += 22;
+        y += 20;
         label(tr("Dim HUD at rest", "Тусклый HUD вне боя"));
         opt(120, 96, c.dimHud ? tr("On", "Вкл") : tr("Off", "Выкл"), c.dimHud, 120);
-        y += 22;
+        y += 20;
         label(tr("Auto tabs", "Автовкладки"));
         opt(120, 96, c.autoTabs ? tr("On", "Вкл") : tr("Off", "Выкл"), c.autoTabs, 130);
-        y += 22;
+        y += 20;
         label(tr("Quest on top", "Квест сверху"));
         opt(120, 96, tr("On", "Вкл"), c.questTracker, 60);
         opt(220, 96, tr("Off", "Выкл"), !c.questTracker, 61);
-        y += 22;
+        y += 20;
         label(tr("FPS / ping", "FPS / пинг"));   // 5.35e: small, at the bottom of the top screen
         opt(120, 96, tr("On", "Вкл"), c.showStats, 180);
         opt(220, 96, tr("Off", "Выкл"), !c.showStats, 181);
