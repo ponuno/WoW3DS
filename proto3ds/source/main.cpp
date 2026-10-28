@@ -286,6 +286,15 @@ static void writeReport(const Bench* b, float drawDist, const RenderSettings& rs
                    "skipped: %lu too far, %lu over the limit\n", g_spellViewPtr->loaded() ? "loaded" : "NOT in the pack (convert again)",
                 (unsigned long)ss.started, (unsigned long)ss.missiles, (unsigned long)ss.impacts, (unsigned long)g_spellViewPtr->models(),
                 (unsigned long)ss.skippedFar, (unsigned long)ss.skippedFull);
+        fprintf(f, "  events: %lu with a visual looked at, %lu spells without one in the table, %lu casters unknown\n",
+                (unsigned long)ss.events, (unsigned long)ss.noVisual, (unsigned long)ss.noCaster);
+        static const char* kKind[3] = {"start", "go", "fail"};
+        static const char* kRes[7] = {"no table", "no visual", "fail", "caster unknown", "too far", "STARTED", "nothing to start"};
+        for (int i = 0; i < g_spellViewPtr->logCount(); ++i) {
+            const SpellView::EvLog* l = g_spellViewPtr->log(i);
+            fprintf(f, "    spell %lu %s by %s, %u targets, visual %s, %.0f yd: %s\n", (unsigned long)l->spell, kKind[l->kind % 3],
+                    l->self ? "me" : "other", l->targets, l->hasVisual ? "yes" : "no", l->dist, kRes[l->result % 7]);
+        }
         const sfx::Lasting& la = g_spellViewPtr->lasting();
         fprintf(f, "  lasting (stage 5.34): now %lu auras, %lu channels, %lu loot sparkles; level-up flashes %lu\n",
                 (unsigned long)la.auras(), (unsigned long)la.channels(), (unsigned long)la.loot(), (unsigned long)la.levelUps());
@@ -1586,6 +1595,12 @@ int main() {
                    rs.doodads ? "on" : "off", kDetail[detailIdx], rs.fog ? "on" : "off");
             printf("\x1b[15;1Hfx %3lu prt %3lu glow %3lu %4.1fms sp %2lu ", (unsigned long)fc.fxQuads, (unsigned long)fc.fxParticles,
                    (unsigned long)fc.fxGlows, fc.fxMs, (unsigned long)spellView.active());
+            if (spellView.logCount()) {   // 5.35b: the last spell event and what became of it
+                static const char* kRes[7] = {"no table", "no visual", "fail", "no caster", "too far", "STARTED", "nothing"};
+                const SpellView::EvLog* l = spellView.log(spellView.logCount() - 1);
+                printf("\x1b[16;1Hspell %-6lu %s %-5s %3.0fyd %-10s    ", (unsigned long)l->spell, l->self ? "me" : "ot",
+                       l->kind == 0 ? "start" : l->kind == 1 ? "go" : "fail", l->dist, kRes[l->result % 7]);
+            }
 
             printf("\x1b[17;1HCirclePad move/turn CStick look   ");
             printf("\x1b[18;1HL/R down/up  B fast%s SELECT walk/fly", g_login.online() ? "/jump" : "     ");

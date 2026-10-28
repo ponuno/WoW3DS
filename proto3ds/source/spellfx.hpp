@@ -58,7 +58,10 @@ struct Placed {                   // one effect model to draw / emit this frame
     uint32_t ageMs = 0;           // stage 5.35: since it started (the bone animation of its model)
 };
 
-struct Stats { uint32_t started = 0, missiles = 0, impacts = 0, skippedFar = 0, skippedFull = 0, active = 0; };
+struct Stats { uint32_t started = 0, missiles = 0, impacts = 0, skippedFar = 0, skippedFull = 0, active = 0;
+               uint32_t events = 0, noVisual = 0, noCaster = 0; };   // 5.35b: what became of the session's events
+// What event() did with one event (report.txt shows the last ones).
+enum EventResult : uint8_t { kEvNoTable, kEvNoVisual, kEvFail, kEvNoCaster, kEvFar, kEvStarted, kEvNothing };
 
 class Director {
 public:
@@ -66,7 +69,7 @@ public:
     static constexpr float kRange = 80.0f;
     static constexpr uint32_t kLingerMs = 1500;
     void setTable(const Table* t) { table_ = t; }
-    void event(const Event& e, uint32_t nowMs, const float cam[3], const Resolver& where);
+    EventResult event(const Event& e, uint32_t nowMs, const float cam[3], const Resolver& where, float* distOut = nullptr);
     // Every frame: moves missiles, ends what is over, fills out (effects to show and keep alive).
     void update(uint32_t nowMs, const Resolver& where, std::vector<Placed>& out);
     void clear() { active_.clear(); }

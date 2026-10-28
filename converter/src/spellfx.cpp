@@ -74,14 +74,25 @@ bool convertSpellEffects(const Options& oIn, const DataDir& data, PackWriter& pa
     }
     // ---- SpellVisualKit: up to two effects per kit and where they hang (both hands, else the most telling one)
     struct Col { uint32_t c; uint8_t slot; };
-    const Col cols[] = {{6, W3D_SLOT_LHAND}, {7, W3D_SLOT_RHAND}, {11, W3D_SLOT_CHEST}, {5, W3D_SLOT_BASE}, {4, W3D_SLOT_CHEST},
-                        {3, W3D_SLOT_HEAD}, {8, W3D_SLOT_HEAD}, {12, W3D_SLOT_CHEST}, {13, W3D_SLOT_CHEST}};
+    // 1.12 (no weapon effects yet): 3 head, 4 chest, 5 base, 6 left hand, 7 right hand, 8 breath, 9..11 special, 12 world,
+    // 13 the kit's sound (5.35b: WoWee's 11..13 for the specials read sound ids as effects). A column is used only when
+    // most of its values name an effect: a column of sounds or flags never does.
+    const Col cols[] = {{6, W3D_SLOT_LHAND}, {7, W3D_SLOT_RHAND}, {9, W3D_SLOT_CHEST}, {5, W3D_SLOT_BASE}, {4, W3D_SLOT_CHEST},
+                        {3, W3D_SLOT_HEAD}, {8, W3D_SLOT_HEAD}, {10, W3D_SLOT_CHEST}, {11, W3D_SLOT_CHEST}, {12, W3D_SLOT_BASE}};
+    bool colOk[64] = {};
+    for (const Col& c : cols) {
+        if (c.c >= svk.fields || c.c >= 64) continue;
+        uint32_t nz = 0, ok = 0;
+        for (uint32_t r = 0; r < svk.records; ++r)
+            if (const uint32_t e = svk.u32(r, c.c)) { ++nz; ok += names.count(e) ? 1 : 0; }
+        colOk[c.c] = nz && ok * 2 >= nz;
+    }
     std::map<uint32_t, KitFx> kits;
     for (uint32_t r = 0; r < svk.records; ++r) {
         KitFx k;
         int n = 0;
         for (const Col& c : cols) {
-            if (c.c >= svk.fields || n >= 2) continue;
+            if (c.c >= svk.fields || c.c >= 64 || !colOk[c.c] || n >= 2) continue;
             const uint32_t e = svk.u32(r, c.c);
             if (!e || !names.count(e)) continue;
             if (n == 1 && k.effect[0] == e && !((k.slot[0] == W3D_SLOT_LHAND && c.slot == W3D_SLOT_RHAND))) continue;
@@ -218,6 +229,9 @@ bool convertSpellEffects(const Options& oIn, const DataDir& data, PackWriter& pa
     hp->levelUp = levelUp;
     hp->loot = loot;
     pack.add(W3D_ENTRY_SPELLFX, 0, std::move(b.data));
+    std::printf("  spell effects: kit columns used:");
+    for (const Col& c : cols) if (c.c < 64 && colOk[c.c]) std::printf(" %u", c.c);
+    std::printf("; %zu kits with effects, %zu visuals, %zu spells with a visual\n", kits.size(), visuals.size(), spells.size());
     progressDone("spell effects: %zu spells, %zu visuals, %zu effect models (%zu failed), missile speed column %d, level-up %s, loot %s",
                  outSpells.size(), outVis.size(), effects.size(), failed, spCol, levelUp != W3D_SFX_NONE ? "yes" : "no",
                  loot != W3D_SFX_NONE ? "yes" : "no");

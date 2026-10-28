@@ -116,22 +116,27 @@ bool Director::running(uint32_t key) const {
     return false;
 }
 
-void Director::event(const Event& ev, uint32_t nowMs, const float cam[3], const Resolver& where) {
-    if (!table_ || !table_->loaded()) return;
+EventResult Director::event(const Event& ev, uint32_t nowMs, const float cam[3], const Resolver& where, float* distOut) {
+    if (distOut) *distOut = -1;
+    if (!table_ || !table_->loaded()) return kEvNoTable;
+    ++stats_.events;
+    const uint32_t startedBefore = stats_.started;
     float speed = 0;
     const W3dSpellVisual* v = table_->visualOf(ev.spell, &speed);
     // whatever this caster was preparing ends here (a new cast, the spell going off, or failing)
     if (ev.kind != Event::Start || v)
         for (Active& a : active_)
             if (a.stage == W3D_SFX_PRECAST && a.unit == ev.caster && a.endMs > nowMs) a.endMs = nowMs;
-    if (!v || ev.kind == Event::Fail) return;
+    if (ev.kind == Event::Fail) return kEvFail;
+    if (!v) { ++stats_.noVisual; return kEvNoVisual; }
     float cp[3], yaw = 0;
-    if (!where(ev.caster, W3D_SLOT_CHEST, cp, &yaw)) return;
+    if (!where(ev.caster, W3D_SLOT_CHEST, cp, &yaw)) { ++stats_.noCaster; return kEvNoCaster; }
     const float dx = cp[0] - cam[0], dy = cp[1] - cam[1], dz = cp[2] - cam[2];
-    if (dx * dx + dy * dy + dz * dz > kRange * kRange) { ++stats_.skippedFar; return; }
+    if (distOut) *distOut = sqrtf(dx * dx + dy * dy + dz * dz);
+    if (dx * dx + dy * dy + dz * dz > kRange * kRange) { ++stats_.skippedFar; return kEvFar; }
     if (ev.kind == Event::Start) {
         if (ev.castMs > 0) startStage(v, W3D_SFX_PRECAST, ev.caster, ev.spell, nowMs, std::min<uint32_t>(ev.castMs + 300, 10000));
-        return;
+        return stats_.started != startedBefore ? kEvStarted : kEvNothing;
     }
     // ---- the spell went off
     startStage(v, W3D_SFX_CAST, ev.caster, ev.spell, nowMs, 1200);
@@ -163,6 +168,7 @@ void Director::event(const Event& ev, uint32_t nowMs, const float cam[3], const 
             ++stats_.impacts;
         }
     }
+    return stats_.started != startedBefore ? kEvStarted : kEvNothing;
 }
 
 void Director::update(uint32_t nowMs, const Resolver& where, std::vector<Placed>& out) {

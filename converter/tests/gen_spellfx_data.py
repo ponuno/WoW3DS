@@ -63,7 +63,7 @@ dbc("SpellVisual.dbc", 16, [
     [15, 0, 0, 0, 0, 0, 107],         # channel kit (column 6): in the hands while channelling
 ])
 # ---- SpellVisualKit: id, start anim, anim, head 3, chest 4, base 5, left hand 6, right hand 7, breath 8, weapons 9/10,
-#      special 11..13, world 14, sound 15
+#      special 9..11 (1.12 has no weapon effects), world 12, sound 13 (11 is still a special: the test keeps it)
 def kit(kid, **eff):
     r = [0] * 20; r[0] = kid
     cols = dict(head=3, chest=4, base=5, lhand=6, rhand=7, breath=8, special=11)

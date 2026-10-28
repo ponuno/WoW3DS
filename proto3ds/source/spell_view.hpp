@@ -22,6 +22,11 @@ public:
     size_t active() const { return dir_.active(); }
     size_t models() const;
     const sfx::Lasting& lasting() const { return lasting_; }
+    // 5.35b, for report.txt: the last spell events and what became of them
+    struct EvLog { uint32_t spell = 0; uint8_t kind = 0, result = 0, targets = 0; bool self = false; float dist = -1; bool hasVisual = false; };
+    static constexpr int kLog = 16;
+    const EvLog* log(int i) const { return i < logN_ ? &log_[(logAt_ + kLog - logN_ + i) % kLog] : nullptr; }
+    int logCount() const { return logN_; }
 
 private:
     Model* modelFor(uint16_t effect);
@@ -32,4 +37,6 @@ private:
     std::vector<Model*> models_;  // by effect index (null = not acquired yet)
     std::vector<sfx::Placed> placed_;
     bool tried_ = false;
+    EvLog log_[kLog];
+    int logAt_ = 0, logN_ = 0;
 };

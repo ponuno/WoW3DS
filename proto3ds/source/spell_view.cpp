@@ -95,7 +95,15 @@ void SpellView::update(w3n::GameSession& g, uint32_t nowMs, const float cam[3], 
         e.nTargets = std::min<uint8_t>(w.nTargets, 4);
         for (int k = 0; k < e.nTargets; ++k) e.targets[k] = w.targets[k];
         if (e.kind == sfx::Event::Go && !e.nTargets && w.dst) { e.targets[0] = w.dst; e.nTargets = 1; }
-        dir_.event(e, nowMs, cam, where);
+        EvLog& l = log_[logAt_];
+        l.spell = e.spell;
+        l.kind = (uint8_t)e.kind;
+        l.self = e.caster == g.selfGuid();
+        l.targets = e.nTargets;
+        l.hasVisual = table_.visualOf(e.spell, nullptr) != nullptr;
+        l.result = (uint8_t)dir_.event(e, nowMs, cam, where, &l.dist);
+        logAt_ = (logAt_ + 1) % kLog;
+        if (logN_ < kLog) ++logN_;
     }
     // what lasts on the units near the camera (stage 5.34)
     units_.clear();
