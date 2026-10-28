@@ -13,6 +13,7 @@
 #include <shellapi.h>
 #include <shlobj.h>
 
+#include <cwchar>
 #include <string>
 #include <vector>
 
@@ -215,7 +216,16 @@ DWORD WINAPI worker(LPVOID p) {
         if (g_cancel) break;
         if (rc != 0) {
             ++failed;
-            postLine(L"!!! The step ended with code " + std::to_wstring(rc) + L" (log: " + widen(steps[i].logFile) + L")");
+            wchar_t hex[16];
+            std::swprintf(hex, 16, L"0x%08X", (unsigned)rc);
+            const wchar_t* what = (unsigned)rc == 0xC0000005u ? L" = access violation (the converter crashed)"
+                                  : (unsigned)rc == 0xC00000FDu ? L" = stack overflow"
+                                  : (unsigned)rc == 0xC0000374u ? L" = heap corruption"
+                                  : (unsigned)rc == 0xC0000409u ? L" = fast-fail / stack buffer overrun"
+                                  : rc == 3 ? L" = aborted (see the FATAL line at the end of the log)"
+                                  : rc == 5 ? L" = cannot write the spill file (disk full or file over 4 GB on FAT32)" : L"";
+            postLine(L"!!! The step ended with code " + std::to_wstring(rc) + L" (" + hex + what + L"), log: " + widen(steps[i].logFile));
+            postLine(L"!!! Look at the LAST lines of that log: a line starting with FATAL says what was being converted.");
         } else {
             postLine(L"Done.");
         }
@@ -342,7 +352,10 @@ void createControls() {
     y += 14;
     mk(L"STATIC", L"Ready.", SS_ENDELLIPSIS, 12, y, 578, 18, ID_STATUS);
     y += 22;
-    mk(L"EDIT", L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_BORDER, 12, y, 578, 180, ID_LOG, WS_EX_CLIENTEDGE);
+    HWND logBox = mk(L"EDIT", L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_BORDER, 12, y, 578, 180, ID_LOG, WS_EX_CLIENTEDGE);
+    // An EDIT control stops accepting text after 32 KB unless told otherwise: the window used to freeze a few hundred lines
+    // into the run (the screenshot of a failed run ended in the first map) and never showed the final "step ended with code".
+    SendMessageW(logBox, EM_SETLIMITTEXT, 0x7FFFFFFE, 0);
 }
 
 LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {

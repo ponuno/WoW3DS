@@ -139,6 +139,8 @@ std::vector<uint8_t> buildCreatureBlob(const wowee::pipeline::M2Model& m, int ma
         }
         s.idx.assign(m.indices.begin() + b.indexStart, m.indices.begin() + b.indexStart + b.indexCount);
         for (uint32_t& i : s.idx) if (i >= m.vertices.size()) i = 0;
+        s.idx.resize(s.idx.size() / 3 * 3);   // whole triangles only (meshoptimizer reads past the end otherwise)
+        if (s.idx.empty()) continue;
         subs.push_back(std::move(s));
         info.geosets.insert(b.submeshId);
     }

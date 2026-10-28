@@ -24,6 +24,14 @@ namespace w3d {
 void progress(bool force, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
 void progressDone(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 
+// ------------------------------------------------------------ crash guard (crashguard.cpp)
+// installCrashGuard(): call first thing in main. If the process dies (access violation, abort, uncaught exception),
+// the last trace() line is printed to stderr and stdout is flushed, so the log ends where the converter really died
+// (stdout to a pipe/file is block-buffered: without this the log lost its last few KB and stopped mid-line).
+void installCrashGuard();
+// trace(): remember what is being converted right now ("WMO <path> group 3") and flush stdout. Cheap enough per asset.
+void trace(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+
 // ------------------------------------------------------------ settings
 struct Options {
     std::string dataDir;        // loose files extracted from MPQ (WoWee extract_assets)
@@ -199,6 +207,7 @@ struct ModelSource {               // engine-neutral mesh before packing
     std::vector<V> verts;
     std::vector<Sub> subs;
     std::vector<uint32_t> texIds;   // TEX entry ids referenced by Sub::texId (index)
+    size_t dropped = 0;             // out: indices/triangles buildModelBlob had to throw away (partial triangle, index out of range)
 };
 // Flips idx (triangle list over m.verts) to be CCW seen from the vertex normals; true if flipped.
 bool orientByNormals(const ModelSource& m, std::vector<uint32_t>& idx);
@@ -206,6 +215,7 @@ bool orientByNormals(const ModelSource& m, std::vector<uint32_t>& idx);
 std::vector<uint8_t> buildModelBlob(ModelSource& m, int maxTris, size_t* trisOut, int* flippedOut = nullptr);
 
 struct ConvStats {
+    size_t collOrphanTiles = 0;   // collision tiles dropped because the map has no terrain tile there
     size_t tiles = 0, waterTris = 0, wmoSkipped = 0;
     size_t wmoOk = 0, wmoFailed = 0, wmoGroups = 0, wmoGroupsFailed = 0, wmoGroupsSkipped = 0, wmoTris = 0;
     size_t wmoPlacements = 0, wmoPlacedGroups = 0, wmoDoodads = 0, duplicatesSkipped = 0;

@@ -756,7 +756,12 @@ int main() {
             float target = 0.1f + (tileOk ? 0.45f : 0.0f) + (collOk ? 0.35f : 0.0f) + (quiet ? 0.1f : 0.0f);
             loadShown += (target - loadShown) * std::min(1.0f, dt * 6.0f);
             portal.setProgress(loadShown);
-            if ((tileOk && collOk && (quiet || loadElapsed > 3.0f)) || loadElapsed > 25.0f) {
+            // Stage 5.28: the tile and its collision being "ready" is not enough (the floor of a building can come from a
+            // neighbouring tile's data, or the collision grid of the tile still be empty): there must be a floor under the
+            // feet within reach of where the server put us, or a long wait (10 s) has passed. Never release into the void.
+            float gz = 0;
+            const bool groundOk = streamerFloorHeight(lp[0], lp[1], lp[2] + 0.5f, &gz) && std::fabs(gz - lp[2]) < 4.0f;
+            if ((tileOk && collOk && (quiet || loadElapsed > 3.0f) && (groundOk || loadElapsed > 10.0f)) || loadElapsed > 25.0f) {
                 loadingWorld = false;
                 portal.setProgress(1.0f);
                 portal.finish();
@@ -1063,7 +1068,9 @@ int main() {
                     return !ride.guid && !loadingWorld && !waterWalker && !game->mover.rooted() &&
                            streamerLiquidAt(pl[0], pl[1], pl[2], &lq) && swim::deepEnough(lq.level, pl[2]);
                 };
-                if (airborne) {
+                if (airborne && !streamerCollisionReadyAt(pl[0], pl[1]) && !haveGround) {
+                    plVz = 0;   // stage 5.28: the data under us is not loaded (yet): hang here instead of dropping through the world
+                } else if (airborne) {
                     plVz -= 19.291105f * dt;   // the client's gravity
                     pl[2] += plVz * dt;
                     if (deepWater()) {

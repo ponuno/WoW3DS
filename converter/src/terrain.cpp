@@ -58,6 +58,7 @@ struct TVert { float p[3]; uint8_t c[4]; float uv[2]; };
 static bool claimPlacement(const Options& o, std::unordered_set<uint32_t>& seen, uint32_t uid, float x, float y);
 
 bool convertTile(const Options& o, const DataDir& data, PackWriter& pack, ConvStats& st) {
+    trace("map %s tile %d_%d", o.map.c_str(), o.tileX, o.tileY);
     char adtPath[256];
     std::snprintf(adtPath, sizeof adtPath, "World\\Maps\\%s\\%s_%d_%d.adt", o.map.c_str(), o.map.c_str(), o.tileX,
                   o.tileY);

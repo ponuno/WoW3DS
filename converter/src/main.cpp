@@ -79,6 +79,7 @@ static void usage() {
 static bool pow2ok(int v) { return v >= 8 && v <= 1024 && (v & (v - 1)) == 0; }
 
 int main(int argc, char** argv) {
+    w3d::installCrashGuard();
     Options o;
     std::string info;
     bool textsOnly = false, uiMode = false, soundMode = false;

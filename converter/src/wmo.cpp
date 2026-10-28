@@ -21,6 +21,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <map>
 
 namespace w3d {
@@ -100,8 +101,31 @@ float matrixToPlacement(const float m4[16], float outRot[3]) {
 
 void resetWmoCache() { g_wmoCache.clear(); }
 
+static const WmoAsset& loadWmoImpl(PackWriter& pack, const DataDir& data, const std::string& path, const Options& o,
+                                   ConvStats& st);
+
+// A building that cannot be converted (a C++ exception: out of memory, a length error from a broken table, ...) is skipped
+// with a line in the log instead of ending a run that has been going for hours. (Access violations are not exceptions:
+// those are reported by the crash guard, and the data that caused the known ones is now sanitised.)
 static const WmoAsset& loadWmo(PackWriter& pack, const DataDir& data, const std::string& path, const Options& o,
                                ConvStats& st) {
+    const std::string key = DataDir::normalize(path);
+    auto it = g_wmoCache.find(key);
+    if (it != g_wmoCache.end()) return it->second;
+    trace("WMO %s", path.c_str());
+    try {
+        return loadWmoImpl(pack, data, path, o, st);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "  WMO FAILED, skipped: %s (%s)\n", path.c_str(), e.what());
+        WmoAsset& a = g_wmoCache[key];
+        a = WmoAsset{};
+        ++st.wmoFailed;
+        return a;
+    }
+}
+
+static const WmoAsset& loadWmoImpl(PackWriter& pack, const DataDir& data, const std::string& path, const Options& o,
+                                   ConvStats& st) {
     std::string key = DataDir::normalize(path);
     auto it = g_wmoCache.find(key);
     if (it != g_wmoCache.end()) return it->second;
@@ -198,6 +222,8 @@ static const WmoAsset& loadWmo(PackWriter& pack, const DataDir& data, const std:
     for (uint32_t gi = 0; gi < w.groups.size(); ++gi) {
         const auto& g = w.groups[gi];
         if (g.vertices.empty() || g.indices.empty()) continue;
+        trace("WMO %s group %u/%u (%zu vertices, %zu indices, %zu batches)", path.c_str(), gi, (unsigned)w.groups.size(),
+              g.vertices.size(), g.indices.size(), g.batches.size());
         if (o.wmoExteriorOnly && (g.flags & 0x2000) && !(g.flags & 0x8)) { ++st.wmoGroupsSkipped; continue; }
         // Group centre = centre of the vertices actually used by render batches.
         glm::vec3 lo(1e30f), hi(-1e30f);
@@ -226,6 +252,7 @@ static const WmoAsset& loadWmo(PackWriter& pack, const DataDir& data, const std:
         for (const auto& b : g.batches) {
             if (b.materialId == 0xFF || b.indexCount < 3) continue;
             if ((size_t)b.startIndex + b.indexCount > g.indices.size()) continue;
+            // (an index count that is not a multiple of 3 is trimmed by buildModelBlob)
             ModelSource::Sub s;
             s.texId = UINT32_MAX;
             s.blend = W3D_BLEND_OPAQUE;
@@ -261,6 +288,9 @@ static const WmoAsset& loadWmo(PackWriter& pack, const DataDir& data, const std:
         int flipped = 0;
         auto blob = buildModelBlob(src, o.wmoGroupTris, &tris, &flipped);
         st.wmoSubsFlipped += flipped;
+        if (src.dropped && o.verbose)
+            std::printf("    group %u of %s: %zu bad indices dropped (partial triangle or index out of range)\n", gi, path.c_str(),
+                        src.dropped);
         if (blob.empty()) { ++st.wmoGroupsFailed; continue; }
         char idKey[600];
         std::snprintf(idKey, sizeof idKey, "%s#%u", key.c_str(), gi);
@@ -364,11 +394,13 @@ static void addCollisionTris(const Options& o, ConvStats& st, const glm::vec3* s
         float minX = std::min({v[0].x, v[1].x, v[2].x}), maxX = std::max({v[0].x, v[1].x, v[2].x});
         float minY = std::min({v[0].y, v[1].y, v[2].y}), maxY = std::max({v[0].y, v[1].y, v[2].y});
         // tiles overlapped: tileY from x, tileX from y (tile min corner = (32 - t - 1) * TS)
-        int ty0 = (int)std::floor(32.0f - maxX / TS), ty1 = (int)std::floor(32.0f - minX / TS);
-        int tx0 = (int)std::floor(32.0f - maxY / TS), tx1 = (int)std::floor(32.0f - minY / TS);
+        // The float -> int conversion is clamped: a vertex far outside the world (a broken model, 1e30) made it undefined, and
+        // the loops below then ran for ~2^31 steps (a hang). Only the tiles of the region are visited.
+        auto tileOf = [](float v) { return !(v > -1e6f) ? -1000000 : v > 1e6f ? 1000000 : (int)std::floor(v); };
+        int ty0 = std::max(tileOf(32.0f - maxX / TS), o.tileY0), ty1 = std::min(tileOf(32.0f - minX / TS), o.tileY1);
+        int tx0 = std::max(tileOf(32.0f - maxY / TS), o.tileX0), tx1 = std::min(tileOf(32.0f - minY / TS), o.tileX1);
         for (int tx = tx0; tx <= tx1; ++tx)
             for (int ty = ty0; ty <= ty1; ++ty) {
-                if (tx < o.tileX0 || tx > o.tileX1 || ty < o.tileY0 || ty > o.tileY1) continue;
                 float rx0 = (32.0f - ty - 1.0f) * TS, ry0 = (32.0f - tx - 1.0f) * TS;
                 std::vector<glm::vec3> poly = clipToRect(v, rx0, ry0, rx0 + TS, ry0 + TS);
                 if (poly.size() < 3) continue;
@@ -402,6 +434,9 @@ void emitCollision(const Options& o, PackWriter& pack, ConvStats& st) {
     const float TS = 533.33333f;
     for (auto& [tid, tris] : st.collTris) {
         if (tris.empty()) continue;
+        // Collision of a building/doodad that overhangs a tile the map has no terrain for: the pack validator rejects it
+        // ("collision without terrain tile") and the console never loads a tile without terrain. Skip it.
+        if (!pack.has(W3D_ENTRY_TERRAIN, tid)) { ++st.collOrphanTiles; continue; }
         // Finer grid for dense tiles (cities, forests with trunk collision): walls are tested
         // every step, so fewer triangles per cell matter more than the index size.
         const uint32_t N = tris.size() > 6000 ? 64 : 32;

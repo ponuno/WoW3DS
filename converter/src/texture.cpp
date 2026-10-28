@@ -21,6 +21,7 @@
 #include <mutex>
 #include <thread>
 #include <cstdio>
+#include <exception>
 
 namespace w3d {
 
@@ -241,12 +242,26 @@ std::vector<uint8_t> encodeTextureLevel(const Image& im, uint8_t fmt) {
     return blob;
 }
 
+static uint32_t addTextureFromGameImpl(PackWriter& pack, const DataDir& data, const std::string& gamePath, int maxSize,
+                                       uint8_t fmt, bool alphaCapable, bool verbose);
+
 uint32_t addTextureFromGame(PackWriter& pack, const DataDir& data, const std::string& gamePath,
                             int maxSize, uint8_t fmt, bool alphaCapable, bool verbose) {
+    try {
+        return addTextureFromGameImpl(pack, data, gamePath, maxSize, fmt, alphaCapable, verbose);
+    } catch (const std::exception& e) {   // a texture that throws is drawn untextured instead of ending the run
+        std::fprintf(stderr, "  texture FAILED, skipped: %s (%s)\n", gamePath.c_str(), e.what());
+        return 0;
+    }
+}
+
+static uint32_t addTextureFromGameImpl(PackWriter& pack, const DataDir& data, const std::string& gamePath, int maxSize,
+                                       uint8_t fmt, bool alphaCapable, bool verbose) {
     // one entry per BLP for the whole pack (and the whole pool of --all): the first conversion of it is the one kept,
     // so the id is the plain path hash (keyId only salts it if two paths collide)
     uint32_t id = pack.keyId(W3D_ENTRY_TEXTURE, DataDir::normalize(gamePath));
     if (pack.has(W3D_ENTRY_TEXTURE, id)) return id;
+    trace("texture %s", gamePath.c_str());
     std::vector<uint8_t> bytes;
     Image img;
     auto t0 = std::chrono::steady_clock::now();

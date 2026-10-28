@@ -61,4 +61,21 @@ grep -E "^init:" "$OUT/mixed_streamer.log"
 rm "$OUT/mixed"/common*.w3dp
 if "$OUT/streamer" "$OUT/mixed/map0.w3dp" 10 > "$OUT/missing_streamer.log" 2>&1; then echo "streamer opened a map pack without its pool"; exit 1; fi
 grep -E "^init:" "$OUT/missing_streamer.log"
+# (e) creatures, players, worn items in the pool: the client must draw exactly what a standalone pack gives (stage 5.28 fix:
+# displays and item displays were read from the map pack instead of the pool file)
+mkdir -p "$OUT/cr/all"
+python3 "$T/gen_wmo_data.py" "$OUT/cr/Data" "$OUT/cr/wmo.json" > /dev/null
+python3 "$T/gen_creature_data.py" "$OUT/cr/Data" "$OUT/cr/crt.json" > /dev/null
+cp "$OUT/Data/DBFilesClient/Map.dbc" "$OUT/cr/Data/DBFilesClient/Map.dbc"
+"$B/w3dconv" --data "$OUT/cr/Data" --map Test --tiles 32 48 33 48 --creatures --players -o "$OUT/cr/single.w3dp" > /dev/null 2>&1
+"$B/w3dconv" --data "$OUT/cr/Data" --all --no-ui --no-sound-step -o "$OUT/cr/all" > "$OUT/cr/all.log" 2>&1 || { tail -20 "$OUT/cr/all.log"; exit 1; }
+"$B/w3dconv" --info "$OUT/cr/all/common.w3dp" | grep -E "CDSP|CMDL|CHRS|ITEM"
+"$OUT/streamer" "$OUT/cr/single.w3dp" 1500 > "$OUT/cr/s1.log" 2>&1 || true
+"$OUT/streamer" "$OUT/cr/all/map0.w3dp" 1500 > "$OUT/cr/s2.log" 2>&1 || true
+grep -E "creatures:|players:|worn items|not in the pack|STREAMER" "$OUT/cr/s2.log"
+grep -q "STREAMER: PASS" "$OUT/cr/s2.log"
+# animations played and armour drawn: the same kinds as from the standalone pack
+for k in "worn items: [1-9]" "seq death [0-9]+ walk [1-9]" "players: [1-9]"; do
+    grep -Eq "$k" "$OUT/cr/s1.log" && grep -Eq "$k" "$OUT/cr/s2.log"
+done
 echo "POOL TESTS: PASS"

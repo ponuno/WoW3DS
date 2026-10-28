@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <exception>
 #include <map>
 #include <tuple>
 
@@ -40,6 +41,26 @@ bool orientByNormals(const ModelSource& m, std::vector<uint32_t>& idx) {
 }
 
 std::vector<uint8_t> buildModelBlob(ModelSource& m, int maxTris, size_t* trisOut, int* flippedOut) {
+    // ---- 0a. sanitise the input. meshoptimizer is compiled without asserts in Release, so an index list that is not a
+    // whole number of triangles (a WMO batch with an odd index count, a group with no batch table, ...) or an index past the
+    // vertex array made it read and write beyond the buffer: heap corruption / access violation, no message
+    // (this killed a --all run inside Ahn'Qiraj). Whole triangles with valid corners only.
+    if (m.verts.empty()) return {};
+    m.dropped = 0;
+    {
+        const size_t nv = m.verts.size();
+        for (auto& s : m.subs) {
+            const size_t before = s.idx.size();
+            size_t w = 0;
+            for (size_t t = 0; t + 2 < before; t += 3) {
+                if (s.idx[t] >= nv || s.idx[t + 1] >= nv || s.idx[t + 2] >= nv) continue;
+                s.idx[w++] = s.idx[t]; s.idx[w++] = s.idx[t + 1]; s.idx[w++] = s.idx[t + 2];
+            }
+            s.idx.resize(w);
+            m.dropped += before - w;
+        }
+    }
+
     // ---- 0. consistent winding (CCW = front, by the vertex normals)
     int flipped = 0;
     for (auto& s : m.subs) flipped += orientByNormals(m, s.idx);
@@ -54,6 +75,7 @@ std::vector<uint8_t> buildModelBlob(ModelSource& m, int maxTris, size_t* trisOut
     }
     std::vector<ModelSource::Sub> subs;
     for (auto& [k, s] : merged) if (!s.idx.empty()) subs.push_back(std::move(s));
+    if (subs.empty()) return {};
 
     // ---- 2. simplify each submesh proportionally to hit the budget
     size_t total = 0;
@@ -168,12 +190,27 @@ static uint8_t mapBlend(uint16_t m2Blend) {
     }
 }
 
-// Adds MODL (and its textures). Returns model id or 0.
+static uint32_t addModelFromGameImpl(PackWriter& pack, const DataDir& data, const std::string& m2PathIn, const Options& o,
+                                     ConvStats& st);
+
+// Adds MODL (and its textures). Returns model id or 0. A model that throws (out of memory, broken tables) is skipped.
 uint32_t addModelFromGame(PackWriter& pack, const DataDir& data, const std::string& m2PathIn,
                           const Options& o, ConvStats& st) {
+    try {
+        return addModelFromGameImpl(pack, data, m2PathIn, o, st);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "  model FAILED, skipped: %s (%s)\n", m2PathIn.c_str(), e.what());
+        ++st.modelsFailed;
+        return 0;
+    }
+}
+
+static uint32_t addModelFromGameImpl(PackWriter& pack, const DataDir& data, const std::string& m2PathIn,
+                                     const Options& o, ConvStats& st) {
     std::string m2Path = wowee::pipeline::modelPathToM2(m2PathIn);
     uint32_t id = pack.keyId(W3D_ENTRY_MODEL, DataDir::normalize(m2Path));
     if (pack.has(W3D_ENTRY_MODEL, id)) return id;
+    trace("model %s", m2Path.c_str());
 
     progress(false, "tile %d_%d: models %zu, buildings %zu, textures %zu", o.tileX, o.tileY, st.modelsOk, st.wmoOk,
              st.texturesOk);

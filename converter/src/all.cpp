@@ -124,6 +124,7 @@ int convertAll(const Options& oIn, const DataDir& data, const AllOptions& ao, Ui
         return rank(a.first) != rank(b.first) ? rank(a.first) < rank(b.first) : a.first < b.first;
     });
     for (const auto& [id, dir] : list) {
+        trace("map %u (%s)", id, dir.c_str());
         Options m = o;
         m.map = dir;
         m.tileX0 = m.tileY0 = 0;
@@ -159,8 +160,11 @@ int convertAll(const Options& oIn, const DataDir& data, const AllOptions& ao, Ui
                 if (!convertTile(m, data, mp, st)) ++problems;
             }
         }
+        trace("map %u (%s): collision", id, dir.c_str());
         emitCollision(m, mp, st);
+        trace("map %u (%s): liquids", id, dir.c_str());
         emitLiquids(m, &data, mp, st);
+        trace("map %u (%s): writing", id, dir.c_str());
         if (st.tiles == tilesBefore) {
             std::printf("  map %u (%s): nothing converted\n", id, dir.c_str());
             continue;
@@ -184,11 +188,13 @@ int convertAll(const Options& oIn, const DataDir& data, const AllOptions& ao, Ui
 
     // ---- 4. creatures, players and their items, ships, game objects: once, into the pool
     std::printf("== creatures, players, items, ships, game objects\n");
+    trace("creatures, players, items, ships, game objects");
     resetMapState(st);
     convertCreatures(o, data, pool, st);
     exportTransports(data, folder + "transports.txt", o.verbose);
 
     // ---- 5. the pool
+    trace("writing the pool");
     progress(true, "writing the pool (%.1f MB) ...", pool.storedBytes() / 1048576.0);
     const int parts = pool.writeParts(folder + "common.w3dp", ao.partBytes);
     if (!parts) {

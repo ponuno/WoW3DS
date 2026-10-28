@@ -297,8 +297,9 @@ void workerMain(void*) {
     }
 }
 
-void submit(JobKind kind, const W3dEntry* e, uint8_t* dst, void* owner) {
-    Job* j = new Job{kind, (uint8_t)g_index->fileIndex(e), e->offset, e->size, dst, owner};
+// 'e' must be an entry of g_index (its file comes from its position there); sizeOverride reads less than the entry holds.
+void submit(JobKind kind, const W3dEntry* e, uint8_t* dst, void* owner, uint32_t sizeOverride = 0) {
+    Job* j = new Job{kind, (uint8_t)g_index->fileIndex(e), e->offset, sizeOverride ? sizeOverride : e->size, dst, owner};
     LightLock_Lock(&g_lock);
     g_requests.push_back(j);
     LightLock_Unlock(&g_lock);
@@ -500,9 +501,8 @@ ItemDisplay* acquireItem(uint32_t id) {
     d->refs = 1;
     memset(&d->d, 0, sizeof d->d);
     g_items[id] = d;
-    W3dEntry small = *e;
-    small.size = sizeof(W3dItemDisplay);   // later versions may append fields
-    submit(JobKind::Item, &small, (uint8_t*)&d->d, d);
+    // (a copy of the entry would lose its file: the pool parts are other files than the map pack)
+    submit(JobKind::Item, e, (uint8_t*)&d->d, d, sizeof(W3dItemDisplay));   // later versions may append fields
     return d;
 }
 
@@ -1260,9 +1260,7 @@ CreatureDisplay* streamerAcquireDisplay(uint32_t displayId) {
     d->id = displayId;
     d->refs = 1;
     g_displays[displayId] = d;
-    W3dEntry small = *e;
-    small.size = sizeof(W3dDisplay);
-    submit(JobKind::Display, &small, (uint8_t*)&d->d, d);
+    submit(JobKind::Display, e, (uint8_t*)&d->d, d, sizeof(W3dDisplay));
     return d;
 }
 
