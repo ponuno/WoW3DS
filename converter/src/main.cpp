@@ -230,7 +230,7 @@ int main(int argc, char** argv) {
         ConvStats st;
         if (!convertSpellEffects(o, data, pack, st)) return 4;
         if (!pack.write(o.out)) { std::fprintf(stderr, "cannot write %s\n", o.out.c_str()); return 3; }
-        std::printf("  effects: %zu models with %zu particle emitters and %zu glow sprites\n", st.fxModels, st.fxEmitters, st.fxGlows);
+        std::printf("  effects: %zu models with %zu particle emitters and %zu glow sprites (%zu animated)\n", st.fxModels, st.fxEmitters, st.fxGlows, st.fxAnimated);
         std::printf("wrote %s\n", o.out.c_str());
         return 0;
     }
@@ -395,7 +395,7 @@ int main(int argc, char** argv) {
                     st.itemDisplays, st.itemLayers, st.itemLayerBytes / 1048576.0, st.itemModels, st.itemModelsFailed,
                     st.itemModelTris, st.itemHelms, st.itemCapes);
     std::printf("  winding: %zu M2 and %zu WMO submeshes flipped to match their normals\n", st.m2SubsFlipped, st.wmoSubsFlipped);
-    std::printf("  effects: %zu models with %zu particle emitters and %zu glow sprites\n", st.fxModels, st.fxEmitters, st.fxGlows);
+    std::printf("  effects: %zu models with %zu particle emitters and %zu glow sprites (%zu animated)\n", st.fxModels, st.fxEmitters, st.fxGlows, st.fxAnimated);
     if (st.duplicatesSkipped) std::printf("  %zu duplicate placements skipped (same uniqueId listed by several tiles)\n", st.duplicatesSkipped);
     std::printf("  models: %zu ok, %zu failed, %zu tris total (unique)\n", st.modelsOk, st.modelsFailed, st.modelTrisTotal);
     std::printf("  placements: %zu\n", st.placements);

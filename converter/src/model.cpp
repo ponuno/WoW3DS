@@ -5,6 +5,7 @@
 #include "conv.h"
 
 #include "pipeline/m2_loader.hpp"
+#include "rendering/m2_track_sampler.hpp"
 #include "meshoptimizer.h"
 #include "w3d_fx.h"
 
@@ -14,6 +15,7 @@
 #include <initializer_list>
 #include <cstdio>
 #include <exception>
+#include <functional>
 #include <map>
 #include <tuple>
 #include <unordered_map>
@@ -51,6 +53,7 @@ std::vector<uint8_t> buildModelBlob(ModelSource& m, int maxTris, size_t* trisOut
     // (this killed a --all run inside Ahn'Qiraj). Whole triangles with valid corners only.
     if (m.verts.empty()) return {};
     m.dropped = 0;
+    m.outTags.clear();
     {
         const size_t nv = m.verts.size();
         for (auto& s : m.subs) {
@@ -71,10 +74,10 @@ std::vector<uint8_t> buildModelBlob(ModelSource& m, int maxTris, size_t* trisOut
     if (flippedOut) *flippedOut = flipped;
 
     // ---- 1. merge submeshes sharing material
-    std::map<std::tuple<uint32_t, uint8_t, uint8_t>, ModelSource::Sub> merged;
+    std::map<std::tuple<uint32_t, uint8_t, uint8_t, uint8_t>, ModelSource::Sub> merged;
     for (auto& s : m.subs) {
-        auto& d = merged[{s.texId, s.blend, s.flags}];
-        d.texId = s.texId; d.blend = s.blend; d.flags = s.flags;
+        auto& d = merged[{s.texId, s.blend, s.flags, s.tag}];
+        d.texId = s.texId; d.blend = s.blend; d.flags = s.flags; d.tag = s.tag;
         d.idx.insert(d.idx.end(), s.idx.begin(), s.idx.end());
     }
     std::vector<ModelSource::Sub> subs;
@@ -132,6 +135,7 @@ std::vector<uint8_t> buildModelBlob(ModelSource& m, int maxTris, size_t* trisOut
         d.indexCount = (uint32_t)s.idx.size();
         all.insert(all.end(), s.idx.begin(), s.idx.end());
         outSubs.push_back(d);
+        m.outTags.push_back(s.tag);
     }
     std::vector<ModelSource::V> verts(m.verts.size());
     size_t vcount = meshopt_optimizeVertexFetch(verts.data(), all.data(), all.size(), m.verts.data(),
@@ -245,7 +249,7 @@ static bool fireLike(const std::string& lowerPath) {
 
 // Appends the W3dFx section (and its footer) to a finished model blob. glows: from the glow cards taken out of the mesh.
 static void appendFx(std::vector<uint8_t>& blob, std::vector<W3dFxEmitter>& em, std::vector<W3dFxGlow>& glows,
-                     const std::vector<uint32_t>& texIds) {
+                     const std::vector<uint32_t>& texIds, const std::vector<uint8_t>& anim = {}) {
     while (blob.size() % 4) blob.push_back(0);
     W3dFxHeader h{};
     auto put = [&](const void* p, size_t n) { const uint8_t* b = (const uint8_t*)p; blob.insert(blob.end(), b, b + n); };
@@ -258,10 +262,87 @@ static void appendFx(std::vector<uint8_t>& blob, std::vector<W3dFxEmitter>& em, 
     h.glowCount = (uint16_t)glows.size();
     h.offGlows = (uint32_t)blob.size();
     if (!glows.empty()) put(glows.data(), glows.size() * sizeof(W3dFxGlow));
+    if (!anim.empty() && blob.size() / 4 < 65535 - anim.size() / 4) {   // stage 5.35 (the offset is in words, 16 bits)
+        h.animOff4 = (uint16_t)(blob.size() / 4);
+        put(anim.data(), anim.size());
+    }
     const uint32_t off = (uint32_t)blob.size();
     put(&h, sizeof h);
     const uint32_t footer[2] = {off, W3D_FX_MAGIC};
     put(footer, sizeof footer);
+}
+
+
+// Stage 5.35: the animation of an effect model, baked per bone (see common/w3d_fx.h, W3dFxAnim). used = the M2 bones
+// that something hangs on (index = the tag the parts got); the loop is the first Stand sequence (else the first), or the
+// longest global sequence when the tracks run on those. Empty: nothing moves.
+static std::vector<uint8_t> bakeFxAnim(const wowee::pipeline::M2Model& m, const std::vector<int>& used,
+                                       const std::vector<uint8_t>& subBone, const std::vector<uint8_t>& emBone,
+                                       const std::vector<uint8_t>& glBone) {
+    if (used.empty() || used.size() > W3D_FXA_MAX_BONES || m.bones.empty() || m.sequences.empty()) return {};
+    int seq = 0;
+    for (size_t i = 0; i < m.sequences.size(); ++i)
+        if (m.sequences[i].id == 0 && (m.sequences[seq].id != 0 || m.sequences[i].variationIndex < m.sequences[seq].variationIndex))
+            seq = (int)i;
+    uint32_t loop = m.sequences[seq].duration;
+    if (loop < 100)
+        for (uint32_t g : m.globalSequenceDurations) loop = std::max(loop, g);
+    if (loop < 100) return {};
+    loop = std::min<uint32_t>(loop, 8000);
+    const uint32_t frames = std::clamp<uint32_t>((uint32_t)std::ceil(loop / 1000.0f * 16.0f), 2, W3D_FXA_MAX_FRAMES);
+    const size_t nb = m.bones.size();
+    std::vector<float> mats((size_t)frames * used.size() * 12);
+    bool moves = false;
+    for (uint32_t f = 0; f < frames; ++f) {
+        const float tms = loop * (float)f / (float)frames;
+        std::vector<glm::mat4> world(nb);
+        std::vector<char> done(nb, 0), busy(nb, 0);
+        std::function<const glm::mat4&(size_t)> get = [&](size_t b) -> const glm::mat4& {
+            if (done[b]) return world[b];
+            const auto& sb = m.bones[b];
+            using namespace wowee::rendering::m2_track;
+            const glm::vec3 tr = sampleVec3(sb.translation, seq, tms, tms, m.globalSequenceDurations, glm::vec3(0.0f));
+            const glm::quat rq = sampleQuat(sb.rotation, seq, tms, tms, m.globalSequenceDurations);
+            const glm::vec3 sc = sampleVec3(sb.scale, seq, tms, tms, m.globalSequenceDurations, glm::vec3(1.0f));
+            glm::mat4 local = glm::translate(glm::mat4(1.0f), sb.pivot) * glm::translate(glm::mat4(1.0f), tr) *
+                              glm::mat4_cast(rq) * glm::scale(glm::mat4(1.0f), sc) * glm::translate(glm::mat4(1.0f), -sb.pivot);
+            busy[b] = 1;
+            if (sb.parentBone >= 0 && (size_t)sb.parentBone < nb && !busy[(size_t)sb.parentBone])
+                local = get((size_t)sb.parentBone) * local;
+            busy[b] = 0;
+            done[b] = 1;
+            return world[b] = local;
+        };
+        for (size_t u = 0; u < used.size(); ++u) {
+            glm::mat4 M(1.0f);
+            if (used[u] >= 0 && (size_t)used[u] < nb) M = get((size_t)used[u]);
+            float* o = &mats[((size_t)f * used.size() + u) * 12];
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 4; ++c) {
+                    o[r * 4 + c] = M[c][r];
+                    const float id = r == c ? 1.0f : 0.0f;
+                    if (std::fabs(M[c][r] - id) > 1e-3f) moves = true;
+                }
+        }
+    }
+    if (!moves) return {};
+    std::vector<uint8_t> out;
+    auto put = [&](const void* p, size_t n) { const uint8_t* b = (const uint8_t*)p; out.insert(out.end(), b, b + n); };
+    W3dFxAnim a{};
+    a.magic = W3D_FXA_MAGIC;
+    a.boneCount = (uint16_t)used.size();
+    a.frames = (uint16_t)frames;
+    a.durationMs = loop;
+    a.subCount = (uint16_t)subBone.size();
+    a.emitterCount = (uint16_t)emBone.size();
+    a.glowCount = (uint16_t)glBone.size();
+    put(&a, sizeof a);
+    for (const std::vector<uint8_t>* v : {&subBone, &emBone, &glBone}) {
+        if (!v->empty()) put(v->data(), v->size());
+        while (out.size() % 4) out.push_back(0);
+    }
+    put(mats.data(), mats.size() * 4);
+    return out;
 }
 
 static uint32_t addModelFromGameImpl(PackWriter& pack, const DataDir& data, const std::string& m2PathIn, const Options& o,
@@ -324,6 +405,30 @@ static uint32_t addModelFromGameImpl(PackWriter& pack, const DataDir& data, cons
     const std::string lowerPath = lowerStr(m2Path);
     const bool fire = !o.fxSpell && fireLike(lowerPath);   // "Spells\\Fireball..." is not a torch
     std::vector<W3dFxGlow> glows;
+    // stage 5.35: effect models animate their bones; parts, glows and emitters ride the bone they mostly belong to
+    bool animOk = o.fxSpell && !o.noFx && !mdl.bones.empty() && !mdl.sequences.empty();
+    std::vector<int> animBones;            // M2 bones something hangs on; the tag of a part is its index here
+    std::vector<uint8_t> glowBone, emitterBone;
+    auto tagFor = [&](int bone) -> uint8_t {
+        for (size_t i = 0; i < animBones.size(); ++i) if (animBones[i] == bone) return (uint8_t)i;
+        if (animBones.size() >= W3D_FXA_MAX_BONES) { animOk = false; return 0; }
+        animBones.push_back(bone);
+        return (uint8_t)(animBones.size() - 1);
+    };
+    auto dominantBone = [&](const wowee::pipeline::M2Batch& b) -> int {
+        std::map<int, float> w;
+        for (uint32_t k = b.indexStart; k < b.indexStart + b.indexCount && k < mdl.indices.size(); ++k) {
+            const uint16_t vi = mdl.indices[k];
+            if (vi >= mdl.vertices.size()) continue;
+            const auto& v = mdl.vertices[vi];
+            for (int j = 0; j < 4; ++j)
+                if (v.boneWeights[j]) w[v.boneIndices[j]] += v.boneWeights[j];
+        }
+        int best = 0;
+        float bw = -1;
+        for (auto& [bone, ww] : w) if (ww > bw) { bw = ww; best = bone; }
+        return best < (int)mdl.bones.size() ? best : 0;
+    };
     for (const auto& b : mdl.batches) {
         if (b.submeshLevel != 0) continue;
         if (b.indexStart + b.indexCount > mdl.indices.size() || b.indexCount < 3) continue;
@@ -361,6 +466,7 @@ static uint32_t addModelFromGameImpl(PackWriter& pack, const DataDir& data, cons
                     }
                     g.color = rgba8(col, a);
                     glows.push_back(g);
+                    glowBone.push_back(animOk ? tagFor(dominantBone(b)) : 0);
                     continue;   // not in the mesh: a flat card seen from the side was a bright line
                 }
             }
@@ -391,6 +497,7 @@ static uint32_t addModelFromGameImpl(PackWriter& pack, const DataDir& data, cons
             // type != 0 = replaceable (creature skin, hair...) -> untextured in the prototype
         }
         s.idx.assign(mdl.indices.begin() + b.indexStart, mdl.indices.begin() + b.indexStart + b.indexCount);
+        if (animOk) s.tag = tagFor(dominantBone(b));
         src.subs.push_back(std::move(s));
     }
     if (src.subs.empty() && !glows.empty()) {   // nothing but glow cards (a light halo): one empty triangle carries them
@@ -458,15 +565,22 @@ static uint32_t addModelFromGameImpl(PackWriter& pack, const DataDir& data, cons
                 }
             }
             emitters.push_back(e);
+            emitterBone.push_back(animOk ? tagFor(pe.bone < mdl.bones.size() ? pe.bone : 0) : 0);
         }
     }
-    if (!emitters.empty() || !glows.empty()) {
-        appendFx(blob, emitters, glows, fxTex);
+    std::vector<uint8_t> anim;
+    if (animOk && (!emitters.empty() || !glows.empty() || !src.outTags.empty())) {
+        anim = bakeFxAnim(mdl, animBones, src.outTags, emitterBone, glowBone);
+        if (!anim.empty()) ++st.fxAnimated;
+    }
+    if (!emitters.empty() || !glows.empty() || !anim.empty()) {
+        appendFx(blob, emitters, glows, fxTex, anim);
         ++st.fxModels;
         st.fxEmitters += emitters.size();
         st.fxGlows += glows.size();
         if (o.verbose)
-            std::printf("    fx %s: %zu emitters, %zu glows%s\n", m2Path.c_str(), emitters.size(), glows.size(), fire ? " (fire)" : "");
+            std::printf("    fx %s: %zu emitters, %zu glows%s%s\n", m2Path.c_str(), emitters.size(), glows.size(), fire ? " (fire)" : "",
+                        anim.empty() ? "" : " (animated)");
     }
     pack.add(W3D_ENTRY_MODEL, id, std::move(blob));
     // Bounding (collision) triangles for walls/floors of every placement of this model.

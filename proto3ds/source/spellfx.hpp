@@ -55,6 +55,7 @@ struct Placed {                   // one effect model to draw / emit this frame
     float scale = 1;
     bool emitting = true;         // false: lingering (mesh hidden, its particles fading)
     uint8_t stage = 0;
+    uint32_t ageMs = 0;           // stage 5.35: since it started (the bone animation of its model)
 };
 
 struct Stats { uint32_t started = 0, missiles = 0, impacts = 0, skippedFar = 0, skippedFull = 0, active = 0; };
@@ -85,6 +86,7 @@ private:
         uint8_t stage, slot;
         uint64_t unit, target;    // unit: where it hangs (missile: the caster); target: missile's goal
         uint32_t spell;
+        uint32_t bornMs = 0;      // when it started (startMs of a missile is "last moved")
         uint32_t startMs, endMs;  // endMs: emitting until then, lingering kLingerMs more
         float pos[3];             // missile: where it is
         float speed;

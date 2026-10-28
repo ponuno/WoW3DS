@@ -17,7 +17,8 @@
 
 typedef struct {
     uint16_t emitterCount, glowCount;
-    uint16_t texCount, pad;
+    uint16_t texCount;
+    uint16_t animOff4;            // stage 5.35: the bone animation block (W3dFxAnim) at animOff4 * 4, 0 = none
     uint32_t offEmitters, offGlows, offTexIds;   // from the start of the blob
 } W3dFxHeader;                                    // 20 bytes
 
@@ -66,6 +67,68 @@ static inline const W3dFxHeader* w3d_model_fx(const uint8_t* blob, uint32_t size
     if ((h->emitterCount && e > off) || (h->glowCount && g > off) || (h->texCount && t > off)) return 0;
     if ((h->offEmitters | h->offGlows | h->offTexIds) & 3) return 0;
     return h;
+}
+
+// ---------------------------------------------------------------- bone animation of effect models (stage 5.35)
+// Spell effect models turn, pulse and sway (a ring that spins, a shield that breathes). The M2's first looping animation is
+// baked per bone (at most W3D_FXA_MAX_BONES bones that something hangs on, W3D_FXA_MAX_FRAMES samples over the loop) as
+// 3x4 matrices in model space (bind pose -> animated pose, rows of [R*S | t]); every mesh part (submesh of the blob) rides
+// its dominant bone rigidly, as do the emitters and glows. A model with no motion has no block.
+// Layout from the block's start: W3dFxAnim, uint8 subBone[subCount], emitterBone[emitterCount], glowBone[glowCount]
+// (each padded to 4 bytes), then float mat[frames][boneCount][12].
+#define W3D_FXA_MAGIC 0x31415846u   // 'FXA1'
+#define W3D_FXA_MAX_BONES 12
+#define W3D_FXA_MAX_FRAMES 32
+typedef struct {
+    uint32_t magic;
+    uint16_t boneCount, frames;
+    uint32_t durationMs;          // one loop
+    uint16_t subCount, emitterCount, glowCount, pad;
+} W3dFxAnim;                      // 16 bytes
+
+typedef struct {
+    const W3dFxAnim* a;
+    const uint8_t* subBone;
+    const uint8_t* emitterBone;
+    const uint8_t* glowBone;
+    const float* mat;             // [frames][boneCount][12]
+} W3dFxAnimView;
+
+// The animation block of a model with fx (validated against the blob size), or a view with a == null.
+static inline W3dFxAnimView w3d_fx_anim(const uint8_t* blob, uint32_t size, const W3dFxHeader* fx) {
+    W3dFxAnimView v = {0, 0, 0, 0, 0};
+    if (!blob || !fx || !fx->animOff4) return v;
+    const uint64_t off = (uint64_t)fx->animOff4 * 4u;
+    if (off + sizeof(W3dFxAnim) > size - 8u) return v;
+    const W3dFxAnim* a = (const W3dFxAnim*)(blob + off);
+    if (a->magic != W3D_FXA_MAGIC || !a->boneCount || a->boneCount > W3D_FXA_MAX_BONES || !a->frames ||
+        a->frames > W3D_FXA_MAX_FRAMES || !a->durationMs)
+        return v;
+    const uint64_t t1 = (a->subCount + 3u) & ~3u, t2 = (a->emitterCount + 3u) & ~3u, t3 = (a->glowCount + 3u) & ~3u;
+    const uint64_t offMat = off + sizeof(W3dFxAnim) + t1 + t2 + t3;
+    const uint64_t end = offMat + (uint64_t)a->frames * a->boneCount * 12u * 4u;
+    if (end > size - 8u || (offMat & 3)) return v;
+    v.a = a;
+    v.subBone = blob + off + sizeof(W3dFxAnim);
+    v.emitterBone = v.subBone + t1;
+    v.glowBone = v.emitterBone + t2;
+    v.mat = (const float*)(blob + offMat);
+    return v;
+}
+
+// The bone's 3x4 matrix (rows [R*S | t]) at ageMs into the loop, blended between the two nearest samples.
+static inline void w3d_fx_anim_matrix(const W3dFxAnimView* v, int bone, uint32_t ageMs, float out[12]) {
+    static const float kId[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+    if (!v->a || bone < 0 || bone >= v->a->boneCount) { memcpy(out, kId, sizeof kId); return; }
+    const uint32_t d = v->a->durationMs, F = v->a->frames;
+    const float pos = (float)(ageMs % d) / (float)d * (float)F;
+    uint32_t i0 = (uint32_t)pos;
+    if (i0 >= F) i0 = F - 1;
+    const uint32_t i1 = (i0 + 1) % F;
+    const float f = pos - (float)i0;
+    const float* m0 = v->mat + ((size_t)i0 * v->a->boneCount + (size_t)bone) * 12;
+    const float* m1 = v->mat + ((size_t)i1 * v->a->boneCount + (size_t)bone) * 12;
+    for (int k = 0; k < 12; ++k) out[k] = m0[k] + (m1[k] - m0[k]) * f;
 }
 
 // ---------------------------------------------------------------- spell visuals (stage 5.33, 5.34)

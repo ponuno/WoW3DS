@@ -18,6 +18,7 @@ python3 "$C/gen_spellfx_data.py" "$OUT/Data" "$OUT/expect.json"
 "$B/w3dconv" --info "$OUT/sfx.w3dp" | tee "$OUT/sfx_info.log" | grep -E "spell fx|effects|^OK"
 grep -q "spell fx: 27 spells (13 with a missile speed), 5 visuals (2 with a missile), 11 effect models" "$OUT/sfx_info.log"
 grep -q "spell fx: 1 auras, 1 channels, level-up yes, loot sparkle yes" "$OUT/sfx_info.log"   # stage 5.34
+grep -q ", 1 with bone animation" "$OUT/sfx_info.log"   # stage 5.35
 "$B/w3dconv" --data "$OUT/Data" --map Test --tiles 32 48 33 48 --gameobjects -o "$OUT/world.w3dp" > "$OUT/world.log" 2>&1
 "$B/w3dconv" --info "$OUT/world.w3dp" | grep -q "spell fx: 27 spells"
 FL="-std=gnu++20 -g -O1 -Wall -Wno-maybe-uninitialized -fsanitize=address,undefined -I$T/../../common -I$T/../source"

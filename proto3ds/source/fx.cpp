@@ -63,9 +63,12 @@ bool inView(const float c[3], float half) {
 }
 }  // namespace
 
-void System::emit(const Source& s, const W3dFxEmitter& e, const float R[3][3], float scale, const void* tex) {
+void System::emit(const Source& s, const W3dFxEmitter& e, const float R[3][3], float scale, const void* tex, const float* bone) {
     Particle p;
     float local[3] = {e.pos[0], e.pos[1], e.pos[2]};
+    if (bone)   // the bone's animated pose: the emitter's place moves with it
+        for (int r = 0; r < 3; ++r)
+            local[r] = bone[r * 4] * e.pos[0] + bone[r * 4 + 1] * e.pos[1] + bone[r * 4 + 2] * e.pos[2] + bone[r * 4 + 3];
     float dir[3];
     const float th = rnd() * e.spreadV, ph = rnd() * (e.spreadH > 0.01f ? e.spreadH : 6.2831853f);
     if (e.type == W3D_FX_SPHERE) {
@@ -79,6 +82,17 @@ void System::emit(const Source& s, const W3dFxEmitter& e, const float R[3][3], f
         dir[0] = sinf(th) * cosf(ph); dir[1] = sinf(th) * sinf(ph); dir[2] = cosf(th);
         local[0] += rndS() * 0.5f * e.areaL;
         local[1] += rndS() * 0.5f * e.areaW;
+    }
+    if (bone) {   // ... and so does where it throws (the rotation / scale part of the pose)
+        const float d0[3] = {dir[0], dir[1], dir[2]};
+        float l = 0;
+        for (int r = 0; r < 3; ++r) {
+            dir[r] = bone[r * 4] * d0[0] + bone[r * 4 + 1] * d0[1] + bone[r * 4 + 2] * d0[2];
+            l += dir[r] * dir[r];
+        }
+        l = sqrtf(l);
+        if (l > 1e-4f) for (int r = 0; r < 3; ++r) dir[r] /= l;
+        else for (int r = 0; r < 3; ++r) dir[r] = d0[r];
     }
     float w[3], d[3];
     for (int k = 0; k < 3; ++k) local[k] *= scale;
@@ -151,7 +165,9 @@ void System::frame(float dt, float timeSec, const float cam[3], const float view
                 while (st.acc[k] >= 1.0f) {
                     st.acc[k] -= 1.0f;
                     if ((int)parts_.size() >= maxP) { ++stats_.dropped; continue; }
-                    emit(s, e, R, s.scale, tex);
+                    float bm[12];
+                    if (s.anim.a) w3d_fx_anim_matrix(&s.anim, k < s.anim.a->emitterCount ? s.anim.emitterBone[k] : -1, s.animMs, bm);
+                    emit(s, e, R, s.scale, tex, s.anim.a ? bm : nullptr);
                 }
             }
         }
@@ -159,7 +175,13 @@ void System::frame(float dt, float timeSec, const float cam[3], const float view
             const W3dFxGlow* g = (const W3dFxGlow*)(s.blob + h->offGlows);
             const float fade = 1.0f - std::clamp((dist - budget_.glowRange * 0.75f) / (budget_.glowRange * 0.25f), 0.0f, 1.0f);
             for (unsigned k = 0; k < h->glowCount && glows < budget_.maxGlows; ++k) {
-                float lw[3] = {g[k].pos[0] * s.scale, g[k].pos[1] * s.scale, g[k].pos[2] * s.scale}, w[3];
+                float gp[3] = {g[k].pos[0], g[k].pos[1], g[k].pos[2]};
+                if (s.anim.a) {
+                    float bm[12];
+                    w3d_fx_anim_matrix(&s.anim, k < s.anim.a->glowCount ? s.anim.glowBone[k] : -1, s.animMs, bm);
+                    for (int r = 0; r < 3; ++r) gp[r] = bm[r * 4] * g[k].pos[0] + bm[r * 4 + 1] * g[k].pos[1] + bm[r * 4 + 2] * g[k].pos[2] + bm[r * 4 + 3];
+                }
+                float lw[3] = {gp[0] * s.scale, gp[1] * s.scale, gp[2] * s.scale}, w[3];
                 mul(R, lw, w);
                 for (int i = 0; i < 3; ++i) w[i] += s.pos[i];
                 Quad q;

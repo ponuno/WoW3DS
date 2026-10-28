@@ -1,3 +1,4 @@
+#include <cmath>
 #include "conv.h"
 #include "w3d_liquid.h"
 #include "w3d_fx.h"
@@ -372,7 +373,7 @@ int printPackInfo(const std::string& path) {
     for (auto& [t, n] : countBy)
         std::printf("  %s x%-4zu %8.1f KB\n", typeName(t), n, bytesBy[t] / 1024.0);
 
-    size_t texGpu = 0, missingTex = 0, totalPlacements = 0, fxModels = 0, fxEmitters = 0, fxGlows = 0;
+    size_t texGpu = 0, missingTex = 0, totalPlacements = 0, fxModels = 0, fxEmitters = 0, fxGlows = 0, fxAnimated = 0;
     std::map<uint8_t, size_t> fmtCount;
     for (uint32_t i = 0; i < h.entryCount; ++i) {
         const uint8_t* p = b.data() + e[i].offset;
@@ -461,6 +462,17 @@ int printPackInfo(const std::string& path) {
                 for (uint32_t k = 0; k < fx->emitterCount; ++k)
                     if ((em[k].tex != 0xFFFF && em[k].tex >= fx->texCount) || !em[k].rows || !em[k].cols || !(em[k].life > 0))
                         return fail("fx emitter");
+                if (fx->animOff4) {   // stage 5.35: the bone animation must be a valid block that fits the mesh and the fx
+                    ++fxAnimated;
+                    const W3dFxAnimView av = w3d_fx_anim(p, e[i].size, fx);
+                    if (!av.a || av.a->subCount != m.submeshCount || av.a->emitterCount != fx->emitterCount ||
+                        av.a->glowCount != fx->glowCount) return fail("fx animation block");
+                    for (uint32_t k = 0; k < av.a->subCount; ++k) if (av.subBone[k] >= av.a->boneCount) return fail("fx animation bone");
+                    for (uint32_t k = 0; k < av.a->emitterCount; ++k) if (av.emitterBone[k] >= av.a->boneCount) return fail("fx animation bone");
+                    for (uint32_t k = 0; k < av.a->glowCount; ++k) if (av.glowBone[k] >= av.a->boneCount) return fail("fx animation bone");
+                    for (uint32_t k = 0; k < (uint32_t)av.a->frames * av.a->boneCount * 12u; ++k)
+                        if (!std::isfinite(av.mat[k])) return fail("fx animation matrix");
+                }
             }
         } else if (e[i].type == W3D_ENTRY_SPELLFX) {   // stage 5.33
             W3dSpellFxHeader h; std::memcpy(&h, p, sizeof h);
@@ -612,7 +624,7 @@ int printPackInfo(const std::string& path) {
         }
     }
     std::printf("  placements: %zu\n", totalPlacements);
-    if (fxModels) std::printf("  effects: %zu models, %zu particle emitters, %zu glow sprites\n", fxModels, fxEmitters, fxGlows);
+    if (fxModels) std::printf("  effects: %zu models, %zu particle emitters, %zu glow sprites, %zu with bone animation\n", fxModels, fxEmitters, fxGlows, fxAnimated);
     std::printf("  texture GPU memory: %.1f KB (", texGpu / 1024.0);
     for (auto& [fmt, n] : fmtCount) std::printf(" %s:%zu", fmtName(fmt), n);
     std::printf(" )\n");

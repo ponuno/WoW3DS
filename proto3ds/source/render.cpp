@@ -444,6 +444,15 @@ void drawModels(const Camera& cam, const C3D_Mtx& view, const RenderSettings& rs
                 Mtx_RotateY(&mv, in->rot[1], true);
                 Mtx_RotateX(&mv, in->rot[0], true);
                 Mtx_Scale(&mv, in->scale, in->scale, in->scale);
+                if (m->fxAnim.a && s < m->fxAnim.a->subCount) {   // stage 5.35: the part rides its bone (model space)
+                    float a[12];
+                    w3d_fx_anim_matrix(&m->fxAnim, m->fxAnim.subBone[s], in->animMs, a);
+                    C3D_Mtx bm, out;
+                    Mtx_Identity(&bm);
+                    for (int r = 0; r < 3; ++r) { bm.r[r].x = a[r * 4]; bm.r[r].y = a[r * 4 + 1]; bm.r[r].z = a[r * 4 + 2]; bm.r[r].w = a[r * 4 + 3]; }
+                    Mtx_Multiply(&out, &mv, &bm);
+                    mv = out;
+                }
                 C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_modelSh.uMV, &mv);
                 C3D_FVUnifSet(GPU_VERTEX_SHADER, g_modelSh.uLight, in->lightModel[0], in->lightModel[1], in->lightModel[2], 0);
                 C3D_FVUnifSet(GPU_VERTEX_SHADER, g_modelSh.uLightParams, 0.55f, 0.6f, 0, unlit);
@@ -899,6 +908,8 @@ void drawFx(const Camera& cam, const C3D_Mtx& view, const RenderSettings& rs, Fr
                 memcpy(s.rot, sm.rot, sizeof s.rot);
                 s.scale = sm.scale;
                 s.priority = true;
+                s.anim = m->fxAnim;
+                s.animMs = sm.fxAgeMs;
                 g_fxSources.push_back(s);
             }
         sys.frame(dt, rs.timeSec, cam.pos, rows, g_fxSources, g_fxQuads);
@@ -1122,7 +1133,8 @@ void rendererDraw(C3D_RenderTarget* target, const Camera& cam, const RenderSetti
             memcpy(in.pos, sm.pos, sizeof in.pos);
             memcpy(in.rot, sm.rot, sizeof in.rot);
             in.scale = sm.scale;
-            in.radius = m->h->radius * sm.scale;
+            in.animMs = sm.fxAgeMs;
+            in.radius = m->h->radius * sm.scale * (m->fxAnim.a ? 1.5f : 1.0f);   // (animated parts swing out)
             in.lightModel[0] = kSun[0]; in.lightModel[1] = kSun[1]; in.lightModel[2] = kSun[2];   // effects are mostly unlit
             effInst.push_back(in);
         }

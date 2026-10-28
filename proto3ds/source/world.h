@@ -79,6 +79,7 @@ struct Model {
     // are tex[fxTexBase ...] (acquired with the model's own, so drawable covers them too)
     const W3dFxHeader* fx = nullptr;
     uint16_t fxTexBase = 0;
+    W3dFxAnimView fxAnim = {0, 0, 0, 0, 0};   // stage 5.35: baked bone animation of an effect model (a == null: none)
     // per-frame visibility bucket (filled by the renderer)
     std::vector<const struct Instance*> visible;
     bool texturesReady() const;
@@ -91,6 +92,7 @@ struct Instance {
     float scale;
     float radius;
     float lightModel[3];
+    uint32_t animMs = 0;             // stage 5.35: age of an animated effect (Model::fxAnim)
 };
 
 // Creature (stage 5.3): a CDSP display references a CMDL skinned model plus per-display
@@ -318,6 +320,7 @@ struct SceneModel {
     // particle emitters; emit = false while it lingers (no mesh, no new particles: the ones thrown fade out)
     uint32_t fxKey = 0;
     bool emit = true;
+    uint32_t fxAgeMs = 0;       // stage 5.35: since the effect started (the bone animation of the model)
 };
 // Stage 5.33: where a point of a unit drawn in the last frames is (W3dSpellSlot: hands, chest, head, feet), from its
 // animated skeleton; false when the unit was not drawn lately or its model has no such attachment.

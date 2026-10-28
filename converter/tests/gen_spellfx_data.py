@@ -106,7 +106,21 @@ effect("Fire_Impact_Chest", dict(fire, rate=60.0, type=2, speed=3.0))
 effect("Holy_Precast_Chest", dict(fire, colors=[(255, 255, 200, 255), (255, 240, 160, 180), (200, 180, 80, 0)]))
 effect("Holy_Impact_Base", dict(fire, rate=25.0))
 effect("Frostbolt_Missile", dict(fire, colors=[(180, 220, 255, 255), (120, 180, 255, 200), (40, 80, 160, 0)]))
-effect("Shield_State_Base", dict(fire, rate=15.0, type=2, areaL=1.0))
+# stage 5.35: a shield with a ring that turns once a second (bone 1, about Z) and an emitter riding that bone
+def effect_anim(name, emitter):
+    import math
+    q0 = [(-0.2, 0.0, 0.0), (0.2, 0.0, 0.0), (0.2, 0.0, 0.4), (-0.2, 0.0, 0.4)]
+    q1 = [(0.6, -0.1, 0.0), (1.0, -0.1, 0.0), (1.0, -0.1, 0.4), (0.6, -0.1, 0.4)]
+    v = [(p, (255, 0, 0, 0), (0, 0, 0, 0), (0, -1, 0), (0.0, 0.0)) for p in q0] + \
+        [(p, (255, 0, 0, 0), (1, 0, 0, 0), (0, -1, 0), (0.0, 0.0)) for p in q1]
+    t = [0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7]
+    keys = [(int(1000 * k / 8), (0.0, 0.0, math.sin(math.pi * k / 8), math.cos(math.pi * k / 8))) for k in range(9)]
+    bones = [(-1, (0, 0, 0), {}), (-1, (0, 0, 0), {"r": (-1, [(0, keys)])})]
+    tex = [(0, "Spells\\Fire.blp"), (0, "Spells\\Glow_Fire.blp")]
+    m = m2(name, v, t, [(0, 0, 6), (1, 6, 6)], [(0, 0, 0), (1, 0, 0)], tex, [0, 1], [(0, 3)], bones,
+           [(0, 0, 0, 1000, 0.0)], [], emitters=[dict(emitter, bone=1)])
+    open(path("Spells\\" + name + ".m2"), "wb").write(m)
+effect_anim("Shield_State_Base", dict(fire, rate=15.0, pos=(0.8, 0.0, 0.3)))
 effect("Shadow_Channel_Hand", dict(fire, colors=[(120, 40, 160, 255), (80, 20, 120, 200), (20, 0, 40, 0)]))
 # the level-up flash and the loot sparkle (not spells: fixed paths)
 def special(rel, name):
@@ -119,5 +133,5 @@ special("Spells\\LevelUp\\LevelUp.m2", "LevelUp")
 special("Particles\\LootFX.m2", "LootFX")
 
 json.dump({"fireballs": fireballs, "heals": heals, "frostbolt": 116, "smite": 585, "speed_column": SPEED,
-           "visuals": 5, "spells": len(fireballs) + len(heals) + 3, "models": 11, "failed": 1}, open(expect_path, "w"), indent=1)
+           "visuals": 5, "spells": len(fireballs) + len(heals) + 3, "models": 11, "failed": 1, "animated": 1}, open(expect_path, "w"), indent=1)
 print("spell fx data written to", out)

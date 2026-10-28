@@ -103,6 +103,58 @@ int main(int argc, char** argv) {
     CHECK(st.missiles >= 8 && st.impacts >= 4, "missiles flew, the fireballs hit (frostbolt has no impact kit)");
     CHECK(drawnModels > 0, "the effect models were read and became drawable");
     CHECK(peakParticles > 20, "their emitters ran (%zu)", peakParticles);
+    // ---- stage 5.35: the bone animation of an effect model (a ring turning once a second on bone 1, an emitter riding it)
+    {
+        Model* ring = nullptr;
+        for (uint16_t e = 0; e < 64 && table.effect(e); ++e) {
+            Model* m = modelFor(e);
+            for (int w = 0; m && !m->drawable && w < 400; ++w) { streamerUpdate(cam, 250.0f); streamerEndFrame(); std::this_thread::sleep_for(std::chrono::milliseconds(2)); }
+            if (m && m->drawable && m->fxAnim.a) { ring = m; break; }
+        }
+        CHECK(ring != nullptr, "an effect model has a bone animation");
+        if (ring) {
+            const W3dFxAnimView& av = ring->fxAnim;
+            CHECK(av.a->boneCount == 2 && av.a->frames == 16 && av.a->durationMs == 1000, "block: %u bones, %u frames, %u ms",
+                  av.a->boneCount, av.a->frames, av.a->durationMs);
+            CHECK(av.a->subCount == ring->h->submeshCount && av.a->emitterCount == 1, "block counts");
+            // the still part (bone 0) stays; the other turns 90 degrees in a quarter of a second, a full turn in a second
+            int still = -1, turning = -1;
+            for (uint32_t k = 0; k < av.a->subCount; ++k) {
+                float m0[12], m1[12];
+                w3d_fx_anim_matrix(&av, av.subBone[k], 250, m0);
+                w3d_fx_anim_matrix(&av, av.subBone[k], 0, m1);
+                const bool id = fabsf(m0[0] - 1) < 1e-3f && fabsf(m0[1]) < 1e-3f && fabsf(m0[5] - 1) < 1e-3f;
+                if (id) still = (int)k;
+                else if (fabsf(m0[0]) < 0.02f && fabsf(m0[1] + 1) < 0.02f && fabsf(m0[4] - 1) < 0.02f && fabsf(m0[5]) < 0.02f &&
+                         fabsf(m0[10] - 1) < 0.02f && fabsf(m1[0] - 1) < 1e-3f) turning = (int)k;
+            }
+            CHECK(still >= 0 && turning >= 0 && still != turning, "one part stays, one turns 90 degrees at 250 ms (%d, %d)", still, turning);
+            float full[12];
+            w3d_fx_anim_matrix(&av, av.subBone[turning >= 0 ? turning : 0], 1000, full);   // the loop wraps
+            CHECK(fabsf(full[0] - 1) < 1e-3f, "a full turn wraps to the start (%.3f)", full[0]);
+            // its emitter rides the turning bone: the particles are born at x = 0.8 at the start, at y = 0.8 a quarter later
+            auto meanViewX = [&](uint32_t animMs) {
+                fx::System sys;
+                sys.setBudget(fx::budgetFor(2));
+                fx::Source one;
+                one.key = (const void*)(uintptr_t)77; one.owner = ring; one.blob = ring->blob; one.h = ring->fx;
+                one.tex = (const void* const*)(ring->tex.data() + ring->fxTexBase);
+                one.priority = true; one.anim = ring->fxAnim; one.animMs = animMs;
+                one.pos[0] = 0; one.pos[1] = 0; one.pos[2] = 0;
+                std::vector<fx::Source> v{one};
+                std::vector<fx::Quad> q;
+                double sum = 0; int n = 0;
+                for (int f = 0; f < 8; ++f) {
+                    sys.frame(0.033f, f * 0.033f, cam, rows, v, q);
+                    if (f < 3) continue;
+                    for (const fx::Quad& qq : q) if (qq.tex != nullptr || true) { sum += qq.c[0]; ++n; }
+                }
+                return n ? sum / n : 1e9;
+            };
+            const double x0 = meanViewX(0), x1 = meanViewX(250);
+            CHECK(fabs(x1 - x0 - (-0.8)) < 0.35, "the emitter follows its bone: view x %.2f -> %.2f", x0, x1);
+        }
+    }
     // ---- letting go: the models (as SpellView::clear), then the streamer
     dir.clear();
     for (Model*& m : models) { if (m) streamerReleaseItemModel(m); m = nullptr; }

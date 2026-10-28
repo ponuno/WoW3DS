@@ -46,6 +46,7 @@ bool Director::add(Active a) {
     }
     a.key = nextKey_++;
     if (!nextKey_) nextKey_ = 1;
+    a.bornMs = a.startMs;
     active_.push_back(a);
     ++stats_.started;
     return true;
@@ -181,6 +182,7 @@ void Director::update(uint32_t nowMs, const Resolver& where, std::vector<Placed>
         p.scale = a.scale;
         p.stage = a.stage;
         p.emitting = emitting;
+        p.ageMs = nowMs - a.bornMs;
         if (a.stage == W3D_SFX_MISSILE) {
             if (emitting && !a.arrived) {
                 float goal[3], yaw;

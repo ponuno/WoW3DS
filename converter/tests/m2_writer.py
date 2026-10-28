@@ -97,7 +97,7 @@ def m2(name, verts, tris, submeshes, batches, textures, tex_lookup, render_flags
             return struct.pack("<HhIIIIII", 1, -1, 1, r_off, 1, t_off, 1, k_off)
         recs = b""
         for e in emitters:
-            r = struct.pack("<iI3fHH", -1, e.get("flags", 0), *e["pos"], 0, e.get("texture", 0))
+            r = struct.pack("<iI3fHH", -1, e.get("flags", 0), *e["pos"], e.get("bone", 0), e.get("texture", 0))
             r += bytes(16)                                                 # model / child emitter file names
             r += struct.pack("<BBBBhhHH", e.get("blend", 4), e.get("type", 1), 0, 0, 0, 0, e.get("rows", 1), e.get("cols", 1))
             for k in ("speed", "speedVar", "vRange", "hRange", "gravity", "life", "rate", "areaL", "areaW", "decel"):

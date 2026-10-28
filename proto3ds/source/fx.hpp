@@ -30,6 +30,8 @@ struct Source {                   // one instance with effects near the camera, 
     float rot[3] = {0, 0, 0};     // as the mesh: world = pos + Rz(rot[2]) * Ry(rot[1]) * Rx(rot[0]) * (scale * local)
     float scale = 1;
     bool priority = false;        // a spell effect (stage 5.33): no thinning by distance or a filling pool
+    W3dFxAnimView anim = {0, 0, 0, 0, 0};   // stage 5.35: baked bone animation of the model (a == null: still)
+    uint32_t animMs = 0;          // ... and how far into it
 };
 
 struct Quad {                     // camera-facing, view space (x right, y up, the camera looks along -z)
@@ -78,7 +80,8 @@ private:
     struct EmitterState { float acc[8] = {0, 0, 0, 0, 0, 0, 0, 0}; uint32_t frame = 0; };
     float rnd();                    // 0..1
     float rndS() { return rnd() * 2.0f - 1.0f; }
-    void emit(const Source& s, const W3dFxEmitter& e, const float R[3][3], float scale, const void* tex);
+    void emit(const Source& s, const W3dFxEmitter& e, const float R[3][3], float scale, const void* tex,
+              const float* bone = nullptr);   // bone: 3x4 of the emitter's bone (stage 5.35), null = still
     Budget budget_;
     Stats stats_;
     std::vector<Particle> parts_;

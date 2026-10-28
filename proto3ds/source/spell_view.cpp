@@ -132,6 +132,7 @@ void SpellView::update(w3n::GameSession& g, uint32_t nowMs, const float cam[3], 
         sm.scale = p.scale;
         sm.fxKey = p.key;
         sm.emit = p.emitting;
+        sm.fxAgeMs = p.ageMs;
         out.push_back(sm);
     }
 }

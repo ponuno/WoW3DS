@@ -867,6 +867,7 @@ void onJobDone(Job* j) {
                 AnchorScope as(m->anchor, m->cls == kClsUnit ? kClsUnit : m->building ? kClsBuilding : kClsDoodad);
                 for (u32 i = 0; i < m->h->texCount; ++i) m->tex.push_back(acquireTex(ids[i]));
                 m->fx = w3d_model_fx(m->blob, m->size);   // stage 5.32
+                m->fxAnim = w3d_fx_anim(m->blob, m->size, m->fx);   // stage 5.35
                 if (m->fx) {
                     m->fxTexBase = (uint16_t)m->tex.size();
                     const uint32_t* fids = (const uint32_t*)(m->blob + m->fx->offTexIds);

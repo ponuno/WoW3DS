@@ -65,6 +65,53 @@ int main() {
     eh->emitterCount = 5000;
     CHECK(!w3d_model_fx(evil.data(), (uint32_t)evil.size()), "oversized counts rejected");
 
+    // ---- stage 5.35: the bone animation block is validated against the blob
+    {
+        std::vector<uint8_t> b = b1;   // inject a block before the header: 1 bone, 2 frames, 0 parts, 1 emitter, 0 glows
+        const size_t hdrAt = b.size() - 8 - sizeof(W3dFxHeader);
+        W3dFxHeader fh;
+        memcpy(&fh, b.data() + hdrAt, sizeof fh);
+        std::vector<uint8_t> blk;
+        W3dFxAnim a{};
+        a.magic = W3D_FXA_MAGIC; a.boneCount = 1; a.frames = 2; a.durationMs = 1000; a.subCount = 0; a.emitterCount = 1; a.glowCount = 0;
+        auto put = [&](const void* p, size_t n) { const uint8_t* q = (const uint8_t*)p; blk.insert(blk.end(), q, q + n); };
+        put(&a, sizeof a);
+        const uint8_t eb[4] = {0, 0, 0, 0};
+        put(eb, 4);
+        float m[24] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0,   1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 2};   // frame 1: lifted 2 yd
+        put(m, sizeof m);
+        std::vector<uint8_t> out(b.begin(), b.begin() + hdrAt);
+        while (out.size() % 4) out.push_back(0);
+        fh.animOff4 = (uint16_t)(out.size() / 4);
+        out.insert(out.end(), blk.begin(), blk.end());
+        const uint32_t off = (uint32_t)out.size();
+        out.insert(out.end(), (const uint8_t*)&fh, (const uint8_t*)&fh + sizeof fh);
+        const uint32_t foot[2] = {off, W3D_FX_MAGIC};
+        out.insert(out.end(), (const uint8_t*)foot, (const uint8_t*)foot + 8);
+        const W3dFxHeader* fx = w3d_model_fx(out.data(), (uint32_t)out.size());
+        CHECK(fx != nullptr, "fx header with an animation block");
+        W3dFxAnimView v = w3d_fx_anim(out.data(), (uint32_t)out.size(), fx);
+        CHECK(v.a && v.a->frames == 2, "animation block found");
+        float r[12];
+        if (v.a) {
+            w3d_fx_anim_matrix(&v, 0, 0, r);
+            CHECK(fabsf(r[11]) < 1e-5f, "frame 0: not lifted");
+            w3d_fx_anim_matrix(&v, 0, 250, r);
+            CHECK(fabsf(r[11] - 1.0f) < 1e-3f, "a quarter of the loop: halfway between the two samples (%.3f)", r[11]);
+            w3d_fx_anim_matrix(&v, 0, 1000, r);
+            CHECK(fabsf(r[11]) < 1e-5f, "the loop wraps");
+            w3d_fx_anim_matrix(&v, 7, 0, r);
+            CHECK(fabsf(r[0] - 1) < 1e-5f && fabsf(r[11]) < 1e-5f, "a bone out of range: no motion");
+        }
+        std::vector<uint8_t> trunc = out;   // a block that claims more frames than the blob holds
+        ((W3dFxAnim*)(trunc.data() + (size_t)fh.animOff4 * 4))->frames = 32;
+        CHECK(!w3d_fx_anim(trunc.data(), (uint32_t)trunc.size(), w3d_model_fx(trunc.data(), (uint32_t)trunc.size())).a, "oversized block rejected");
+        std::vector<uint8_t> zero = out;
+        ((W3dFxAnim*)(zero.data() + (size_t)fh.animOff4 * 4))->durationMs = 0;
+        CHECK(!w3d_fx_anim(zero.data(), (uint32_t)zero.size(), w3d_model_fx(zero.data(), (uint32_t)zero.size())).a, "zero loop rejected");
+        CHECK(!w3d_fx_anim(b1.data(), (uint32_t)b1.size(), h1).a, "no block: no animation");
+    }
+
     // ---- one torch 10 yd in front: rotated 90 deg about Z (the emitter's +X goes to world +Y), scale 2
     int texHandle = 7;
     const void* texs[1] = {&texHandle};
