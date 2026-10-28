@@ -6,6 +6,7 @@
 //   streamer_pc <pack.w3dp> [frames] [cx cy radius]
 #include "../source/world.h"
 #include "../source/creature_view.hpp"
+#include "../source/fx.hpp"
 #include "w3d_anim.h"
 
 #include <cmath>
@@ -61,6 +62,8 @@ int main(int argc, char** argv) {
     std::set<uint64_t> firstShown;      // stage 5.30: placements in the order they showed ...
     std::vector<float> shownOrder;      // ... and their distance from the camera then
     std::set<uint32_t> modelsSeen;
+    std::set<uint32_t> fxModels;   // stage 5.32
+    size_t fxPeak = 0, fxQuadPeak = 0, fxProblems = 0;
     // Creatures (stage 5.3): synthetic units cycling through every display in the pack,
     // appearing/disappearing, changing display, walking, running and dying.
     std::vector<uint32_t> displayIds;
@@ -105,6 +108,39 @@ int main(int argc, char** argv) {
         }
         float dist = std::getenv("CAM_WALK") ? 250.0f : (f / 500) % 2 ? 800.0f : 250.0f;   // switches the 3x3 / 5x5 radius too
         streamerUpdate(cam, dist);
+        {   // stage 5.32: the effects of what is near, as render.cpp drawFx does (models freed meanwhile must take their
+            // particles with them: ASan would catch a particle reading a freed blob)
+            static std::vector<fx::Source> fsrc;
+            static std::vector<fx::Quad> fq;
+            fsrc.clear();
+            for (Tile* t : streamerReadyTiles())
+                for (const Instance& in : t->instances) {
+                    const Model* m = in.model;
+                    if (!m->fx || !m->drawable) continue;
+                    if ((size_t)m->fxTexBase + m->fx->texCount > m->tex.size()) { ++fxProblems; continue; }
+                    fxModels.insert(m->id);
+                    fx::Source fs;
+                    fs.key = &in; fs.owner = m; fs.blob = m->blob; fs.h = m->fx;
+                    fs.tex = (const void* const*)(m->tex.data() + m->fxTexBase);
+                    for (int k = 0; k < 3; ++k) { fs.pos[k] = in.pos[k]; fs.rot[k] = in.rot[k]; }
+                    fs.scale = in.scale;
+                    fsrc.push_back(fs);
+                }
+            static const float rows[3][3] = {{0, -1, 0}, {0, 0, 1}, {-1, 0, 0}};
+            fx::Budget fb = fx::budgetFor(2);
+            fb.emitRange = fb.glowRange = 5000.0f;   // the camera flies high and far here: every lamp runs
+            fx::global().setBudget(fb);
+            fx::global().frame(1.0f / 30, f / 30.0f, cam, rows, fsrc, fq);
+            for (const fx::Quad& q : fq) {
+                if (q.tex) {   // a texture of a model that is still alive (forgotten ones took their particles)
+                    const GpuTex* gt = (const GpuTex*)q.tex;
+                    fxProblems += gt->refs <= 0;
+                }
+                fxProblems += !std::isfinite(q.c[0]) || !std::isfinite(q.half);
+            }
+            fxPeak = std::max(fxPeak, fx::global().alive());
+            fxQuadPeak = std::max(fxQuadPeak, fq.size());
+        }
         size_t inst = 0;
         for (Tile* t : streamerReadyTiles())
             if (groundSeen.insert((uint64_t)t->tx << 8 | (uint64_t)t->ty).second)
@@ -294,6 +330,9 @@ int main(int argc, char** argv) {
         std::printf("shown: near (<250 yd) %zu, 50%% at %.0f ms, 90%% at %.0f ms; all %zu, 50%% at %.0f ms, 90%% at %.0f ms, last at %.0f ms\n",
                     nearT.size(), pct(nearT, 0.5), pct(nearT, 0.9), allT.size(), pct(allT, 0.5), pct(allT, 0.9), allT.empty() ? 0.0 : allT.back());
     }
+    std::printf("effects: %zu models with effects, peak %zu particles, %zu quads, %zu problems\n", fxModels.size(), fxPeak,
+                fxQuadPeak, fxProblems);
+    problems += fxProblems;
     std::printf("%d frames: tile loads %u, max resident instances %zu, models %zu, distinct models drawn %zu\n", frames,
                 s.tileLoads, maxInst, maxModels, modelsSeen.size());
     std::printf("progressive: ground after avg %.0f ms, complete after avg %.0f ms (%u tiles); read queue max %d, dropped %u\n",

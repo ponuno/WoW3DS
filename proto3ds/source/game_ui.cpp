@@ -913,6 +913,7 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
                 case 80: case 81: case 82: case 83: in.cfg->crowd = arg - 80; out.graphicsChanged = true; break;
                 case 95: case 96: case 97: in.cfg->topMode = arg - 95; out.graphicsChanged = true; break;
                 case 90: in.cfg->doodads = !in.cfg->doodads; out.graphicsChanged = true; break;
+                case 170: case 171: case 172: in.cfg->effects = arg - 170; out.graphicsChanged = true; break;
                 case 100: case 101: in.cfg->lang = arg - 100; ui::g_lang = in.cfg->lang; break;
                 case 110: in.cfg->bigText = !in.cfg->bigText; break;
                 case 120: in.cfg->dimHud = !in.cfg->dimHud; break;

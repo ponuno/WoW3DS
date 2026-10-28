@@ -45,7 +45,7 @@ for f in "$OUT/parts"/common*.w3dp; do [ "$(sz "$f")" -le $((16 * 1024 + 65536))
 "$B/w3dconv" --info "$OUT/parts/map0.w3dp" | grep -q "^OK"
 "$B/w3dconv" --info "$OUT/parts/common1.w3dp" | grep -E "PINF:"
 # the 3DS streamer on the PC: models and textures from the pool (parts), liquids
-SRC="$P/streamer_pc.cpp $P/../source/streamer.cpp $P/../source/creature_view.cpp $P/stub/ctru_stub.cpp"
+SRC="$P/streamer_pc.cpp $P/../source/fx.cpp $P/../source/streamer.cpp $P/../source/creature_view.cpp $P/stub/ctru_stub.cpp"
 g++ -std=gnu++20 -g -O1 -I"$P/stub" -I"$P/../source" -I"$T/../../common" -fsanitize=address,undefined $SRC -o "$OUT/streamer" -lpthread
 for d in all parts; do
     LIQUID_EXPECT="$OUT/expect.txt" "$OUT/streamer" "$OUT/$d/map0.w3dp" 1500 | tee "$OUT/streamer_$d.log" | grep -E "pool|liquid|STREAMER"

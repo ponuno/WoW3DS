@@ -73,6 +73,9 @@ struct Report {
     int tilesInPack = 0;
     double firstFrameMs = 0;
     u32 linearAtStart = 0, vramAtStart = 0, appRegion = 0;
+    // stage 5.32: frames in the world (FPS) and what the effects cost
+    u32 worldFrames = 0, slowFrames = 0, fxFrames = 0, fxPeakQuads = 0, fxPeakParticles = 0;
+    double worldMs = 0, fxMs = 0, fxPeakMs = 0, gpuMs = 0;
 };
 static Report g_report;
 static LoginFlow g_login;
@@ -269,8 +272,15 @@ static void writeReport(const Bench* b, float drawDist, const RenderSettings& rs
     fprintf(f, "  complete (every model and texture): %lu tiles, avg %.0f ms, max %.0f ms; models waiting for textures now %d\n",
             (unsigned long)s.tileFullLoads, s.tileFullLoads ? s.sumTileFullMs / s.tileFullLoads : 0.0, s.maxTileFullMs,
             s.modelsWaiting);
-    fprintf(f, "  read queue: longest %d, now %d; reads dropped (no longer needed) %lu\n\n", s.maxQueued, s.jobsQueued,
+    fprintf(f, "  read queue: longest %d, now %d; reads dropped (no longer needed) %lu\n", s.maxQueued, s.jobsQueued,
             (unsigned long)s.jobsCancelled);
+    if (g_report.worldFrames)
+        fprintf(f, "in the world: %lu frames, avg FPS %.1f, GPU avg %.1f ms, frames over 33 ms %lu\n", (unsigned long)g_report.worldFrames,
+                1000.0 * g_report.worldFrames / std::max(g_report.worldMs, 1.0), g_report.gpuMs / g_report.worldFrames,
+                (unsigned long)g_report.slowFrames);
+    fprintf(f, "effects (stage 5.32, level %d): %lu frames with particles / glows, CPU avg %.2f ms, max %.2f ms; peak %lu quads, %lu particles\n\n",
+            rs.effects, (unsigned long)g_report.fxFrames, g_report.fxFrames ? g_report.fxMs / g_report.fxFrames : 0.0, g_report.fxPeakMs,
+            (unsigned long)g_report.fxPeakQuads, (unsigned long)g_report.fxPeakParticles);
     if (g_login.authTimings().authTotal > 0) {
         const w3n::Timings& a = g_login.authTimings();
         const w3n::Timings& w = g_login.worldTimings();
@@ -488,6 +498,7 @@ int main() {
     char padPath[96];
     snprintf(padPath, sizeof padPath, "%s/pad.txt", kOutDir);
     padCfg.load(padPath);
+    rs.effects = padCfg.effects;
     // Top screen mode (Settings): 800x240 wide, or stereoscopic 3D with a second target for the right eye.
     C3D_RenderTarget* topWide = nullptr;
     C3D_RenderTarget* topRight = nullptr;
@@ -762,6 +773,7 @@ int main() {
                 cam.drawDist = kDrawDists[distIdx];
                 rendererSetProjection(cam.drawDist);
                 rs.doodads = padCfg.doodads;
+                rs.effects = padCfg.effects;
                 applyTopMode(padCfg.topMode);
             }
             if (bars.empty() && !gs.spells.empty() && bars.autofill(gs)) uiOut.layoutChanged = true;
@@ -1484,6 +1496,19 @@ int main() {
         uiEndFrame();
         streamerEndFrame();
         cpuMsLast = ticksToMs((beforeWait - frameStart) + (svcGetSystemTick() - afterWait));
+        if (g_login.online() && !loadingWorld && dt > 0 && dt < 0.5f) {   // stage 5.32: FPS and effect costs for report.txt
+            ++g_report.worldFrames;
+            g_report.worldMs += dt * 1000.0;
+            g_report.gpuMs += C3D_GetDrawingTime();
+            g_report.slowFrames += dt > 0.0334f;
+            if (fc.fxQuads) {
+                ++g_report.fxFrames;
+                g_report.fxMs += fc.fxMs;
+                g_report.fxPeakMs = std::max(g_report.fxPeakMs, fc.fxMs);
+                g_report.fxPeakQuads = std::max(g_report.fxPeakQuads, fc.fxQuads);
+                g_report.fxPeakParticles = std::max(g_report.fxPeakParticles, fc.fxParticles);
+            }
+        }
 
         if (bench.running && ++bench.warmup > 3) {
             bench.frameMs.push_back(frameMs);
@@ -1539,7 +1564,9 @@ int main() {
             printf("\x1b[14;1H%s dist %3.0f doodads %-3s %-4s fog %-3s  ",
                    walk ? (g_login.online() && g_login.game().mover.swimming() ? "SWIM " : onFloor ? "FLOOR" : "WALK ") : "FLY  ", cam.drawDist,
                    rs.doodads ? "on" : "off", kDetail[detailIdx], rs.fog ? "on" : "off");
-            printf("\x1b[15;1H%-40s", bench.running ? "BENCHMARK RUNNING (40 s)..." : "Y: 40 s streaming benchmark");
+            printf("\x1b[15;1Hfx %3lu prt %3lu glow %3lu src %4.1fms  ", (unsigned long)fc.fxQuads, (unsigned long)fc.fxParticles,
+                   (unsigned long)fc.fxGlows, fc.fxMs);
+
             printf("\x1b[17;1HCirclePad move/turn CStick look   ");
             printf("\x1b[18;1HL/R down/up  B fast%s SELECT walk/fly", g_login.online() ? "/jump" : "     ");
             printf("\x1b[19;1HX dist  A doodads  ZR fog  ZL detail   ");

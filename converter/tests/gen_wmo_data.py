@@ -156,6 +156,24 @@ write("World/Test/Fence.m2", m2_file("Fence", fence_rv, fence_t, [(0, 0, len(fen
                                      [(0, "Textures\\Test\\Wall.blp")], [0], [(0, 0)], [(-1, (0, 0, 0), {})],
                                      [(0, 0, 0, 1000, 0.0)], [], coll=(cv, ct)))
 
+# Lamp doodad (stage 5.32 effects): a post, a glow card on top (additive quad with a "glow" texture: becomes a glow sprite,
+# out of the mesh) and a flame emitter (20/s, 1 s, a 2x2 atlas).
+from m2_writer import blp as blp_file
+write("World/Test/LampGlow.blp", blp_file(5))
+write("Particles/Test/Flame.blp", blp_file(9))
+lamp_lo, lamp_hi = (-0.1, -0.1, 0.0), (0.1, 0.1, 2.0)
+lamp_v = [(p, (255, 0, 0, 0), (0, 0, 0, 0), tuple(1 if p[i] > 0.5 * (lamp_lo[i] + lamp_hi[i]) else -1 for i in range(3)), (0.0, 0.0))
+          for p in box_corners(lamp_lo, lamp_hi)]
+glow_q = [(0.0, -0.3, 1.9), (0.0, 0.3, 1.9), (0.0, 0.3, 2.5), (0.0, -0.3, 2.5)]
+lamp_v += [(p, (255, 0, 0, 0), (0, 0, 0, 0), (1, 0, 0), (0.0, 0.0)) for p in glow_q]
+lamp_t = list(fence_t) + [8, 9, 10, 8, 10, 11]
+write("World/Test/Lamp.m2", m2_file("Lamp", lamp_v, lamp_t, [(0, 0, len(fence_t)), (1, len(fence_t), 6)], [(0, 0, 0), (1, 1, 1)],
+                                    [(0, "Textures\\Test\\Wall.blp"), (0, "World\\Test\\LampGlow.blp"), (0, "Particles\\Test\\Flame.blp")],
+                                    [0, 1], [(0, 0), (0, 3)], [(-1, (0, 0, 0), {})], [(0, 0, 0, 1000, 0.0)], [],
+                                    emitters=[dict(pos=(0.0, 0.0, 2.2), texture=2, blend=4, type=1, rows=2, cols=2, flags=0x40,
+                                                   rate=20.0, life=1.0, speed=1.0, gravity=-0.5, scales=(0.3, 0.25, 0.1),
+                                                   colors=[(255, 200, 80, 255), (255, 120, 40, 200), (120, 40, 20, 0)])]))
+
 # ------------------------------------------------------------ ADTs
 def adt(tx, ty, modf, mddf):
     mtex = b"Textures\\Test\\Wall.blp\0"
@@ -370,5 +388,6 @@ for k in range(240):
     walks.append({"x": x, "y": y, "z": rng.choice([80.0, 80.0, 80.0, 80.4]), "moves": moves})
 exp["random_walks"] = walks
 exp["walker_radius"] = R_WALK
+exp["lamp_fx"] = {"emitters": 1, "glows": 1, "glow_pos": [0.0, 0.0, 2.2], "glow_size": 0.3, "rate": 20.0, "life": 1.0}
 json.dump(exp, open(expect_path, "w"), indent=1)
 print("synthetic data written to", out)

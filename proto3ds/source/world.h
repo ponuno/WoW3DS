@@ -11,6 +11,7 @@
 
 #include "w3d_format.h"
 #include "w3d_character.h"
+#include "w3d_fx.h"
 #include "hud.hpp"
 
 static constexpr float kTileSize = 533.33333f;
@@ -74,6 +75,10 @@ struct Model {
     float anchor[3] = {0, 0, 0};     // the nearest placement known (read order of the model and its textures)
     uint8_t cls = 0;
     bool interior = false;           // interior-only WMO group (W3D_SUBF_INTERIOR)
+    // stage 5.32: particle emitters and glow sprites (common/w3d_fx.h) at the end of the blob, or null; their textures
+    // are tex[fxTexBase ...] (acquired with the model's own, so drawable covers them too)
+    const W3dFxHeader* fx = nullptr;
+    uint16_t fxTexBase = 0;
     // per-frame visibility bucket (filled by the renderer)
     std::vector<const struct Instance*> visible;
     bool texturesReady() const;
@@ -268,6 +273,8 @@ struct FrameCounters {
     u32 drawCalls = 0, tris = 0, visibleInstances = 0, visibleBatches = 0, texBinds = 0, waterBatches = 0, markers = 0, buildings = 0;
     u32 creatures = 0, boneUploads = 0;
     double poseMs = 0;
+    u32 fxParticles = 0, fxGlows = 0, fxQuads = 0, fxSources = 0;   // stage 5.32
+    double fxMs = 0;
     u32 lodBatches[W3D_TERRAIN_LODS] = {0, 0, 0};
 };
 
@@ -283,6 +290,7 @@ struct RenderSettings {
     bool underwater = false;
     uint8_t waterFog[3] = {28, 62, 78};
     float waterFogEnd = 45.0f;
+    int effects = 2;             // stage 5.32: particles and lamp glows: 0 off, 1 low, 2 high
 };
 
 // Stage 5: world objects drawn as coloured direction markers until creature models exist.
@@ -295,6 +303,7 @@ struct Marker {
 };
 
 void rendererInit();
+void fxForgetModel(const void* model);   // fx.cpp: a model with effects is being freed
 void rendererShutdown();
 void rendererSetProjection(float drawDist);   // also rebuilds the fog LUT
 void rendererSetEye(float iod);               // stereoscopic 3D: the projection of one eye (-iod left, +iod right, 0 = mono)

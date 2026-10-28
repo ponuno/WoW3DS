@@ -6,9 +6,12 @@
 
 #include "pipeline/m2_loader.hpp"
 #include "meshoptimizer.h"
+#include "w3d_fx.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <initializer_list>
 #include <cstdio>
 #include <exception>
 #include <map>
@@ -206,6 +209,61 @@ static uint8_t mapBlend(uint16_t m2Blend) {
     }
 }
 
+
+// ------------------------------------------------------------------ effects (stage 5.32)
+namespace {
+std::string lowerStr(std::string s) {
+    for (char& c : s) c = (char)std::tolower((unsigned char)c);
+    return s;
+}
+bool hasAnyOf(const std::string& s, std::initializer_list<const char*> toks) {
+    for (const char* t : toks) if (s.find(t) != std::string::npos) return true;
+    return false;
+}
+// One value for an animated track of a doodad (it stands in its bind pose): the mean of the first sequence's keys.
+float trackMean(const wowee::pipeline::M2AnimationTrack& t, float def) {
+    for (const auto& sq : t.sequences) {
+        if (sq.floatValues.empty()) continue;
+        double sum = 0;
+        for (float v : sq.floatValues) sum += v;
+        const float m = (float)(sum / sq.floatValues.size());
+        return std::isfinite(m) ? m : def;
+    }
+    return def;
+}
+uint32_t rgba8(const glm::vec3& c, float a) {
+    auto b = [](float v) { return (uint32_t)std::clamp((int)std::lround(v * 255.0f), 0, 255); };
+    return b(c.r) | b(c.g) << 8 | b(c.b) << 16 | b(a) << 24;
+}
+}  // namespace
+
+// Fire-like doodads (their particles are flames: dense, small, bright, never dimmed by the day light).
+static bool fireLike(const std::string& lowerPath) {
+    return hasAnyOf(lowerPath, {"torch", "fire", "flame", "candle", "brazier", "lamp", "lantern", "chandelier", "candelabra",
+                                "sconce", "forge", "stove", "oven", "fireplace", "campfire", "bonfire", "lightpost"});
+}
+
+// Appends the W3dFx section (and its footer) to a finished model blob. glows: from the glow cards taken out of the mesh.
+static void appendFx(std::vector<uint8_t>& blob, std::vector<W3dFxEmitter>& em, std::vector<W3dFxGlow>& glows,
+                     const std::vector<uint32_t>& texIds) {
+    while (blob.size() % 4) blob.push_back(0);
+    W3dFxHeader h{};
+    auto put = [&](const void* p, size_t n) { const uint8_t* b = (const uint8_t*)p; blob.insert(blob.end(), b, b + n); };
+    h.texCount = (uint16_t)texIds.size();
+    h.offTexIds = (uint32_t)blob.size();
+    if (!texIds.empty()) put(texIds.data(), texIds.size() * 4);
+    h.emitterCount = (uint16_t)em.size();
+    h.offEmitters = (uint32_t)blob.size();
+    if (!em.empty()) put(em.data(), em.size() * sizeof(W3dFxEmitter));
+    h.glowCount = (uint16_t)glows.size();
+    h.offGlows = (uint32_t)blob.size();
+    if (!glows.empty()) put(glows.data(), glows.size() * sizeof(W3dFxGlow));
+    const uint32_t off = (uint32_t)blob.size();
+    put(&h, sizeof h);
+    const uint32_t footer[2] = {off, W3D_FX_MAGIC};
+    put(footer, sizeof footer);
+}
+
 static uint32_t addModelFromGameImpl(PackWriter& pack, const DataDir& data, const std::string& m2PathIn, const Options& o,
                                      ConvStats& st);
 
@@ -263,9 +321,50 @@ static uint32_t addModelFromGameImpl(PackWriter& pack, const DataDir& data, cons
     }
 
     std::map<uint32_t, uint32_t> texSlot;  // TEX entry id -> slot
+    const std::string lowerPath = lowerStr(m2Path);
+    const bool fire = fireLike(lowerPath);
+    std::vector<W3dFxGlow> glows;
     for (const auto& b : mdl.batches) {
         if (b.submeshLevel != 0) continue;
         if (b.indexStart + b.indexCount > mdl.indices.size() || b.indexCount < 3) continue;
+        if (!o.noFx && glows.size() < 16) {   // a glow card: drawn by the client as a camera-facing glow instead
+            uint16_t bm = b.materialIndex < mdl.materials.size() ? mdl.materials[b.materialIndex].blendMode : 0;
+            std::string tn;
+            if (b.textureIndex < mdl.textureLookup.size() && mdl.textureLookup[b.textureIndex] < mdl.textures.size())
+                tn = lowerStr(mdl.textures[mdl.textureLookup[b.textureIndex]].filename);
+            // additive in either reading of the M2 blend table (3 add, 4 add-with-alpha / modulate, 6 blend-add)
+            const bool additive = bm == 3 || bm == 4 || bm == 6 || mapBlend(bm) == W3D_BLEND_ADD;
+            if (additive && b.indexCount <= 36 && hasAnyOf(tn, {"glow", "halo", "flare", "lensflare", "lightbeam", "t_vfx"})) {
+                glm::vec3 lo(1e30f), hi(-1e30f);
+                for (uint32_t k = b.indexStart; k < b.indexStart + b.indexCount; ++k) {
+                    const uint16_t vi = mdl.indices[k];
+                    if (vi >= mdl.vertices.size()) continue;
+                    lo = glm::min(lo, mdl.vertices[vi].position);
+                    hi = glm::max(hi, mdl.vertices[vi].position);
+                }
+                if (lo.x <= hi.x) {
+                    const glm::vec3 e = hi - lo;
+                    W3dFxGlow g{};
+                    const glm::vec3 c = 0.5f * (lo + hi);
+                    g.pos[0] = c.x; g.pos[1] = c.y; g.pos[2] = c.z;
+                    g.size = std::clamp(0.5f * std::max({e.x, e.y, e.z}), 0.15f, 4.0f);
+                    // the batch's colour track (Orgrimmar's bonfire glow is authored white and coloured there, see WoWee
+                    // m2_loader.hpp colorRGB), else a tint by the texture's name like WoWee's classifyBatchTexture
+                    glm::vec3 col(1.0f, 0.82f, 0.46f);
+                    float a = 0.9f;
+                    if (hasAnyOf(tn, {"blue", "arcane", "nightelf"})) col = glm::vec3(0.48f, 0.72f, 1.0f);
+                    else if (hasAnyOf(tn, {"red", "ruby", "scarlet"})) col = glm::vec3(1.0f, 0.28f, 0.22f);
+                    if (b.colorIndex < mdl.colorRGB.size()) {
+                        const glm::vec3 cr = mdl.colorRGB[b.colorIndex];
+                        if (cr.r + cr.g + cr.b > 0.05f && !(cr.r > 0.99f && cr.g > 0.99f && cr.b > 0.99f)) col = cr;
+                        if (b.colorIndex < mdl.colorAlphas.size()) a = std::clamp(mdl.colorAlphas[b.colorIndex], 0.2f, 1.0f);
+                    }
+                    g.color = rgba8(col, a);
+                    glows.push_back(g);
+                    continue;   // not in the mesh: a flat card seen from the side was a bright line
+                }
+            }
+        }
         ModelSource::Sub s;
         s.texId = UINT32_MAX;
         uint16_t blendMode = 0, mflags = 0;
@@ -294,6 +393,14 @@ static uint32_t addModelFromGameImpl(PackWriter& pack, const DataDir& data, cons
         s.idx.assign(mdl.indices.begin() + b.indexStart, mdl.indices.begin() + b.indexStart + b.indexCount);
         src.subs.push_back(std::move(s));
     }
+    if (src.subs.empty() && !glows.empty()) {   // nothing but glow cards (a light halo): one empty triangle carries them
+        ModelSource::Sub s;
+        s.texId = UINT32_MAX;
+        s.blend = W3D_BLEND_ADD;
+        s.flags = 0;
+        s.idx = {0, 0, 0};
+        src.subs.push_back(std::move(s));
+    }
     if (src.subs.empty()) { ++st.modelsFailed; return 0; }
 
     size_t tris = 0;
@@ -301,6 +408,65 @@ static uint32_t addModelFromGameImpl(PackWriter& pack, const DataDir& data, cons
     auto blob = buildModelBlob(src, o.maxModelTris, &tris, &flipped);
     st.m2SubsFlipped += flipped;
     if (blob.empty()) { ++st.modelsFailed; return 0; }
+    // ---- particle emitters (stage 5.32)
+    std::vector<W3dFxEmitter> emitters;
+    std::vector<uint32_t> fxTex;
+    if (!o.noFx) {
+        for (const auto& pe : mdl.particleEmitters) {
+            if (emitters.size() >= 8) break;   // a doodad with more is a spell-like showpiece: the first eight
+            W3dFxEmitter e{};
+            e.pos[0] = pe.position.x; e.pos[1] = pe.position.y; e.pos[2] = pe.position.z;
+            // (bind pose: the bone matrix is the identity, the position is in model space - as WoWee emitParticles)
+            e.rate = trackMean(pe.emissionRate, 0);
+            e.life = trackMean(pe.lifespan, 0);
+            if (!(e.rate > 0.01f) || !(e.life > 0.01f)) continue;
+            e.rate = std::min(e.rate, 60.0f);
+            e.life = std::min(e.life, 8.0f);
+            e.speed = trackMean(pe.emissionSpeed, 0);
+            e.speedVar = std::clamp(trackMean(pe.speedVariation, 0), 0.0f, 1.0f);
+            e.spreadV = std::clamp(trackMean(pe.verticalRange, 0), 0.0f, 3.2f);
+            e.spreadH = std::clamp(trackMean(pe.horizontalRange, 0), 0.0f, 6.3f);
+            e.gravity = std::clamp(trackMean(pe.gravity, 0), -30.0f, 30.0f);
+            e.areaL = std::clamp(trackMean(pe.emissionAreaLength, 0), 0.0f, 20.0f);
+            e.areaW = std::clamp(trackMean(pe.emissionAreaWidth, 0), 0.0f, 20.0f);
+            e.drag = std::clamp(trackMean(pe.deceleration, 0), 0.0f, 10.0f);
+            const auto& sc = pe.particleScale.floatValues;
+            const auto& co = pe.particleColor.vec3Values;
+            const auto& al = pe.particleAlpha.floatValues;
+            for (int k = 0; k < 3; ++k) {
+                e.scale[k] = std::clamp(k < (int)sc.size() ? sc[k] : 1.0f, 0.0f, 10.0f);
+                e.color[k] = rgba8(k < (int)co.size() ? co[k] : glm::vec3(1.0f), k < (int)al.size() ? al[k] : 1.0f);
+            }
+            e.mid = pe.particleScale.timestamps.size() == 3 ? std::clamp(pe.particleScale.timestamps[1], 0.05f, 0.95f) : 0.5f;
+            e.blend = (pe.blendingType == 1 || pe.blendingType == 2 || pe.blendingType == 0) ? W3D_BLEND_ALPHA : W3D_BLEND_ADD;
+            e.type = pe.emitterType == 2 ? W3D_FX_SPHERE : W3D_FX_PLANE;
+            e.rows = (uint8_t)std::clamp<int>(pe.textureRows, 1, 16);
+            e.cols = (uint8_t)std::clamp<int>(pe.textureCols, 1, 16);
+            e.flags = (uint16_t)(((pe.flags & 0x40) ? W3D_FXF_RANDOM_TILE : 0) | (fire ? W3D_FXF_FIRE : 0) |
+                                 ((pe.flags & 0x1) && !fire ? W3D_FXF_LIT : 0));
+            e.tex = 0xFFFF;
+            if (pe.texture < mdl.textures.size() && mdl.textures[pe.texture].type == 0 && !mdl.textures[pe.texture].filename.empty()) {
+                // small: a particle is a few pixels to a few dozen on the 400x240 screen
+                const uint32_t tid = addTextureFromGame(pack, data, mdl.textures[pe.texture].filename, std::min(o.modelTex, 64),
+                                                        o.texFormat, true, o.verbose);
+                if (tid) {
+                    auto it = std::find(fxTex.begin(), fxTex.end(), tid);
+                    e.tex = (uint16_t)(it - fxTex.begin());
+                    if (it == fxTex.end()) fxTex.push_back(tid);
+                    ++st.texturesOk;
+                }
+            }
+            emitters.push_back(e);
+        }
+    }
+    if (!emitters.empty() || !glows.empty()) {
+        appendFx(blob, emitters, glows, fxTex);
+        ++st.fxModels;
+        st.fxEmitters += emitters.size();
+        st.fxGlows += glows.size();
+        if (o.verbose)
+            std::printf("    fx %s: %zu emitters, %zu glows%s\n", m2Path.c_str(), emitters.size(), glows.size(), fire ? " (fire)" : "");
+    }
     pack.add(W3D_ENTRY_MODEL, id, std::move(blob));
     // Bounding (collision) triangles for walls/floors of every placement of this model.
     if (!o.noFloors && !o.noDoodadColl && !mdl.collisionIndices.empty() && !mdl.collisionVertices.empty()) {

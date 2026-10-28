@@ -42,6 +42,7 @@ struct PadConfig {
     int crowd = 2;                    // creatures drawn at most: 0 = 10, 1 = 20, 2 = 40, 3 = all
     int topMode = 0;                  // top screen: 0 normal 400x240, 1 wide 800x240, 2 stereoscopic 3D (the slider)
     bool doodads = true;              // small world objects (trees, rocks, furniture)
+    int effects = 2;                  // stage 5.32: particles and lamp glows: 0 off, 1 low, 2 high
     bool bigText = false;             // chat and lists on the touch screen in the bigger font
     bool dimHud = true;               // the top HUD fades out of combat
     bool autoTabs = true;             // combat -> the Combat tab, after it -> the Map tab (unless a tab is pinned)

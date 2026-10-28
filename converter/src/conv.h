@@ -55,6 +55,7 @@ struct Options {
     std::string dumpPlacements; // debug: text file with every building group/doodad placement
     bool noFloors = false;      // skip COLL entirely (no floors, no walls)
     bool noWalls = false;       // COLL with floors only (walking passes through walls)
+    bool noFx = false;          // stage 5.32: no particle emitters / glow sprites on doodads (--no-fx)
     bool noDoodadColl = false;  // no M2 doodad collision (fences, trunks, bridges) in COLL
     int doodadCollTris = 96;    // collision triangle budget per doodad model (0 = keep all)
     // Creatures (stage 5.3): every CreatureDisplayInfo row -> CDSP + CMDL (skinned, animated)
@@ -221,6 +222,7 @@ struct ConvStats {
     size_t wmoOk = 0, wmoFailed = 0, wmoGroups = 0, wmoGroupsFailed = 0, wmoGroupsSkipped = 0, wmoTris = 0;
     size_t wmoPlacements = 0, wmoPlacedGroups = 0, wmoDoodads = 0, duplicatesSkipped = 0;
     size_t m2SubsFlipped = 0, wmoSubsFlipped = 0;
+    size_t fxModels = 0, fxEmitters = 0, fxGlows = 0;   // stage 5.32
     size_t creatureModelsOk = 0, creatureModelsFailed = 0, displaysOk = 0, displaysFailed = 0, creatureTris = 0;
     size_t creatureSeqs = 0, creatureKeyBytes = 0, creaturePalettes = 0, creatureBones = 0;
     size_t creatureSrcVerts = 0, creatureLossyVerts = 0;

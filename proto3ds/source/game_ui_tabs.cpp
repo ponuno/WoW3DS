@@ -847,7 +847,8 @@ void GameUi::drawSettings(const Input& in) {
     const PadConfig& c = *in.cfg;
     int y = kTop + 24;
     auto label = [&](const char* t) { list_.textFit(6, y + 4, t, 110, kText, false); };
-    auto opt = [&](int x, int w, const char* t, bool on, int arg) { btn(x, y, w, 19, t, Act::Setting, arg, on ? Style::ToggleOn : Style::Toggle, Font::Small); };
+    const int bh = 19;
+    auto opt = [&](int x, int w, const char* t, bool on, int arg) { btn(x, y, w, bh, t, Act::Setting, arg, on ? Style::ToggleOn : Style::Toggle, Font::Small); };
     char b[16];
     if (subSettings_ == 0) {
         label(tr("Scheme", "Схема"));
@@ -874,9 +875,9 @@ void GameUi::drawSettings(const Input& in) {
         list_.textCentered(268, y + 4, b, kText);
         btn(286, y, 30, 19, "+", Act::Setting, 51, Style::Normal);
         y += 22;
-        list_.textFit(6, y + 2, tr("SELECT + ◀/▶ turns the tabs, SELECT alone frees the camera.",
-                                   "SELECT + ◀/▶ листает вкладки, просто SELECT — свободная камера."), kTouchW - 12, kGrey);
+        list_.textFit(6, y + 2, tr("SELECT + ◀/▶ turns the tabs.", "SELECT + ◀/▶ листает вкладки."), kTouchW - 12, kGrey);
     } else if (subSettings_ == 1) {
+        y -= 4;   // 8 rows (stage 5.32)
         label(tr("Draw distance", "Дальность"));
         const char* d[4] = {tr("Near", "Близко"), tr("Normal", "Норм."), tr("Far", "Далеко"), tr("Max", "Макс.")};
         for (int i = 0; i < 4; ++i) opt(120 + i * 49, 47, d[i], c.drawDist == i, 70 + i);
@@ -888,6 +889,10 @@ void GameUi::drawSettings(const Input& in) {
         label(tr("World objects", "Объекты мира"));
         opt(120, 96, tr("On", "Вкл"), c.doodads, 90);
         y += 20;
+        label(tr("Particles", "Частицы"));   // stage 5.32: flames, smoke, lamp glows
+        const char* fxn[3] = {tr("Off", "Выкл"), tr("Low", "Мало"), tr("High", "Много")};
+        for (int i = 0; i < 3; ++i) opt(120 + i * 65, 62, fxn[i], c.effects == i, 170 + i);
+        y += 20;
         label(tr("Top screen", "Верх. экран"));
         opt(120, 62, tr("Normal", "Обычный"), c.topMode == 0, 95);
         opt(184, 62, "800x240", c.topMode == 1, 96);
@@ -897,12 +902,12 @@ void GameUi::drawSettings(const Input& in) {
         const int vv[3] = {c.musicVol, c.sfxVol, c.ambVol};
         for (int i = 0; i < 3; ++i) {
             label(vn[i]);
-            btn(120, y, 30, 19, "-", Act::Setting, 140 + i * 10, Style::Normal);
+            btn(120, y, 30, bh, "-", Act::Setting, 140 + i * 10, Style::Normal);
             list_.bar(154, y + 6, 74, 7, vv[i] / 10.0f, kGold, hudRgba(0, 0, 0, 140));
             snprintf(b, sizeof b, "%d", vv[i]);
             list_.textCentered(243, y + 3, vv[i] ? b : tr("off", "выкл"), kText);
-            btn(258, y, 30, 19, "+", Act::Setting, 141 + i * 10, Style::Normal);
-            y += 20;
+            btn(258, y, 30, bh, "+", Act::Setting, 141 + i * 10, Style::Normal);
+            y += 19;
         }
     } else {
         label(tr("Language", "Язык"));
@@ -923,6 +928,7 @@ void GameUi::drawSettings(const Input& in) {
         opt(120, 96, tr("On", "Вкл"), c.questTracker, 60);
         opt(220, 96, tr("Off", "Выкл"), !c.questTracker, 61);
     }
+    if (subSettings_ == 1) return;   // 8 rows since the particles (stage 5.32): Debug / Quit stay on the other pages and in START
     const int by = kTabY - 24;
     btn(2, by, 156, 22, tr("Debug page", "Отладка"), Act::MenuItem, 8, Style::Normal, Font::Small);
     btn(162, by, 154, 22, tr("Quit", "Выход"), Act::MenuItem, 9, Style::Danger, Font::Small);

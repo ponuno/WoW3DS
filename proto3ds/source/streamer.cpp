@@ -476,6 +476,7 @@ Model* acquireModel(uint32_t id) {
 std::vector<Model*> g_waitingModels;   // read, textures not all in yet (stage 5.30: drawn once they are)
 
 void destroyModelNow(Model* m) {
+    if (m->fx) fxForgetModel(m);   // its particles point into the blob and at its textures
     if (!m->drawable) g_waitingModels.erase(std::remove(g_waitingModels.begin(), g_waitingModels.end(), m), g_waitingModels.end());
     for (GpuTex* t : m->tex) releaseTex(t);
     m->tex.clear();
@@ -865,6 +866,12 @@ void onJobDone(Job* j) {
             {   // its textures are read where the model is needed; a building's before a doodad's
                 AnchorScope as(m->anchor, m->cls == kClsUnit ? kClsUnit : m->building ? kClsBuilding : kClsDoodad);
                 for (u32 i = 0; i < m->h->texCount; ++i) m->tex.push_back(acquireTex(ids[i]));
+                m->fx = w3d_model_fx(m->blob, m->size);   // stage 5.32
+                if (m->fx) {
+                    m->fxTexBase = (uint16_t)m->tex.size();
+                    const uint32_t* fids = (const uint32_t*)(m->blob + m->fx->offTexIds);
+                    for (u32 i = 0; i < m->fx->texCount; ++i) m->tex.push_back(acquireTex(fids[i]));
+                }
             }
             g_waitingModels.push_back(m);
             break;

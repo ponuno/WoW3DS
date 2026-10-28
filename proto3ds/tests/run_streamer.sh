@@ -5,7 +5,7 @@
 set -e
 T=$(cd "$(dirname "$0")" && pwd)
 OUT=${OUT:-/tmp/w3d_streamer}; mkdir -p "$OUT"
-SRC="$T/streamer_pc.cpp $T/../source/streamer.cpp $T/../source/creature_view.cpp $T/stub/ctru_stub.cpp"
+SRC="$T/streamer_pc.cpp $T/../source/fx.cpp $T/../source/streamer.cpp $T/../source/creature_view.cpp $T/stub/ctru_stub.cpp"
 FL="-std=gnu++20 -g -O1 -DW3D_PC_TEST -I$T/stub -I$T/../source -I$T/../../common"
 g++ $FL -fsanitize=address,undefined $SRC -o "$OUT/streamer_asan" -lpthread
 g++ $FL -fsanitize=thread $SRC -o "$OUT/streamer_tsan" -lpthread

@@ -17,6 +17,8 @@
 #include "model_shbin.h"
 #include "skin_shbin.h"
 #include "terrain_shbin.h"
+#include "fx_shbin.h"
+#include "fx.hpp"
 
 namespace {
 
@@ -30,9 +32,10 @@ struct Shader {
     DVLB_s* dvlb = nullptr;
     shaderProgram_s prog;
     int uProj = -1, uMV = -1, uScale = -1, uOffset = -1, uUV = -1, uLight = -1, uLightParams = -1, uFog = -1, uBones = -1;
+    int uMask = -1;
 };
-Shader g_terrainSh, g_modelSh, g_skinSh;
-C3D_AttrInfo g_terrainAttr, g_modelAttr, g_skinAttr;
+Shader g_terrainSh, g_modelSh, g_skinSh, g_fxSh;
+C3D_AttrInfo g_terrainAttr, g_modelAttr, g_skinAttr, g_fxAttr;
 std::vector<W3dMat34> g_pose;   // scratch: bone matrices of the creature being drawn
 C3D_Mtx g_proj;
 float g_near = 1.0f, g_far = 400.0f, g_skyRadius = 300.0f;
@@ -64,6 +67,7 @@ void initShader(Shader& s, const u8* bin, u32 size) {
     s.uLightParams = loc("lightParams");
     s.uFog = loc("fogParams");
     s.uBones = loc("bones");
+    s.uMask = loc("fogMask");
 }
 
 void buildSky() {
@@ -750,6 +754,180 @@ void drawWater(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, const 
     C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
 }
 
+
+// ------------------------------------------------------------------ effects (stage 5.32)
+// Particles and lamp glows: fx.cpp simulates and hands back camera-facing quads in view space; here they go into a
+// vertex buffer (one per draw: a frame can be drawn twice, for the two eyes, so a ring of 4) and are drawn alpha-blended
+// ones back to front, then additive ones by texture, depth-tested, no depth writes.
+struct FxVertex { float x, y, z, u, v; uint8_t r, g, b, a; };   // 24 bytes
+constexpr int kFxMaxQuads = 720, kFxBuffers = 4;
+FxVertex* g_fxVerts[kFxBuffers] = {};
+uint16_t* g_fxIdx = nullptr;
+int g_fxRing = 0;
+C3D_Tex g_fxDot;                 // the built-in soft dot (glows, particles without a texture of their own)
+bool g_fxDotOk = false;
+std::vector<fx::Source> g_fxSources;
+std::vector<fx::Quad> g_fxQuads;
+float g_fxLastTime = -1.0f;
+
+uint32_t morton8(uint32_t x, uint32_t y) {
+    return (x & 1) | ((y & 1) << 1) | ((x & 2) << 1) | ((y & 2) << 2) | ((x & 4) << 2) | ((y & 4) << 3);
+}
+
+void buildFx() {
+    for (int i = 0; i < kFxBuffers; ++i) g_fxVerts[i] = (FxVertex*)linearAlloc(sizeof(FxVertex) * 4 * kFxMaxQuads);
+    g_fxIdx = (uint16_t*)linearAlloc(sizeof(uint16_t) * 6 * kFxMaxQuads);
+    if (g_fxIdx) {
+        for (int q = 0; q < kFxMaxQuads; ++q) {
+            uint16_t* d = g_fxIdx + q * 6;
+            const uint16_t b = (uint16_t)(q * 4);
+            d[0] = b; d[1] = (uint16_t)(b + 1); d[2] = (uint16_t)(b + 2); d[3] = b; d[4] = (uint16_t)(b + 2); d[5] = (uint16_t)(b + 3);
+        }
+        GSPGPU_FlushDataCache(g_fxIdx, sizeof(uint16_t) * 6 * kFxMaxQuads);
+    }
+    // 32x32 white with a soft round alpha (a bright core, a long falloff), PICA tiled (8x8 tiles, Morton inside)
+    const int N = 32;
+    if (C3D_TexInit(&g_fxDot, N, N, GPU_RGBA8)) {
+        uint32_t* px = (uint32_t*)g_fxDot.data;
+        for (int y = 0; y < N; ++y)
+            for (int x = 0; x < N; ++x) {
+                const float dx = (x + 0.5f) / N * 2.0f - 1.0f, dy = (y + 0.5f) / N * 2.0f - 1.0f;
+                const float r = sqrtf(dx * dx + dy * dy);
+                float a = r >= 1.0f ? 0.0f : (1.0f - r) * (1.0f - r);
+                a = a * 0.75f + (r < 0.25f ? (0.25f - r) * 1.0f : 0.0f);
+                const uint32_t A = (uint32_t)std::min(255.0f, a * 255.0f + 0.5f);
+                const uint32_t tile = (uint32_t)((y / 8) * (N / 8) + x / 8);
+                px[tile * 64 + morton8((uint32_t)x & 7, (uint32_t)y & 7)] = 0xFFFFFF00u | A;
+            }
+        C3D_TexFlush(&g_fxDot);
+        C3D_TexSetFilter(&g_fxDot, GPU_LINEAR, GPU_LINEAR);
+        C3D_TexSetWrap(&g_fxDot, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+        g_fxDotOk = true;
+    }
+}
+
+void drawFx(const Camera& cam, const C3D_Mtx& view, const RenderSettings& rs, FrameCounters& fc) {
+    if (rs.effects <= 0 || !g_fxIdx || !g_fxDotOk) {
+        if (fx::global().alive()) fx::global().clear();
+        return;
+    }
+    const u64 t0 = svcGetSystemTick();
+    fx::System& sys = fx::global();
+    sys.setBudget(fx::budgetFor(rs.effects));
+    float rows[3][3];
+    for (int i = 0; i < 3; ++i) { rows[i][0] = view.r[i].x; rows[i][1] = view.r[i].y; rows[i][2] = view.r[i].z; }
+    if (rs.timeSec != g_fxLastTime) {   // once per frame (the second eye of a 3D frame reuses the quads)
+        const float dt = g_fxLastTime < 0 ? 0.0f : rs.timeSec - g_fxLastTime;
+        g_fxLastTime = rs.timeSec;
+        const fx::Budget& b = sys.budget();
+        const float range = std::max(b.emitRange, b.glowRange);
+        g_fxSources.clear();
+        for (Tile* t : streamerReadyTiles()) {
+            // the tile's square: no instance of it can be in range if the square is not
+            const float cx = (32.0f - t->ty - 0.5f) * kTileSize, cy = (32.0f - t->tx - 0.5f) * kTileSize;
+            const float ox = std::max(fabsf(cam.pos[0] - cx) - kTileSize * 0.5f, 0.0f);
+            const float oy = std::max(fabsf(cam.pos[1] - cy) - kTileSize * 0.5f, 0.0f);
+            if (ox * ox + oy * oy > range * range) continue;
+            for (const Instance& in : t->instances) {
+                const Model* m = in.model;
+                if (!m->fx || !m->drawable) continue;
+                const float dx = in.pos[0] - cam.pos[0], dy = in.pos[1] - cam.pos[1], dz = in.pos[2] - cam.pos[2];
+                if (dx * dx + dy * dy + dz * dz > range * range) continue;
+                fx::Source s;
+                s.key = &in;
+                s.owner = m;
+                s.blob = m->blob;
+                s.h = m->fx;
+                s.tex = (const void* const*)(m->tex.data() + m->fxTexBase);
+                memcpy(s.pos, in.pos, sizeof s.pos);
+                memcpy(s.rot, in.rot, sizeof s.rot);
+                s.scale = in.scale;
+                g_fxSources.push_back(s);
+            }
+        }
+        sys.frame(dt, rs.timeSec, cam.pos, rows, g_fxSources, g_fxQuads);
+        if ((int)g_fxQuads.size() > kFxMaxQuads) g_fxQuads.resize(kFxMaxQuads);
+        // alpha-blended back to front, then the additive ones by texture
+        std::stable_sort(g_fxQuads.begin(), g_fxQuads.end(), [](const fx::Quad& a, const fx::Quad& b) {
+            if (a.blend != b.blend) return a.blend == W3D_BLEND_ALPHA;
+            if (a.blend == W3D_BLEND_ALPHA) return a.c[2] < b.c[2];
+            return a.tex < b.tex;
+        });
+    }
+    const fx::Stats& st = sys.stats();
+    fc.fxParticles = st.alive;
+    fc.fxGlows = st.glows;
+    fc.fxSources = st.sources;
+    fc.fxQuads = (u32)g_fxQuads.size();
+    if (g_fxQuads.empty()) { fc.fxMs += ticksToMs(svcGetSystemTick() - t0); return; }
+
+    FxVertex* vb = g_fxVerts[g_fxRing];
+    g_fxRing = (g_fxRing + 1) % kFxBuffers;
+    if (!vb) return;
+    for (size_t i = 0; i < g_fxQuads.size(); ++i) {
+        const fx::Quad& q = g_fxQuads[i];
+        const uint8_t r = (uint8_t)(q.color & 255), g = (uint8_t)((q.color >> 8) & 255), b = (uint8_t)((q.color >> 16) & 255),
+                      a = (uint8_t)(q.color >> 24);
+        FxVertex* v = vb + i * 4;
+        v[0] = {q.c[0] - q.half, q.c[1] - q.half, q.c[2], q.u0, q.v0, r, g, b, a};
+        v[1] = {q.c[0] + q.half, q.c[1] - q.half, q.c[2], q.u1, q.v0, r, g, b, a};
+        v[2] = {q.c[0] + q.half, q.c[1] + q.half, q.c[2], q.u1, q.v1, r, g, b, a};
+        v[3] = {q.c[0] - q.half, q.c[1] + q.half, q.c[2], q.u0, q.v1, r, g, b, a};
+    }
+    GSPGPU_FlushDataCache(vb, sizeof(FxVertex) * 4 * g_fxQuads.size());
+
+    C3D_BindProgram(&g_fxSh.prog);
+    C3D_SetAttrInfo(&g_fxAttr);
+    C3D_BufInfo* buf = C3D_GetBufInfo();
+    BufInfo_Init(buf);
+    BufInfo_Add(buf, vb, sizeof(FxVertex), 3, 0x210);
+    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_fxSh.uProj, &g_proj);
+    if (rs.fog) C3D_FVUnifSet(GPU_VERTEX_SHADER, g_fxSh.uFog, g_fogX, g_fogY, 0, 0);
+    else C3D_FVUnifSet(GPU_VERTEX_SHADER, g_fxSh.uFog, 0.0f, 1.0f, 0, 0);
+    C3D_TexEnv* env = C3D_GetTexEnv(0);
+    C3D_TexEnvInit(env);
+    C3D_TexEnvSrc(env, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+    C3D_TexEnvFunc(env, C3D_Both, GPU_MODULATE);
+    resetStages(1);
+    C3D_FogGasMode(GPU_NO_FOG, GPU_PLAIN_DENSITY, false);
+    C3D_AlphaTest(true, GPU_GREATER, 2);
+    C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_COLOR);
+    C3D_CullFace(GPU_CULL_NONE);
+    size_t run = 0;
+    int boundBlend = -1;
+    const void* boundTex = (const void*)1;
+    for (size_t i = 0; i <= g_fxQuads.size(); ++i) {
+        const bool end = i == g_fxQuads.size();
+        if (!end && i > run && g_fxQuads[i].tex == g_fxQuads[run].tex && g_fxQuads[i].blend == g_fxQuads[run].blend) continue;
+        if (i > run) {
+            const fx::Quad& q = g_fxQuads[run];
+            if (q.blend != boundBlend) {
+                boundBlend = q.blend;
+                if (q.blend == W3D_BLEND_ADD) {
+                    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE, GPU_ZERO, GPU_ONE);
+                    C3D_FVUnifSet(GPU_VERTEX_SHADER, g_fxSh.uMask, 1, 1, 1, 0);
+                } else {
+                    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_ZERO, GPU_ONE);
+                    C3D_FVUnifSet(GPU_VERTEX_SHADER, g_fxSh.uMask, 0, 0, 0, 1);
+                }
+            }
+            if (q.tex != boundTex) {
+                boundTex = q.tex;
+                C3D_TexBind(0, q.tex ? &((GpuTex*)q.tex)->tex : &g_fxDot);
+                ++fc.texBinds;
+            }
+            C3D_DrawElements(GPU_TRIANGLES, (int)(i - run) * 6, C3D_UNSIGNED_SHORT, g_fxIdx + run * 6);
+            ++fc.drawCalls;
+            fc.tris += (u32)(i - run) * 2;
+        }
+        run = i;
+    }
+    C3D_AlphaTest(false, GPU_ALWAYS, 0);
+    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+    C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_ALL);
+    fc.fxMs += ticksToMs(svcGetSystemTick() - t0);
+}
+
 }  // namespace
 
 // ================================================================== API
@@ -763,6 +941,7 @@ void rendererInit() {
     initShader(g_terrainSh, terrain_shbin, terrain_shbin_size);
     initShader(g_modelSh, model_shbin, model_shbin_size);
     initShader(g_skinSh, skin_shbin, skin_shbin_size);
+    initShader(g_fxSh, fx_shbin, fx_shbin_size);
     AttrInfo_Init(&g_terrainAttr);
     AttrInfo_AddLoader(&g_terrainAttr, 0, GPU_SHORT, 4);
     AttrInfo_AddLoader(&g_terrainAttr, 1, GPU_UNSIGNED_BYTE, 4);
@@ -776,7 +955,12 @@ void rendererInit() {
     AttrInfo_AddLoader(&g_skinAttr, 1, GPU_BYTE, 4);
     AttrInfo_AddLoader(&g_skinAttr, 2, GPU_SHORT, 2);
     AttrInfo_AddLoader(&g_skinAttr, 3, GPU_UNSIGNED_BYTE, 4);
+    AttrInfo_Init(&g_fxAttr);    // FxVertex (24 bytes)
+    AttrInfo_AddLoader(&g_fxAttr, 0, GPU_FLOAT, 3);
+    AttrInfo_AddLoader(&g_fxAttr, 1, GPU_FLOAT, 2);
+    AttrInfo_AddLoader(&g_fxAttr, 2, GPU_UNSIGNED_BYTE, 4);
     g_pose.reserve(256);
+    buildFx();
     buildSky();
     buildMarker();
     buildRing();
@@ -787,6 +971,14 @@ void rendererShutdown() {
     shaderProgramFree(&g_terrainSh.prog);
     shaderProgramFree(&g_modelSh.prog);
     shaderProgramFree(&g_skinSh.prog);
+    shaderProgramFree(&g_fxSh.prog);
+    DVLB_Free(g_fxSh.dvlb);
+    for (FxVertex*& v : g_fxVerts) { if (v) linearFree(v); v = nullptr; }
+    if (g_fxIdx) linearFree(g_fxIdx);
+    g_fxIdx = nullptr;
+    if (g_fxDotOk) C3D_TexDelete(&g_fxDot);
+    g_fxDotOk = false;
+    fx::global().clear();
     DVLB_Free(g_skinSh.dvlb);
     DVLB_Free(g_terrainSh.dvlb);
     DVLB_Free(g_modelSh.dvlb);
@@ -853,6 +1045,7 @@ void rendererDraw(C3D_RenderTarget* target, const Camera& cam, const RenderSetti
     if (creatures && rs.creatures) drawCreatures(cam, view, fr, rs, *creatures, fc);
     drawWater(cam, view, fr, rs, fc);
     drawModels(cam, view, rs, true, fc);
+    drawFx(cam, view, rs, fc);
     // Drop per-frame instance pointers: tiles/models may be freed before the next frame.
     for (Model* m : g_activeModels) m->visible.clear();
     g_activeModels.clear();

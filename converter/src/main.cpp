@@ -38,6 +38,7 @@ static void usage() {
         "  --no-floors           no COLL entries at all (walking ignores building floors and walls)\n"
         "  --no-walls            COLL with floors only (walking passes through walls)\n"
         "  --no-doodad-coll      no collision of doodads (fences, tree trunks, model bridges)\n"
+        "  --no-fx               no particle emitters and lamp glows on doodads (stage 5.32)\n"
         "  --doodad-coll-tris N  collision triangle budget per doodad model (96; 0 = all)\n"
         "  --world               every tile of the map (0..63; missing ones are skipped), big packs go through a spill file\n"
         "  --creatures           add creature displays + skinned animated models (all of CreatureDisplayInfo)\n"
@@ -132,6 +133,7 @@ int main(int argc, char** argv) {
         else if (a == "--no-floors") o.noFloors = true;
         else if (a == "--no-walls") o.noWalls = true;
         else if (a == "--no-doodad-coll") o.noDoodadColl = true;
+        else if (a == "--no-fx") o.noFx = true;
         else if (a == "--doodad-coll-tris") o.doodadCollTris = std::atoi(next());
         else if (a == "--creatures") o.creatures = true;
         else if (a == "--players") o.players = true;
@@ -378,6 +380,7 @@ int main(int argc, char** argv) {
                     st.itemDisplays, st.itemLayers, st.itemLayerBytes / 1048576.0, st.itemModels, st.itemModelsFailed,
                     st.itemModelTris, st.itemHelms, st.itemCapes);
     std::printf("  winding: %zu M2 and %zu WMO submeshes flipped to match their normals\n", st.m2SubsFlipped, st.wmoSubsFlipped);
+    std::printf("  effects: %zu models with %zu particle emitters and %zu glow sprites\n", st.fxModels, st.fxEmitters, st.fxGlows);
     if (st.duplicatesSkipped) std::printf("  %zu duplicate placements skipped (same uniqueId listed by several tiles)\n", st.duplicatesSkipped);
     std::printf("  models: %zu ok, %zu failed, %zu tris total (unique)\n", st.modelsOk, st.modelsFailed, st.modelTrisTotal);
     std::printf("  placements: %zu\n", st.placements);

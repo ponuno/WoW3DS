@@ -143,6 +143,7 @@ through the Homebrew Launcher.
 Shared pool and `--all`: `converter/tests/run_pool_tests.sh <build dir>`.
 Login / character screens: `proto3ds/tests/run_glue.sh [ui.w3dp] [glue.txt]` (screenshots and input checks).
 Streaming order (a synthetic city read at SD-card speed): `proto3ds/tests/run_streaming.sh <build dir>`.
+Particles and lamp glows: `proto3ds/tests/run_fx.sh [wmo.w3dp]` (after run_wmo_tests.sh).
 Liquids: `converter/tests/run_water_tests.sh <build dir>`, `proto3ds/tests/run_swim.sh`, and `water_test` inside
 `net/tests/run_stage5.sh`.
 
