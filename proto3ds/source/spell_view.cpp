@@ -35,6 +35,7 @@ size_t SpellView::models() const {
 
 void SpellView::clear() {
     dir_.clear();
+    lasting_.clear();
     for (Model*& m : models_) {
         if (m) streamerReleaseItemModel(m);
         m = nullptr;
@@ -96,6 +97,30 @@ void SpellView::update(w3n::GameSession& g, uint32_t nowMs, const float cam[3], 
         if (e.kind == sfx::Event::Go && !e.nTargets && w.dst) { e.targets[0] = w.dst; e.nTargets = 1; }
         dir_.event(e, nowMs, cam, where);
     }
+    // what lasts on the units near the camera (stage 5.34)
+    units_.clear();
+    for (auto& [guid, o] : g.objects.all()) {
+        if (!o.hasPos || (o.type != w3n::ObjType::Unit && o.type != w3n::ObjType::Player)) continue;
+        float p[3];
+        if (o.self) { const w3n::MovementInfo& me = g.mover.info(); p[0] = me.x; p[1] = me.y; p[2] = me.z; }
+        else o.positionAt(nowMs, p, nullptr);
+        sfx::UnitState u;
+        u.guid = guid;
+        const float dx = p[0] - cam[0], dy = p[1] - cam[1], dz = p[2] - cam[2];
+        u.dist2 = dx * dx + dy * dy + dz * dz;
+        if (u.dist2 > sfx::Director::kRange * sfx::Director::kRange) continue;
+        u.player = o.type == w3n::ObjType::Player;
+        u.level = o.level();
+        u.dead = o.field(w3n::UF::UNIT_HEALTH) == 0;
+        u.lootable = (o.field(w3n::UF::UNIT_DYNAMIC_FLAGS) & 0x1) != 0;   // UNIT_DYNFLAG_LOOTABLE: for us
+        u.channel = o.field(w3n::UF::UNIT_CHANNEL_SPELL);
+        if (o.fields.size() > (size_t)w3n::UF::UNIT_FIELD_AURA + 48) {
+            u.auras = &o.fields[w3n::UF::UNIT_FIELD_AURA];
+            u.auraCount = 48;
+        }
+        units_.push_back(u);
+    }
+    lasting_.update(dir_, table_, units_, nowMs);
     dir_.update(nowMs, where, placed_);
     for (const sfx::Placed& p : placed_) {
         Model* m = modelFor(p.effect);
@@ -110,3 +135,4 @@ void SpellView::update(w3n::GameSession& g, uint32_t nowMs, const float cam[3], 
         out.push_back(sm);
     }
 }
+

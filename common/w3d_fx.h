@@ -68,30 +68,35 @@ static inline const W3dFxHeader* w3d_model_fx(const uint8_t* blob, uint32_t size
     return h;
 }
 
-// ---------------------------------------------------------------- spell visuals (stage 5.33)
+// ---------------------------------------------------------------- spell visuals (stage 5.33, 5.34)
 // One SVFX entry (id 0) in the pool: what a spell shows, from Spell.dbc -> SpellVisual.dbc -> SpellVisualKit.dbc ->
-// SpellVisualEffectName.dbc. Each visual has four stages - precast (while casting), cast (when it goes off), impact (on
-// each target) and missile (flying from the caster to each target) - with up to two effect models each, hung on a point
-// of the unit. The models are ordinary MODL entries (static mesh + particles + glows at the end of the blob).
-#define W3D_SVFX_MAGIC 0x58465653u   // 'SVFX'
-enum W3dSpellStage { W3D_SFX_PRECAST = 0, W3D_SFX_CAST = 1, W3D_SFX_IMPACT = 2, W3D_SFX_MISSILE = 3 };
+// SpellVisualEffectName.dbc. Each visual has six stages - precast (while casting), cast (when it goes off), impact (on
+// each target), missile (flying from the caster to each target), state (looping on a unit while the aura is on it) and
+// channel (looping on the caster while it channels) - with up to two effect models each, hung on a point of the unit.
+// The models are ordinary MODL entries (static mesh + particles + glows at the end of the blob). Two more effects are not
+// spells: the level-up flash (Spells\LevelUp\LevelUp.m2) and the sparkle of a lootable corpse (Particles\LootFX.m2).
+#define W3D_SVFX_MAGIC 0x32465653u   // 'SVF2' (stage 5.34; 'SVFX' of 5.33 had four stages and is not read)
+enum W3dSpellStage { W3D_SFX_PRECAST = 0, W3D_SFX_CAST = 1, W3D_SFX_IMPACT = 2, W3D_SFX_MISSILE = 3, W3D_SFX_STATE = 4,
+                     W3D_SFX_CHANNEL = 5, W3D_SFX_STAGES = 6 };
 enum W3dSpellSlot {               // where on the unit (SpellVisualKit's effect columns)
     W3D_SLOT_NONE = 0, W3D_SLOT_HEAD = 1, W3D_SLOT_CHEST = 2, W3D_SLOT_BASE = 3, W3D_SLOT_LHAND = 4, W3D_SLOT_RHAND = 5
 };
+#define W3D_SFX_NONE 0xFFFFu
 typedef struct {
     uint32_t magic;               // W3D_SVFX_MAGIC
     uint32_t effectCount, visualCount, spellCount;
     uint32_t offEffects, offVisuals, offSpells;   // from the start of the entry
-} W3dSpellFxHeader;               // 28 bytes
+    uint16_t levelUp, loot;       // effect indices of the level-up flash and the loot sparkle (W3D_SFX_NONE: none)
+} W3dSpellFxHeader;               // 32 bytes
 typedef struct {
     uint32_t model;               // MODL id
     float scale;                  // SpellVisualEffectName scale (1 when absent)
 } W3dSpellEffect;                 // 8 bytes
 typedef struct {
     uint32_t id;                  // SpellVisual id
-    uint16_t effect[4][2];        // index into the effect table per stage, 0xFFFF = none
-    uint8_t slot[4][2];           // W3dSpellSlot of each
-} W3dSpellVisual;                 // 28 bytes, sorted by id
+    uint16_t effect[W3D_SFX_STAGES][2];   // index into the effect table per stage, W3D_SFX_NONE = none
+    uint8_t slot[W3D_SFX_STAGES][2];      // W3dSpellSlot of each
+} W3dSpellVisual;                 // 40 bytes, sorted by id
 typedef struct {
     uint32_t spell;               // Spell.dbc id
     uint16_t visual;              // index into the visual table

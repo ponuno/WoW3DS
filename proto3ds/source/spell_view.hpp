@@ -3,6 +3,7 @@
 // the renderer (rendererUnitPoint) or, for a unit not drawn, from its position and size. Out: SceneModels for
 // rendererDraw's effects list (mesh + particles + glows).
 #pragma once
+#include <unordered_map>
 #include <vector>
 
 #include "game.hpp"
@@ -20,9 +21,12 @@ public:
     const sfx::Stats& stats() const { return dir_.stats(); }
     size_t active() const { return dir_.active(); }
     size_t models() const;
+    const sfx::Lasting& lasting() const { return lasting_; }
 
 private:
     Model* modelFor(uint16_t effect);
+    sfx::Lasting lasting_;        // stage 5.34: auras, channels, loot sparkles, level-up
+    std::vector<sfx::UnitState> units_;
     sfx::Table table_;
     sfx::Director dir_;
     std::vector<Model*> models_;  // by effect index (null = not acquired yet)

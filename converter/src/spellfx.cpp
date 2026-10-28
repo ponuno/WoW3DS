@@ -92,17 +92,20 @@ bool convertSpellEffects(const Options& oIn, const DataDir& data, PackWriter& pa
         if (n) kits[svk.u32(r, 0)] = k;
     }
     // ---- SpellVisual: four stages
-    struct Vis { uint32_t id; KitFx st[4]; };
+    struct Vis { uint32_t id; KitFx st[W3D_SFX_STAGES]; };
     std::map<uint32_t, Vis> visuals;
     std::set<uint32_t> missileVisuals;
     for (uint32_t r = 0; r < sv.records; ++r) {
         Vis v{};
         v.id = sv.u32(r, 0);
         bool any = false;
-        const uint32_t kitCol[3] = {1, 2, 3};
-        for (int s = 0; s < 3; ++s) {
-            auto it = kits.find(sv.u32(r, kitCol[s]));
-            if (it != kits.end()) { v.st[s] = it->second; any = true; }
+        // 1 precast, 2 cast, 3 impact kit; 4 state kit (the aura on a unit), 6 channel kit (stage 5.34)
+        const struct { uint32_t col; int stage; } kitCol[5] = {{1, W3D_SFX_PRECAST}, {2, W3D_SFX_CAST}, {3, W3D_SFX_IMPACT},
+                                                                {4, W3D_SFX_STATE}, {6, W3D_SFX_CHANNEL}};
+        for (const auto& kc : kitCol) {
+            if (kc.col >= sv.fields) continue;
+            auto it = kits.find(sv.u32(r, kc.col));
+            if (it != kits.end()) { v.st[kc.stage] = it->second; any = true; }
         }
         const uint32_t mis = sv.u32(r, 8);
         if (mis && names.count(mis)) {
@@ -152,6 +155,17 @@ bool convertSpellEffects(const Options& oIn, const DataDir& data, PackWriter& pa
                 effectIndex[e] = (uint16_t)effects.size();
                 effects.push_back({id, scale});
             }
+    // ---- two effects that are not spells (stage 5.34): the level-up flash and the loot sparkle (paths as WoWee's
+    // levelup_effect / loot_sparkles)
+    auto special = [&](const char* gamePath) -> uint16_t {
+        if (effects.size() >= 0xFFFE) return W3D_SFX_NONE;
+        const uint32_t id = addModelFromGame(pack, data, gamePath, o, st);
+        if (!id) return W3D_SFX_NONE;
+        effects.push_back({id, 1.0f});
+        return (uint16_t)(effects.size() - 1);
+    };
+    const uint16_t levelUp = special("Spells\\LevelUp\\LevelUp.m2");
+    const uint16_t loot = special("Particles\\LootFX.m2");
     // ---- the table
     std::vector<W3dSpellVisual> outVis;
     std::map<uint32_t, uint16_t> visIndex;
@@ -160,9 +174,9 @@ bool convertSpellEffects(const Options& oIn, const DataDir& data, PackWriter& pa
         W3dSpellVisual o2{};
         o2.id = v;
         bool any = false;
-        for (int s = 0; s < 4; ++s)
+        for (int s = 0; s < W3D_SFX_STAGES; ++s)
             for (int k = 0; k < 2; ++k) {
-                o2.effect[s][k] = 0xFFFF;
+                o2.effect[s][k] = W3D_SFX_NONE;
                 const uint32_t e = src.st[s].effect[k];
                 auto it = e ? effectIndex.find(e) : effectIndex.end();
                 if (it == effectIndex.end() || it->second == 0xFFFF) continue;
@@ -201,9 +215,12 @@ bool convertSpellEffects(const Options& oIn, const DataDir& data, PackWriter& pa
     hp->offEffects = (uint32_t)oe;
     hp->offVisuals = (uint32_t)ov;
     hp->offSpells = (uint32_t)os;
+    hp->levelUp = levelUp;
+    hp->loot = loot;
     pack.add(W3D_ENTRY_SPELLFX, 0, std::move(b.data));
-    progressDone("spell effects: %zu spells, %zu visuals, %zu effect models (%zu failed), missile speed column %d", outSpells.size(),
-                 outVis.size(), effects.size(), failed, spCol);
+    progressDone("spell effects: %zu spells, %zu visuals, %zu effect models (%zu failed), missile speed column %d, level-up %s, loot %s",
+                 outSpells.size(), outVis.size(), effects.size(), failed, spCol, levelUp != W3D_SFX_NONE ? "yes" : "no",
+                 loot != W3D_SFX_NONE ? "yes" : "no");
     return true;
 }
 

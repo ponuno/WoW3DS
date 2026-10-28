@@ -209,6 +209,74 @@ int main(int argc, char** argv) {
     d.update(now, where, out);
     CHECK(out.empty(), "and are dropped after lingering");
 
+    // ---- stage 5.34: what lasts - an aura, a channel, a corpse to loot, a level gained
+    d.clear();
+    CHECK(t.levelUp() != W3D_SFX_NONE && t.loot() != W3D_SFX_NONE, "the level-up flash and the loot sparkle are in the table");
+    sfx::Lasting L;
+    units[10] = {{3, 0, 0}, 0};
+    units[11] = {{4, 2, 0}, 0};
+    units[12] = {{5, -2, 0}, 0};
+    uint32_t aurasOf10[48] = {};
+    aurasOf10[3] = 17;   // Power Word: Shield (its state kit: at the feet)
+    std::vector<sfx::UnitState> us(3);
+    us[0].guid = 10; us[0].dist2 = 9; us[0].auras = aurasOf10; us[0].auraCount = 48; us[0].player = true; us[0].level = 10;
+    us[1].guid = 11; us[1].dist2 = 20; us[1].channel = 689;   // Drain Life
+    us[2].guid = 12; us[2].dist2 = 29; us[2].dead = true; us[2].lootable = true;
+    auto stageCount = [&](int stage, uint64_t* atUnit = nullptr) {
+        int n = 0;
+        for (const sfx::Placed& p : out) if (p.stage == stage && p.emitting) { ++n; (void)atUnit; }
+        return n;
+    };
+    L.update(d, t, us, now);
+    d.update(now, where, out);
+    CHECK(L.auras() == 1 && L.channels() == 1 && L.loot() == 1, "an aura, a channel, a sparkle (%zu %zu %zu)", L.auras(), L.channels(), L.loot());
+    CHECK(stageCount(W3D_SFX_STATE) == 2, "the shield and the sparkle loop (%d)", stageCount(W3D_SFX_STATE));
+    CHECK(stageCount(W3D_SFX_CHANNEL) == 1, "the channel in the hand (%d)", stageCount(W3D_SFX_CHANNEL));
+    for (int f = 0; f < 120; ++f) { now += 33; L.update(d, t, us, now); d.update(now, where, out); }
+    CHECK(stageCount(W3D_SFX_STATE) == 2 && stageCount(W3D_SFX_CHANNEL) == 1, "they last (4 s later)");
+    // the aura goes, the channel ends, the corpse was looted, the player gains a level
+    aurasOf10[3] = 0;
+    us[1].channel = 0;
+    us[2].lootable = false;
+    us[0].level = 11;
+    L.update(d, t, us, now);
+    d.update(now, where, out);
+    CHECK(stageCount(W3D_SFX_STATE) == 0 && stageCount(W3D_SFX_CHANNEL) == 0, "aura, channel and sparkle end with their cause");
+    CHECK(L.levelUps() == 1 && stageCount(W3D_SFX_CAST) == 1, "the level-up flash");
+    now += 4600;   // the flash: 3 s, then 1.5 s of fading
+    L.update(d, t, us, now);
+    d.update(now, where, out);
+    CHECK(out.empty(), "and all of it fades (%zu left)", out.size());
+    // a crowd: 30 shielded units, at most 12 shields (the nearest)
+    std::vector<sfx::UnitState> crowd(30);
+    for (int k = 0; k < 30; ++k) {
+        units[200 + k] = {{(float)k, 1, 0}, 0};
+        crowd[k].guid = 200 + k; crowd[k].dist2 = (float)(k * k); crowd[k].auras = &aurasOf10[0]; crowd[k].auraCount = 48;
+    }
+    aurasOf10[0] = 17;
+    L.update(d, t, crowd, now);
+    d.update(now, where, out);
+    CHECK(L.auras() == sfx::Lasting::kMaxAuras && stageCount(W3D_SFX_STATE) == (int)sfx::Lasting::kMaxAuras, "at most %zu auras (%zu)",
+          sfx::Lasting::kMaxAuras, L.auras());
+    bool nearest = true;
+    for (const sfx::Placed& p : out) nearest &= p.pos[0] < 12.0f;
+    CHECK(nearest, "the nearest ones");
+    // out of sight: a unit the resolver cannot place drops its loop, which starts again when it is back
+    units[200].here = false;
+    now += 33;
+    L.update(d, t, crowd, now);
+    d.update(now, where, out);
+    units[200].here = true;
+    now += 1600;
+    L.update(d, t, crowd, now);
+    d.update(now, where, out);
+    now += 33;
+    L.update(d, t, crowd, now);
+    d.update(now, where, out);
+    bool back = false;
+    for (const sfx::Placed& p : out) back |= p.stage == W3D_SFX_STATE && p.emitting && fabsf(p.pos[0]) < 0.01f;
+    CHECK(back, "a loop dropped while its unit was away starts again");
+
     printf("SPELL FX: %d checks, %d failed -> %s\n", checks, fails, fails ? "FAILED" : "PASS");
     return fails ? 1 : 0;
 }

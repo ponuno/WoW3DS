@@ -50,6 +50,7 @@ rows += [spell(s, "Fireball", 10, 20) for s in fireballs]
 rows += [spell(116, "Frostbolt", 11, 28)]
 rows += [spell(s, "Heal", 12, 0) for s in heals]
 rows += [spell(585, "Smite", 13, 0)]
+rows += [spell(17, "Power Word: Shield", 14, 0), spell(689, "Drain Life", 15, 0)]   # stage 5.34: an aura, a channel
 dbc("Spell.dbc", 173, rows)
 
 # ---- SpellVisual: id, precast kit, cast kit, impact kit, state, statedone, channel, has missile, missile model, ...
@@ -58,6 +59,8 @@ dbc("SpellVisual.dbc", 16, [
     [11, 0, 0, 0, 0, 0, 0, 1, 1007],
     [12, 103, 0, 104],
     [13, 0, 0, 105],
+    [14, 0, 0, 0, 106],               # state kit (column 4): the shield around the unit while the aura lasts
+    [15, 0, 0, 0, 0, 0, 107],         # channel kit (column 6): in the hands while channelling
 ])
 # ---- SpellVisualKit: id, start anim, anim, head 3, chest 4, base 5, left hand 6, right hand 7, breath 8, weapons 9/10,
 #      special 11..13, world 14, sound 15
@@ -67,7 +70,8 @@ def kit(kid, **eff):
     for k, v in eff.items(): r[cols[k]] = v
     return r
 dbc("SpellVisualKit.dbc", 20, [kit(100, lhand=1001, rhand=1001), kit(101, base=1002), kit(102, chest=1004),
-                               kit(103, special=1005), kit(104, base=1006), kit(105, chest=1009)])
+                               kit(103, special=1005), kit(104, base=1006), kit(105, chest=1009),
+                               kit(106, base=1010), kit(107, rhand=1011)])
 # ---- SpellVisualEffectName: id, name, file, area effect size, scale
 dbc("SpellVisualEffectName.dbc", 5, [
     [1001, "FireHand", "Spells\\Fire_Hand.mdx", 0.0, 1.0],
@@ -78,6 +82,8 @@ dbc("SpellVisualEffectName.dbc", 5, [
     [1006, "HolyImpact", "Spells\\Holy_Impact_Base.mdx", 0.0, 1.0],
     [1007, "Frostbolt", "Spells\\Frostbolt_Missile.mdx", 0.0, 1.0],
     [1009, "Smite", "Spells\\Missing_Model.mdx", 0.0, 1.0],
+    [1010, "Shield", "Spells\\Shield_State_Base.mdx", 0.0, 1.0],
+    [1011, "DrainLife", "Spells\\Shadow_Channel_Hand.mdx", 0.0, 1.0],
 ])
 
 # ---- the effect models: a small additive quad and one emitter each (a glow card on the fireball)
@@ -100,7 +106,18 @@ effect("Fire_Impact_Chest", dict(fire, rate=60.0, type=2, speed=3.0))
 effect("Holy_Precast_Chest", dict(fire, colors=[(255, 255, 200, 255), (255, 240, 160, 180), (200, 180, 80, 0)]))
 effect("Holy_Impact_Base", dict(fire, rate=25.0))
 effect("Frostbolt_Missile", dict(fire, colors=[(180, 220, 255, 255), (120, 180, 255, 200), (40, 80, 160, 0)]))
+effect("Shield_State_Base", dict(fire, rate=15.0, type=2, areaL=1.0))
+effect("Shadow_Channel_Hand", dict(fire, colors=[(120, 40, 160, 255), (80, 20, 120, 200), (20, 0, 40, 0)]))
+# the level-up flash and the loot sparkle (not spells: fixed paths)
+def special(rel, name):
+    q = [(-0.2, 0.0, 0.0), (0.2, 0.0, 0.0), (0.2, 0.0, 0.4), (-0.2, 0.0, 0.4)]
+    v = [(p, (255, 0, 0, 0), (0, 0, 0, 0), (0, -1, 0), (0.0, 0.0)) for p in q]
+    m = m2(name, v, [0, 1, 2, 0, 2, 3], [(0, 0, 6)], [(0, 0, 0)], [(0, "Spells\\Fire.blp")], [0], [(0, 3)],
+           [(-1, (0, 0, 0), {})], [(0, 0, 0, 1000, 0.0)], [], emitters=[dict(fire, rate=20.0)])
+    open(path(rel), "wb").write(m)
+special("Spells\\LevelUp\\LevelUp.m2", "LevelUp")
+special("Particles\\LootFX.m2", "LootFX")
 
 json.dump({"fireballs": fireballs, "heals": heals, "frostbolt": 116, "smite": 585, "speed_column": SPEED,
-           "visuals": 3, "spells": len(fireballs) + len(heals) + 1, "models": 7, "failed": 1}, open(expect_path, "w"), indent=1)
+           "visuals": 5, "spells": len(fireballs) + len(heals) + 3, "models": 11, "failed": 1}, open(expect_path, "w"), indent=1)
 print("spell fx data written to", out)

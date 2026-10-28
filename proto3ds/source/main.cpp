@@ -286,6 +286,9 @@ static void writeReport(const Bench* b, float drawDist, const RenderSettings& rs
                    "skipped: %lu too far, %lu over the limit\n", g_spellViewPtr->loaded() ? "loaded" : "NOT in the pack (convert again)",
                 (unsigned long)ss.started, (unsigned long)ss.missiles, (unsigned long)ss.impacts, (unsigned long)g_spellViewPtr->models(),
                 (unsigned long)ss.skippedFar, (unsigned long)ss.skippedFull);
+        const sfx::Lasting& la = g_spellViewPtr->lasting();
+        fprintf(f, "  lasting (stage 5.34): now %lu auras, %lu channels, %lu loot sparkles; level-up flashes %lu\n",
+                (unsigned long)la.auras(), (unsigned long)la.channels(), (unsigned long)la.loot(), (unsigned long)la.levelUps());
     }
     fprintf(f, "effects (stage 5.32, level %d): %lu frames with particles / glows, CPU avg %.2f ms, max %.2f ms; peak %lu quads, %lu particles\n\n",
             rs.effects, (unsigned long)g_report.fxFrames, g_report.fxFrames ? g_report.fxMs / g_report.fxFrames : 0.0, g_report.fxPeakMs,

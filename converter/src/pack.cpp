@@ -474,11 +474,18 @@ int printPackInfo(const std::string& path) {
             size_t missiles = 0;
             for (uint32_t k = 0; k < h.visualCount; ++k) {
                 if (k && vi[k].id <= vi[k - 1].id) return fail("spell visuals not sorted");
-                for (int s = 0; s < 4; ++s)
+                for (int s = 0; s < W3D_SFX_STAGES; ++s)
                     for (int j = 0; j < 2; ++j)
                         if (vi[k].effect[s][j] != 0xFFFF && vi[k].effect[s][j] >= h.effectCount) return fail("spell visual effect index");
                 missiles += vi[k].effect[W3D_SFX_MISSILE][0] != 0xFFFF;
             }
+            size_t states = 0, channels = 0;
+            for (uint32_t k = 0; k < h.visualCount; ++k) {
+                states += vi[k].effect[W3D_SFX_STATE][0] != W3D_SFX_NONE;
+                channels += vi[k].effect[W3D_SFX_CHANNEL][0] != W3D_SFX_NONE;
+            }
+            if ((h.levelUp != W3D_SFX_NONE && h.levelUp >= h.effectCount) || (h.loot != W3D_SFX_NONE && h.loot >= h.effectCount))
+                return fail("spell fx special effect index");
             size_t withSpeed = 0;
             for (uint32_t k = 0; k < h.spellCount; ++k) {
                 if (k && sr[k].spell <= sr[k - 1].spell) return fail("spell refs not sorted");
@@ -487,6 +494,8 @@ int printPackInfo(const std::string& path) {
             }
             std::printf("  spell fx: %u spells (%zu with a missile speed), %u visuals (%zu with a missile), %u effect models\n",
                         h.spellCount, withSpeed, h.visualCount, missiles, h.effectCount);
+            std::printf("  spell fx: %zu auras, %zu channels, level-up %s, loot sparkle %s\n", states, channels,
+                        h.levelUp != W3D_SFX_NONE ? "yes" : "no", h.loot != W3D_SFX_NONE ? "yes" : "no");
         } else if (e[i].type == W3D_ENTRY_COLLISION) {
             W3dCollHeader c; std::memcpy(&c, p, sizeof c);
             uint64_t cells = (uint64_t)c.gridN * c.gridN + 1;

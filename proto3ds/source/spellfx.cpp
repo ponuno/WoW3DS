@@ -75,6 +75,46 @@ void Director::startStage(const W3dSpellVisual* v, int stage, uint64_t unit, uin
     }
 }
 
+uint32_t Director::startEffect(uint16_t effect, uint64_t unit, uint8_t slot, uint32_t nowMs, uint32_t durMs, uint8_t stage) {
+    const W3dSpellEffect* ef = table_ ? table_->effect(effect) : nullptr;
+    if (!ef) return 0;
+    Active a{};
+    a.effect = effect;
+    a.stage = stage;
+    a.slot = slot;
+    a.unit = unit;
+    a.startMs = nowMs;
+    a.endMs = nowMs + durMs;
+    a.scale = ef->scale;
+    a.impact[0] = a.impact[1] = W3D_SFX_NONE;
+    return add(a) ? active_.back().key : 0;
+}
+
+int Director::startLoop(const W3dSpellVisual* v, int stage, uint64_t unit, uint32_t nowMs, uint32_t keys[2]) {
+    keys[0] = keys[1] = 0;
+    if (!v || stage < 0 || stage >= W3D_SFX_STAGES) return 0;
+    int n = 0;
+    for (int k = 0; k < 2; ++k) {
+        if (v->effect[stage][k] == W3D_SFX_NONE) continue;
+        uint8_t slot = v->slot[stage][k];
+        if (slot == W3D_SLOT_NONE) slot = W3D_SLOT_CHEST;
+        keys[k] = startEffect(v->effect[stage][k], unit, slot, nowMs, 0x40000000u, (uint8_t)stage);   // until stopped
+        n += keys[k] != 0;
+    }
+    return n;
+}
+
+void Director::stop(uint32_t key, uint32_t nowMs) {
+    for (Active& a : active_)
+        if (a.key == key && (int32_t)(nowMs - a.endMs) < 0) a.endMs = nowMs;
+}
+
+bool Director::running(uint32_t key) const {
+    for (const Active& a : active_)
+        if (a.key == key) return true;
+    return false;
+}
+
 void Director::event(const Event& ev, uint32_t nowMs, const float cam[3], const Resolver& where) {
     if (!table_ || !table_->loaded()) return;
     float speed = 0;
@@ -204,6 +244,75 @@ void Director::update(uint32_t nowMs, const Resolver& where, std::vector<Placed>
         }
     }
     stats_.active = (uint32_t)active_.size();
+}
+
+// ------------------------------------------------------------------ lasting effects (stage 5.34)
+// One per unit and kind: started when the spell appears, stopped when it changes or goes; a loop the director dropped
+// (its unit was out of sight for a moment) starts again.
+void Lasting::set(Director& d, const Table& t, std::unordered_map<uint64_t, Loop>& m, uint64_t guid, uint32_t spell, int stage,
+                  uint32_t nowMs) {
+    Loop& l = m[guid];
+    l.frame = frame_;
+    const bool alive = (l.keys[0] && d.running(l.keys[0])) || (l.keys[1] && d.running(l.keys[1]));
+    if (l.spell == spell && alive) return;
+    for (uint32_t& k : l.keys) { if (k) d.stop(k, nowMs); k = 0; }
+    l.spell = spell;
+    if (stage < 0) {   // the loot sparkle: not a spell
+        l.keys[0] = d.startEffect(t.loot(), guid, W3D_SLOT_BASE, nowMs, 0x40000000u, W3D_SFX_STATE);
+        return;
+    }
+    const W3dSpellVisual* v = t.visualOf(spell, nullptr);
+    if (!v) return;
+    int st = stage;
+    if (stage == W3D_SFX_CHANNEL && v->effect[W3D_SFX_CHANNEL][0] == W3D_SFX_NONE) st = W3D_SFX_PRECAST;   // no channel kit
+    d.startLoop(v, st, guid, nowMs, l.keys);
+}
+
+void Lasting::update(Director& d, const Table& t, const std::vector<UnitState>& units, uint32_t nowMs) {
+    ++frame_;
+    if (!t.loaded()) return;
+    struct Cand { float d2; uint64_t guid; uint32_t aura, channel; bool loot; };
+    static std::vector<Cand> cand;
+    cand.clear();
+    for (const UnitState& u : units) {
+        if (u.player) {   // the level-up flash: a player whose level rose
+            auto it = levels_.find(u.guid);
+            if (it != levels_.end() && it->second && u.level > it->second && t.levelUp() != W3D_SFX_NONE &&
+                u.dist2 < Director::kRange * Director::kRange) {
+                if (d.startEffect(t.levelUp(), u.guid, W3D_SLOT_BASE, nowMs, 3000, W3D_SFX_CAST)) ++levelUps_;
+            }
+            if (u.level) levels_[u.guid] = u.level;
+        }
+        if (u.dist2 > kRange * kRange) continue;
+        Cand c{u.dist2, u.guid, 0, 0, false};
+        if (!u.dead) {
+            for (int k = 0; k < u.auraCount && !c.aura; ++k) {   // the first aura that shows something while it lasts
+                const W3dSpellVisual* v = u.auras[k] ? t.visualOf(u.auras[k], nullptr) : nullptr;
+                if (v && v->effect[W3D_SFX_STATE][0] != W3D_SFX_NONE) c.aura = u.auras[k];
+            }
+            if (u.channel && t.visualOf(u.channel, nullptr)) c.channel = u.channel;
+        } else {
+            c.loot = u.lootable && t.loot() != W3D_SFX_NONE;
+        }
+        if (c.aura || c.channel || c.loot) cand.push_back(c);
+    }
+    std::sort(cand.begin(), cand.end(), [](const Cand& a, const Cand& b) { return a.d2 < b.d2; });
+    size_t na = 0, nl = 0;
+    for (const Cand& c : cand) {
+        if (c.aura && na < kMaxAuras) { set(d, t, auras_, c.guid, c.aura, W3D_SFX_STATE, nowMs); ++na; }
+        if (c.channel) set(d, t, channels_, c.guid, c.channel, W3D_SFX_CHANNEL, nowMs);
+        if (c.loot && nl < kMaxLoot) { set(d, t, loot_, c.guid, 1, -1, nowMs); ++nl; }
+    }
+    for (auto* m : {&auras_, &channels_, &loot_})   // what was not seen this frame: over
+        for (auto it = m->begin(); it != m->end();) {
+            if (it->second.frame != frame_) {
+                for (uint32_t k : it->second.keys) if (k) d.stop(k, nowMs);
+                it = m->erase(it);
+            } else {
+                ++it;
+            }
+        }
+    if (levels_.size() > 512) levels_.clear();
 }
 
 }  // namespace sfx
