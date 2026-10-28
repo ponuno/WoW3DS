@@ -37,6 +37,9 @@ struct HudInput {
     const HudPadView* pad = nullptr;      // Forever scheme: bars at the bottom right, aim ring, interact prompt
     bool questTracker = false;            // stage 5.14: objectives of the quest log (UI stage 2: right, under the buffs)
     bool dim = true;                      // UI stage 2: frames fade out of combat
+    bool showStats = false;               // 5.35e: FPS and ping at the bottom centre
+    float fps = 0;
+    uint32_t pingMs = 0;                  // the last pong (0 = none yet)
 };
 
 // Fills 'out' (cleared first) for the current frame.

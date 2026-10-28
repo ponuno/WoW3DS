@@ -909,6 +909,8 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
                 case 51: in.cfg->camSpeed = std::min(4.5f, in.cfg->camSpeed + 0.3f); break;
                 case 60: in.cfg->questTracker = true; break;
                 case 61: in.cfg->questTracker = false; break;
+                case 180: in.cfg->showStats = true; break;
+                case 181: in.cfg->showStats = false; break;
                 case 70: case 71: case 72: case 73: in.cfg->drawDist = arg - 70; out.graphicsChanged = true; break;
                 case 80: case 81: case 82: case 83: in.cfg->crowd = arg - 80; out.graphicsChanged = true; break;
                 case 95: case 96: case 97: in.cfg->topMode = arg - 95; out.graphicsChanged = true; break;

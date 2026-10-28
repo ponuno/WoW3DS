@@ -1381,6 +1381,9 @@ int main() {
             hi.pad = &pv;
             hi.questTracker = padCfg.questTracker;
             hi.dim = padCfg.dimHud;
+            hi.showStats = padCfg.showStats;
+            hi.fps = fps;
+            hi.pingMs = g_login.latencyMs();
             hudBuildGame(hud, hi);
         } else {
             hud.clear();

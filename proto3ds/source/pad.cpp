@@ -43,6 +43,7 @@ bool PadConfig::load(const char* path) {
         else if (!strcmp(key, "crowd") && v >= 0 && v <= 3) crowd = (int)v;
         else if (!strcmp(key, "topmode") && v >= 0 && v <= 2) topMode = (int)v;
         else if (!strcmp(key, "doodads")) doodads = v != 0;
+        else if (!strcmp(key, "stats")) showStats = v != 0;
         else if (!strcmp(key, "effects")) effects = v < 0 ? 0 : v > 2 ? 2 : v;
         else if (!strcmp(key, "bigtext")) bigText = v != 0;
         else if (!strcmp(key, "dimhud")) dimHud = v != 0;
@@ -63,7 +64,8 @@ bool PadConfig::save(const char* path) const {
             toggleModifiers ? 1 : 0, invertY ? 1 : 0, camSpeed, questTracker ? 1 : 0);
     fprintf(f, "lang %d\ndist %d\ncrowd %d\ndoodads %d\nbigtext %d\ndimhud %d\nautotabs %d\n", lang, drawDist, crowd, doodads ? 1 : 0,
             bigText ? 1 : 0, dimHud ? 1 : 0, autoTabs ? 1 : 0);
-    fprintf(f, "music %d\nsfx %d\nambience %d\ntopmode %d\neffects %d\n", musicVol, sfxVol, ambVol, topMode, effects);
+    fprintf(f, "music %d\nsfx %d\nambience %d\ntopmode %d\neffects %d\nstats %d\n", musicVol, sfxVol, ambVol, topMode, effects,
+            showStats ? 1 : 0);
     fclose(f);
     return true;
 }

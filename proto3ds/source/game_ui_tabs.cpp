@@ -927,6 +927,10 @@ void GameUi::drawSettings(const Input& in) {
         label(tr("Quest on top", "Квест сверху"));
         opt(120, 96, tr("On", "Вкл"), c.questTracker, 60);
         opt(220, 96, tr("Off", "Выкл"), !c.questTracker, 61);
+        y += 22;
+        label(tr("FPS / ping", "FPS / пинг"));   // 5.35e: small, at the bottom of the top screen
+        opt(120, 96, tr("On", "Вкл"), c.showStats, 180);
+        opt(220, 96, tr("Off", "Выкл"), !c.showStats, 181);
     }
     if (subSettings_ == 1) return;   // 8 rows since the particles (stage 5.32): Debug / Quit stay on the other pages and in START
     const int by = kTabY - 24;

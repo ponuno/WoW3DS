@@ -1,3 +1,4 @@
+#include <string.h>
 #include "hud_game.hpp"
 
 #include <ctype.h>
@@ -415,4 +416,23 @@ void hudBuildGame(HudList& l, const HudInput& in) {
             l.text(32, 162, t, kGrey);
         }
     }
+    // ---- 5.35e: FPS and ping, small, at the bottom centre (never dimmed)
+    if (in.showStats) {
+        l.fade = 255;
+        char t[40];
+        if (in.pingMs) snprintf(t, sizeof t, "%.0f FPS  %lu ms", in.fps, (unsigned long)in.pingMs);
+        else snprintf(t, sizeof t, "%.0f FPS  -- ms", in.fps);
+        const int w = HudList::width(t), h = HudList::lineHeight();
+        const int y = kHudH - h - 2;
+        l.rect(kHudW / 2 - w / 2 - 3, y - 1, w + 6, h + 2, hudRgba(0, 0, 0, 110));
+        const uint32_t pc = !in.pingMs ? kGrey : in.pingMs < 120 ? hudRgba(120, 230, 120) : in.pingMs < 250 ? hudRgba(240, 210, 80)
+                                                                                                   : hudRgba(255, 90, 80);
+        // FPS white, ping coloured by how good it is
+        char f[16];
+        snprintf(f, sizeof f, "%.0f FPS  ", in.fps);
+        const int x0 = kHudW / 2 - w / 2;
+        const int fw = l.text(x0, y, f, kWhite);
+        l.text(x0 + fw, y, t + strlen(f), pc);
+    }
+
 }
