@@ -18,6 +18,8 @@
 //   --say TEXT send a chat line after 1 s (repeatable; "/w Name text", "/y text" ... as on the 3DS)
 //   --log F    record the in-world packets (both directions) for --replay
 //   --out F    also write everything printed to F
+//   --create NAME:race:class:gender[:skin:face:hairstyle:haircolour:facial]   create a character first (stage 5.29)
+//   --delete NAME   delete that character first
 #include "../game.hpp"
 
 #include <algorithm>
@@ -861,6 +863,7 @@ int main(int argc, char** argv) {
     std::vector<std::string> sayLines;
     std::vector<uint32_t> castList;   // --cast ID (repeatable): one cast per second once the previous one ended
     std::string spellsFile;           // --spells FILE (spells.txt of w3dconv)
+    std::string createSpec, deleteName;   // --create / --delete (stage 5.29)
     std::string fightName;
     ClientVersion ver;
     for (int i = 3; i < argc; ++i) {
@@ -884,6 +887,8 @@ int main(int argc, char** argv) {
         else if (a == "--log") logPath = next();
         else if (a == "--objects") maxList = atoi(next().c_str());
         else if (a == "--out") outPath = next();
+        else if (a == "--create") createSpec = next();
+        else if (a == "--delete") deleteName = next();
         else if (password.empty()) password = a;
     }
     if (password.empty()) {
@@ -934,10 +939,52 @@ int main(int argc, char** argv) {
     const Timings& wt = world.timings();
     say("world session: connect %.0f ms, auth %.0f ms, character list %.0f ms\n", wt.worldConnect, wt.worldAuth,
                 wt.charEnum);
+    auto listChars = [&] {
+        const auto& cs = world.characters();
+        for (size_t i = 0; i < cs.size(); ++i) {
+            const Character& c = cs[i];
+            say("  [%zu] %-12s level %2u %s %s, map %u (%.1f, %.1f, %.1f) look %u %u %u %u %u %u", i, c.name.c_str(), c.level,
+                raceName(c.race), className(c.cls), c.map, c.x, c.y, c.z, c.gender, c.skin, c.face, c.hairStyle, c.hairColor,
+                c.facialHair);
+            for (int k = 0; k < 20; ++k)
+                if (c.equipDisplay[k]) say(" eq%d=%u/%u", k, c.equipDisplay[k], c.equipInv[k]);
+            say("\n");
+        }
+    };
+    listChars();
+    auto waitList = [&] {
+        waitUntil([&] { return world.state() == WorldClient::State::CharSelect || world.state() == WorldClient::State::Failed; },
+                  [&] { world.update(); });
+    };
+    if (!createSpec.empty()) {   // NAME:race:class:gender[:skin:face:hs:hc:fh]
+        CharCreateInfo ci;
+        std::vector<std::string> f;
+        size_t a = 0;
+        for (size_t b; (b = createSpec.find(':', a)) != std::string::npos; a = b + 1) f.push_back(createSpec.substr(a, b - a));
+        f.push_back(createSpec.substr(a));
+        ci.name = f[0];
+        uint8_t* fld[] = {&ci.race, &ci.cls, &ci.gender, &ci.skin, &ci.face, &ci.hairStyle, &ci.hairColor, &ci.facialHair};
+        for (size_t k = 1; k < f.size() && k <= 8; ++k) *fld[k - 1] = (uint8_t)atoi(f[k].c_str());
+        world.createCharacter(ci);
+        int res = -1;
+        waitUntil([&] { return (res = world.takeCreateResult()) >= 0 || world.state() == WorldClient::State::Failed; },
+                  [&] { world.update(); });
+        say("create %s: %s (0x%02X)\n", ci.name.c_str(), charCreateResultText((uint8_t)res), res);
+        waitList();
+        listChars();
+    }
+    if (!deleteName.empty()) {
+        uint64_t g = 0;
+        for (const Character& c : world.characters()) if (c.name == deleteName) g = c.guid;
+        world.deleteCharacter(g);
+        int res = -1;
+        waitUntil([&] { return (res = world.takeDeleteResult()) >= 0 || world.state() == WorldClient::State::Failed; },
+                  [&] { world.update(); });
+        say("delete %s: %s (0x%02X)\n", deleteName.c_str(), charDeleteResultText((uint8_t)res), res);
+        waitList();
+        listChars();
+    }
     const auto& chars = world.characters();
-    for (size_t i = 0; i < chars.size(); ++i)
-        say("  [%zu] %-12s level %2u %s %s, map %u (%.1f, %.1f, %.1f)\n", i, chars[i].name.c_str(), chars[i].level,
-                    raceName(chars[i].race), className(chars[i].cls), chars[i].map, chars[i].x, chars[i].y, chars[i].z);
     if (chars.empty()) { sayLine("no characters on this realm - create one with the PC client first"); world.close(); return 0; }
     if (charIdx < 0) { sayLine("(pass --char N to enter the world)"); world.close(); return 0; }
     if (charIdx >= (int)chars.size()) { sayLine("no such character"); return 5; }

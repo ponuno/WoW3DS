@@ -72,10 +72,25 @@ struct Character {
     uint64_t guid = 0;
     std::string name;
     uint8_t race = 0, cls = 0, gender = 0, level = 0;
+    uint8_t skin = 0, face = 0, hairStyle = 0, hairColor = 0, facialHair = 0;   // stage 5.29: drawn on the screen
     uint32_t zone = 0, map = 0;
     float x = 0, y = 0, z = 0;
     uint32_t guild = 0, flags = 0;
+    bool firstLogin = false;
+    // what the character wears, per equipment slot 0..18 (+ the first bag): ItemDisplayInfo id and inventory type
+    uint32_t equipDisplay[20] = {};
+    uint8_t equipInv[20] = {};
 };
+
+// CMSG_CHAR_CREATE (stage 5.29)
+struct CharCreateInfo {
+    std::string name;
+    uint8_t race = 1, cls = 1, gender = 0, skin = 0, face = 0, hairStyle = 0, hairColor = 0, facialHair = 0, outfit = 0;
+};
+// SMSG_CHAR_CREATE / SMSG_CHAR_DELETE result codes (vMaNGOS ResponseCodes, 1.12)
+enum : uint8_t { CHAR_CREATE_SUCCESS = 0x2E, CHAR_DELETE_SUCCESS = 0x39 };
+const char* charCreateResultText(uint8_t code);   // "Name already in use" ...
+const char* charDeleteResultText(uint8_t code);
 
 struct Packet {
     uint16_t opcode = 0;
@@ -92,6 +107,12 @@ public:
     void update();
     void requestCharacters();
     void login(uint64_t guid);
+    // Stage 5.29: at the character list. The answer comes as takeCreateResult / takeDeleteResult (once); a success asks
+    // for the list again (state WaitCharEnum until it is there).
+    void createCharacter(const CharCreateInfo& c);
+    void deleteCharacter(uint64_t guid);
+    int takeCreateResult() { int r = createResult_; createResult_ = -1; return r; }   // -1 = no answer yet
+    int takeDeleteResult() { int r = deleteResult_; deleteResult_ = -1; return r; }
     void logout();
     void send(uint32_t opcode, const Bytes& payload);
 
@@ -135,6 +156,7 @@ private:
     std::map<uint16_t, uint32_t> opCounts_;
     uint64_t bytesIn_ = 0;
     bool wardenSeen_ = false;
+    int createResult_ = -1, deleteResult_ = -1;
 };
 
 const char* raceName(uint8_t r);

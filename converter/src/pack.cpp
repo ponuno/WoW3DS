@@ -289,6 +289,7 @@ const char* typeName(uint32_t t) {
         case W3D_ENTRY_CHARACTER: return "CHRS";
         case W3D_ENTRY_CHARIMG: return "CIMG";
         case W3D_ENTRY_ITEM: return "ITEM";
+        case W3D_ENTRY_GLUE: return "GLUE";
         case W3D_ENTRY_UI_DIR: return "UIDR";
         case W3D_ENTRY_UI_TEX: return "UITX";
     }
@@ -547,6 +548,12 @@ int printPackInfo(const std::string& path) {
             }
             for (uint32_t m : d.helm)
                 if (m && !byKey.count({W3D_ENTRY_MODEL, m})) return fail("item helmet model not packed");
+        } else if (e[i].type == W3D_ENTRY_GLUE) {
+            if (e[i].size < sizeof(W3dGlueScene)) return fail("glue scene size");
+            W3dGlueScene g; std::memcpy(&g, p, sizeof g);
+            if (g.modelId && !byKey.count({W3D_ENTRY_MODEL, g.modelId})) return fail("glue scene model not packed");
+            std::printf("  glue scene %u: model %08x, camera %s, stand %s, radius %.1f\n", e[i].id, g.modelId,
+                        (g.flags & W3D_GLUE_HAS_CAMERA) ? "yes" : "no", (g.flags & W3D_GLUE_HAS_STAND) ? "yes" : "no", g.radius);
         } else if (e[i].type == W3D_ENTRY_PLACEMENT) {
             W3dPlacementHeader ph; std::memcpy(&ph, p, sizeof ph);
             if (sizeof ph + ph.count * sizeof(W3dPlacement) > e[i].size) return fail("placement range");

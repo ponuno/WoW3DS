@@ -249,3 +249,17 @@ g++ -std=c++20 $SAN -Wall "$N/tests/water_test.cpp" $SRC -o "$OUT/water_test"
 # Stage 5.28: area triggers (dungeon doors, the tram): geometry, once per walk-in, CMSG_AREATRIGGER, the refusal text
 g++ -std=c++20 $SAN -Wall "$N/tests/areatrigger_test.cpp" $SRC -o "$OUT/areatrigger_test"
 "$OUT/areatrigger_test"
+# Stage 5.29: the character list's looks and equipment, creating and deleting characters (w3dlogin = the 3DS net code)
+PORT6=$((PORT + 50))
+(cd "$N/tests" && timeout 30 python3 -u fake_server.py --port $PORT6 > "$OUT/glue_server.log" 2>&1 &)
+sleep 1
+"$OUT/w3dlogin" 127.0.0.1:$PORT6 TEST PASSWORD --create Newone:3:2:1:2:3:4:5:1 > "$OUT/glue1.log" 2>&1
+"$OUT/w3dlogin" 127.0.0.1:$PORT6 TEST PASSWORD --create Taken:1:1:0 --delete Testtwo > "$OUT/glue2.log" 2>&1
+grep -q "eq4=7101/5 eq7=7002/8" "$OUT/glue1.log"
+grep -q "Testtwo      level 60 Night Elf Druid.* look 1 2 3 4 5 1" "$OUT/glue1.log"
+grep -q "create Newone: Character created (0x2E)" "$OUT/glue1.log"
+grep -q "\[2\] Newone       level  1 Dwarf Paladin.* look 1 2 3 4 5 1" "$OUT/glue1.log"
+grep -q "create Taken: That name is unavailable (0x31)" "$OUT/glue2.log"
+grep -q "delete Testtwo: Character deleted (0x39)" "$OUT/glue2.log"
+! grep -q "\[1\] Testtwo" <(sed -n '/delete Testtwo/,$p' "$OUT/glue2.log")
+echo "CHARACTER LIST + CREATE + DELETE: PASS"

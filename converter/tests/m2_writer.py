@@ -18,12 +18,13 @@ class Blob:
         off = len(self.b); self.b += data; return off
 
 def m2(name, verts, tris, submeshes, batches, textures, tex_lookup, render_flags, bones, seqs, global_seqs, coll=None,
-       attachments=None):
+       attachments=None, cameras=None):
     """verts: (pos, weights4, idx4, normal, uv); submeshes: (id, indexStart, indexCount); batches: (submesh, material,
     texCombo); textures: (type, filename); bones: (parent, pivot, tracks{t,r,s}); a track: (globalSeq,
     [(seq or None, [(time, value), ...])])  times are global-timeline ms; seqs: (id, var, start, end, speed).
     coll: optional collision mesh (bounding vertices [(x, y, z)], bounding triangle indices [i, ...]).
-    attachments: optional [(id, bone, (x, y, z))] (vanilla 48-byte records)."""
+    attachments: optional [(id, bone, (x, y, z))] (vanilla 48-byte records).
+    cameras: optional [(type, fov, far, near, (position), (target))] (vanilla 124-byte records, no animation)."""
     HDR = 0x2C + 8 + 4 * 2 * 9 + 8 + 4 * 2 * 6 + 56 + 4 * 2 * 11
     B = Blob(HDR)
     name_off = B.add(name.encode() + b"\0")
@@ -82,6 +83,11 @@ def m2(name, verts, tris, submeshes, batches, textures, tex_lookup, render_flags
     at_off = 0
     if attachments:
         at_off = B.add(b"".join(struct.pack("<IHH3f", aid, bone, 0, *pos) + bytes(28) for aid, bone, pos in attachments))
+    cam_off = 0
+    if cameras:
+        empty = struct.pack("<HhIIIIII", 0, -1, 0, 0, 0, 0, 0, 0)
+        cam_off = B.add(b"".join(struct.pack("<Ifff", ct, fov, far, near) + empty + struct.pack("<3f", *pos) + empty +
+                                 struct.pack("<3f", *tgt) + empty for ct, fov, far, near, pos, tgt in cameras))
     view_off = B.add(struct.pack("<11I", len(lookup), li_off, len(tris), tri_off, 0, 0, len(submeshes), sm_off,
                                  len(batches), ba_off, 0))
     h = struct.pack("<4sIIIIIIIIII", b"MD20", 256, len(name) + 1, name_off, 0, len(global_seqs), gs_off,
@@ -94,7 +100,8 @@ def m2(name, verts, tris, submeshes, batches, textures, tex_lookup, render_flags
     h += struct.pack("<14f", -1, -1, 0, 1, 1, 2, 2, -1, -1, 0, 1, 1, 2, 2)
     # nBoundingTriangles (index count), ofs, nBoundingVertices, ofs, nBoundingNormals, ofs, then 16 more zeros
     h += struct.pack("<22I", len(coll[1]) if coll else 0, ct_off, len(coll[0]) if coll else 0, cv_off, 0, 0,
-                     len(attachments) if attachments else 0, at_off, *([0] * 14))
+                     len(attachments) if attachments else 0, at_off, 0, 0, 0, 0, 0, 0,
+                     len(cameras) if cameras else 0, cam_off, *([0] * 6))
     assert len(h) == HDR, (len(h), HDR)
     B.b[0:HDR] = h
     return bytes(B.b)

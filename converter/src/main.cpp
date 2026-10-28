@@ -236,6 +236,7 @@ int main(int argc, char** argv) {
         exportLocks(data, textDir() + "locks.txt", o.verbose);
         exportAreaTriggers(data, textDir() + "areatriggers.txt", o.verbose);
         exportEmotes(data, textDir() + "emotes.txt", o.verbose);
+        exportGlueTexts(data, textDir() + "glue.txt", o.verbose);
         exportTransports(data, textDir() + "transports.txt", o.verbose);
         double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         std::printf("done in %.0f s\n", secs);
@@ -250,6 +251,7 @@ int main(int argc, char** argv) {
         exportLocks(data, textDir() + "locks.txt", o.verbose);
         exportAreaTriggers(data, textDir() + "areatriggers.txt", o.verbose);
         exportEmotes(data, textDir() + "emotes.txt", o.verbose);
+        exportGlueTexts(data, textDir() + "glue.txt", o.verbose);
         exportTransports(data, textDir() + "transports.txt", o.verbose);
         return spells || facts ? 0 : 4;
     }
@@ -314,6 +316,7 @@ int main(int argc, char** argv) {
     if ((o.creatures || o.players || o.transports || o.gameobjects) && !o.synthetic) {
         std::printf(o.creatures ? "creatures...\n" : "players...\n");
         convertCreatures(o, data, pack, st);
+        if (o.players) convertGlueScenes(o, data, pack, st);   // stage 5.29: the login / character screen scenes
     }
     if (o.creatures && !o.synthetic) {   // the 3DS action bar reads spells.txt next to the pack, the reactions factions.txt
         exportSpellNames(data, textDir() + "spells.txt", o.verbose);
@@ -323,6 +326,7 @@ int main(int argc, char** argv) {
         exportLocks(data, textDir() + "locks.txt", o.verbose);
         exportAreaTriggers(data, textDir() + "areatriggers.txt", o.verbose);
         exportEmotes(data, textDir() + "emotes.txt", o.verbose);
+        exportGlueTexts(data, textDir() + "glue.txt", o.verbose);
     }
     if ((o.creatures || o.transports) && !o.synthetic) exportTransports(data, textDir() + "transports.txt", o.verbose);
     progress(true, "writing %s ...", o.out.c_str());

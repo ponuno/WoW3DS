@@ -38,6 +38,7 @@ enum W3dEntryType {
     W3D_ENTRY_ITEM      = W3D_FOURCC('I', 'T', 'E', 'M'),   // stage 5.19: worn item look (id = ItemDisplayInfo id)
     W3D_ENTRY_LIQUID    = W3D_FOURCC('L', 'I', 'Q', 'D'),   // stage 5.26: where the liquids of a tile are (swimming, id = tile)
     W3D_ENTRY_PACKINFO  = W3D_FOURCC('P', 'I', 'N', 'F'),   // stage 5.27: what this file is in a set of packs (id 0)
+    W3D_ENTRY_GLUE      = W3D_FOURCC('G', 'L', 'U', 'E'),   // stage 5.29: a login / character screen scene (W3dGlueScene)
 };
 
 // ---------------------------------------------------------------- pack sets (stage 5.27)
@@ -412,6 +413,24 @@ typedef struct {
     uint16_t geosets[W3D_DISPLAY_GEOSETS];
     uint16_t pad;
 } W3dDisplay;                     // 96 bytes
+
+// ---------------------------------------------------------------- glue screens (stage 5.29)
+// The 3D scenes behind the login screen and the character screens: Interface\Glues\Models\UI_*.m2 converted as one static
+// MODL, with the camera and the character's mark the artist put into the model (M2 camera 0, attachment 0). The entry id
+// says which screen: W3D_GLUE_MAINMENU, else the race id (1..8) of the character screens (Gnome and Troll share the Dwarf and
+// Orc scenes, as in the game). Coordinates are the model's own (drawn at the origin, unrotated).
+enum { W3D_GLUE_MAINMENU = 0 };
+enum { W3D_GLUE_HAS_STAND = 1, W3D_GLUE_HAS_CAMERA = 2 };
+typedef struct {
+    uint32_t modelId;             // MODL id, 0 = none
+    float    camPos[3], camTarget[3];
+    float    fov;                 // the M2 camera's diagonal field of view (radians), 0 = unknown
+    float    nearClip, farClip;
+    float    stand[3];            // where the character stands
+    uint32_t flags;               // W3D_GLUE_HAS_*
+    float    radius;              // of the scene's vertices around the origin
+    uint32_t reserved[3];
+} W3dGlueScene;                   // 76 bytes
 
 // ---------------------------------------------------------------- player characters (stage 5.5)
 // A player is drawn with its race model (CMDL) and a body texture composited on the 3DS

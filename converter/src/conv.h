@@ -282,6 +282,8 @@ bool exportLocks(const DataDir& data, const std::string& path, bool verbose);
 // areatriggers.txt (AreaTrigger.dbc, stage 5.28): the zones the client reports with CMSG_AREATRIGGER (dungeon doors, the tram).
 bool exportAreaTriggers(const DataDir& data, const std::string& path, bool verbose);
 bool exportEmotes(const DataDir& data, const std::string& path, bool verbose);
+// glue.txt (stage 5.29): GlueStrings.lua texts, CharStartOutfit.dbc clothes, AreaTable.dbc zone names.
+bool exportGlueTexts(const DataDir& data, const std::string& path, bool verbose);
 // Transports (stage 5.21): transports.txt = "T path node map x y z flags delay" per TaxiPathNode.dbc row and
 // "M display deckZ x0 y0 x1 y1" per transport model that has a walkable deck (found by convertTransports in creatures.cpp).
 struct TransportDeck { float z = 0, x0 = 0, y0 = 0, x1 = 0, y1 = 0; };
@@ -333,6 +335,8 @@ bool convertItems(const Options& o, const DataDir& data, PackWriter& pack, ConvS
 
 // Creatures: CMDL/CDSP entries for CreatureDisplayInfo (o.creatures).
 bool convertCreatures(const Options& o, const DataDir& data, PackWriter& pack, ConvStats& st);
+// Stage 5.29: the login / character screen scenes (MODL + GLUE entries), with the player models.
+bool convertGlueScenes(const Options& o, const DataDir& data, PackWriter& pack, ConvStats& st);
 // Collision of one doodad placement (st.m2Coll of its model, matrix T(pos)*Rz*Ry*Rx*S like the renderer).
 void addPlacementCollision(const Options& o, ConvStats& st, const W3dPlacement& p);
 // Writes the COLL entries collected by placeWmo / addPlacementCollision (one per tile).

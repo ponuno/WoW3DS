@@ -108,6 +108,21 @@ class Crypt:
             self.ri = (self.ri + 1) % len(self.k); self.rp = c; out.append(x)
         return bytes(out)
 
+# guid, name, race, class, level, x, y, z, (gender, skin, face, hair style, hair colour, facial), {slot: (display, inv)}
+DEFAULT_CHARS = [(1, "Testone", 1, 1, 12, -8949.95, -132.49, 83.53, (0, 0, 0, 0, 0, 0), {4: (7101, 5), 7: (7002, 8)}),
+                 (2, "Testtwo", 4, 11, 60, 9947.52, 2482.73, 1316.21, (1, 2, 3, 4, 5, 1), {})]
+
+def send_enum(state):
+    chars = state.setdefault("chars", list(DEFAULT_CHARS))
+    out = b""
+    for guid, name, race, cls, lvl, x, y, z, look, equip in chars:
+        out += struct.pack("<Q", guid) + name.encode() + b"\0" + bytes([race, cls, look[0]]) + bytes(look[1:6])
+        out += bytes([lvl]) + struct.pack("<IIfffII", 12, 0, x, y, z, 0, 0) + b"\0" + b"\0" * 12
+        for slot in range(20):
+            d, inv = equip.get(slot, (0, 0))
+            out += struct.pack("<IB", d, inv)
+    state["send"](0x03B, bytes([len(chars)]) + out, split=True)
+
 def world(conn):
     crypt = None
     batch = []                                    # when not None-empty-list-active, packets are coalesced
@@ -156,7 +171,7 @@ def world(conn):
     crypt = Crypt(K)
     send(0x1EE, bytes([0x0C]) + struct.pack("<IBI", 0, 0, 0))
 
-    state = {}
+    state = {"send": send}
     conn.settimeout(0.05)
     while True:
         if state.get("w5"): state["w5"].tick()
@@ -167,13 +182,29 @@ def world(conn):
         except ConnectionError:
             print("[world] client disconnected"); return
         if op == 0x037:                            # CMSG_CHAR_ENUM
-            chars = b""
-            for guid, name, race, cls, lvl, x, y, z in ((1, "Testone", 1, 1, 12, -8949.95, -132.49, 83.53),
-                                                       (2, "Testtwo", 4, 11, 60, 9947.52, 2482.73, 1316.21)):
-                chars += struct.pack("<Q", guid) + name.encode() + b"\0" + bytes([race, cls, 0]) + b"\0" * 5
-                chars += bytes([lvl]) + struct.pack("<IIfffII", 12, 0, x, y, z, 0, 0) + b"\0" + b"\0" * 12 + b"\0" * 100
-            send(0x03B, bytes([2]) + chars, split=True)
+            send_enum(state)
             print("[world] character list sent")
+        elif op == 0x036:                          # CMSG_CHAR_CREATE (stage 5.29)
+            end = body.index(b"\0"); name = body[:end].decode()
+            race, cls, gender, skin, face, hs, hc, fh, outfit = body[end + 1:end + 10]
+            chars = state.setdefault("chars", list(DEFAULT_CHARS))
+            if name.lower() in [c[1].lower() for c in chars] or name == "Taken":
+                send(0x03A, bytes([0x31])); print(f"[world] create {name}: name in use")
+            elif len(name) < 2:
+                send(0x03A, bytes([0x46])); print(f"[world] create {name}: too short")
+            else:
+                guid = max(c[0] for c in chars) + 1 if chars else 1
+                chars.append((guid, name, race, cls, 1, -8949.95, -132.49, 83.53, (gender, skin, face, hs, hc, fh), {}))
+                RESULTS.setdefault("created", []).append([name, race, cls, gender, skin, face, hs, hc, fh, outfit])
+                send(0x03A, bytes([0x2E])); print(f"[world] created {name} race {race} class {cls}")
+        elif op == 0x038:                          # CMSG_CHAR_DELETE
+            guid = struct.unpack("<Q", body[:8])[0]
+            chars = state.setdefault("chars", list(DEFAULT_CHARS))
+            keep = [c for c in chars if c[0] != guid]
+            ok = len(keep) != len(chars)
+            state["chars"] = keep
+            RESULTS.setdefault("deleted", []).append(guid)
+            send(0x03C, bytes([0x39 if ok else 0x3A])); print(f"[world] delete {guid}: {'ok' if ok else 'no such character'}")
         elif op == 0x03D:                          # CMSG_PLAYER_LOGIN
             guid = struct.unpack("<Q", body)[0]
             batching["on"] = True                  # like real servers: VERIFY_WORLD + first updates in one TCP write

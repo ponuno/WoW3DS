@@ -22,7 +22,8 @@ server).
   out), falling into water, water walking, the underwater view, breath / fatigue bars, drowning and lava damage, fishing.
 - **Characters and creatures:** skinned, animated creature and player models (race, skin, face, hair, armour layers,
   helmets, weapons), ships and zeppelins, ordinary game objects (event decorations, chests, ...).
-- **Gameplay client:** login, realm and character screens, chat, targeting, auto-attack, spells and action bar, loot,
+- **Gameplay client:** the original client's login, realm, character selection and creation screens (their 3D scenes, the
+  character turned with L / R, race and class descriptions on the touch screen), chat, targeting, auto-attack, spells and action bar, loot,
   vendors, trainers, quests, items and tooltips, auras, parties, reputation, talents, flight masters, mail/auction/trade
   windows (see `PLAN.md` for the exact list).
 - **Controls:** a controller scheme built for the 3DS ("Forever" layout, or "Classic"), touch-screen UI on the bottom
@@ -134,12 +135,13 @@ Eastern Kingdoms (preferred over `test.w3dp`), `map1.w3dp` Kalimdor. Developer t
 picks maps, `--no-ui` / `--no-sound-step` skip those steps. `w3dconv --info` and `w3dpreview` resolve the pool.
 
 Copy the output to the SD card as `sdmc:/3ds/w3dproto/` (`test.w3dp` or `map0.w3dp`, `map<ID>.w3dp`, `common*.w3dp`,
-`ui.w3dp`, the `sound/` folder and the text files the converter writes next to the packs, among them `areatriggers.txt`: without it dungeon doors and the Deeprun Tram do nothing), then start `w3dproto.3dsx`
+`ui.w3dp`, the `sound/` folder and the text files the converter writes next to the packs, among them `areatriggers.txt` (without it dungeon doors and the Deeprun Tram do nothing) and `glue.txt` (texts, clothes of new characters and zone names of the character screens)), then start `w3dproto.3dsx`
 through the Homebrew Launcher.
 
 ## Tests (no console and no game data needed)
 
 Shared pool and `--all`: `converter/tests/run_pool_tests.sh <build dir>`.
+Login / character screens: `proto3ds/tests/run_glue.sh [ui.w3dp] [glue.txt]` (screenshots and input checks).
 Liquids: `converter/tests/run_water_tests.sh <build dir>`, `proto3ds/tests/run_swim.sh`, and `water_test` inside
 `net/tests/run_stage5.sh`.
 

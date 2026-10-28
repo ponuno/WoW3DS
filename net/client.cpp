@@ -10,6 +10,7 @@ namespace {
 
 // Vanilla 1.12.1 opcodes (WoWee Data/expansions/classic/opcodes.json).
 enum : uint16_t {
+    CMSG_CHAR_CREATE = 0x036, CMSG_CHAR_DELETE = 0x038, SMSG_CHAR_CREATE = 0x03A, SMSG_CHAR_DELETE = 0x03C,
     CMSG_CHAR_ENUM = 0x037, SMSG_CHAR_ENUM = 0x03B, CMSG_PLAYER_LOGIN = 0x03D, SMSG_CHARACTER_LOGIN_FAILED = 0x041,
     CMSG_LOGOUT_REQUEST = 0x04B, SMSG_LOGOUT_RESPONSE = 0x04C, SMSG_LOGOUT_COMPLETE = 0x04D,
     CMSG_PING = 0x1DC, SMSG_PONG = 0x1DD, SMSG_AUTH_CHALLENGE = 0x1EC, CMSG_AUTH_SESSION = 0x1ED,
@@ -220,6 +221,7 @@ bool WorldClient::start(const std::string& hostPort, const std::string& account,
     lastPing_ = pingSent_ = 0;
     bytesIn_ = 0;
     wardenSeen_ = false;
+    createResult_ = deleteResult_ = -1;
     t_ = Timings{};
     ver_ = ver;
     account_ = upper(account);
@@ -252,6 +254,24 @@ void WorldClient::requestCharacters() {
     tStep_ = nowMs();
     send(CMSG_CHAR_ENUM, {});
     state_ = State::WaitCharEnum;
+    deadline_ = nowMs() + kTimeoutMs;
+}
+
+void WorldClient::createCharacter(const CharCreateInfo& c) {
+    Writer w;
+    w.cstr(c.name);
+    w.u8(c.race); w.u8(c.cls); w.u8(c.gender);
+    w.u8(c.skin); w.u8(c.face); w.u8(c.hairStyle); w.u8(c.hairColor); w.u8(c.facialHair); w.u8(c.outfit);
+    createResult_ = -1;
+    send(CMSG_CHAR_CREATE, w.b);
+    deadline_ = nowMs() + kTimeoutMs;
+}
+
+void WorldClient::deleteCharacter(uint64_t guid) {
+    Writer w;
+    w.u64(guid);
+    deleteResult_ = -1;
+    send(CMSG_CHAR_DELETE, w.b);
     deadline_ = nowMs() + kTimeoutMs;
 }
 
@@ -377,16 +397,30 @@ void WorldClient::handle(Packet& p) {
                 c.guid = r.u64();
                 c.name = r.cstr();
                 c.race = r.u8(); c.cls = r.u8(); c.gender = r.u8();
-                r.skip(4 + 1);   // skin/face/hair style/hair colour, facial hair
+                c.skin = r.u8(); c.face = r.u8(); c.hairStyle = r.u8(); c.hairColor = r.u8(); c.facialHair = r.u8();
                 c.level = r.u8();
                 c.zone = r.u32(); c.map = r.u32();
                 c.x = r.f32(); c.y = r.f32(); c.z = r.f32();
                 c.guild = r.u32(); c.flags = r.u32();
-                r.skip(1 + 12 + 20 * 5);   // first login, pet, 20 x (display id, inventory type)
+                c.firstLogin = r.u8() != 0;
+                r.skip(12);   // pet display, level, family
+                for (int k = 0; k < 20; ++k) { c.equipDisplay[k] = r.u32(); c.equipInv[k] = r.u8(); }
                 if (!r.bad) chars_.push_back(c);
             }
             t_.charEnum = (double)(nowMs() - tStep_);
             state_ = State::CharSelect;
+            return;
+        }
+        case SMSG_CHAR_CREATE: {   // u8 result; a new character: the list again
+            createResult_ = r.u8();
+            if (createResult_ == CHAR_CREATE_SUCCESS) requestCharacters();
+            else deadline_ = 0;
+            return;
+        }
+        case SMSG_CHAR_DELETE: {
+            deleteResult_ = r.u8();
+            if (deleteResult_ == CHAR_DELETE_SUCCESS) requestCharacters();
+            else deadline_ = 0;
             return;
         }
         case SMSG_CHARACTER_LOGIN_FAILED:
@@ -444,6 +478,43 @@ const char* authResultText(uint8_t code) {
         case 0x0C: return "account suspended";
         case 0x0D: return "access denied";
         default: return "login failed";
+    }
+}
+
+const char* charCreateResultText(uint8_t code) {
+    switch (code) {
+        case 0x2D: return "Creating character...";
+        case 0x2E: return "Character created";
+        case 0x2F: return "Error creating character";
+        case 0x30: return "Character creation failed";
+        case 0x31: return "That name is unavailable";
+        case 0x32: return "Creation of that race and/or class is currently disabled";
+        case 0x33: return "You cannot have characters of both factions on a PvP realm";
+        case 0x34: return "The server has reached its character limit";
+        case 0x35: return "You already have the maximum number of characters";
+        case 0x36: return "The server is currently queued";
+        case 0x37: return "Only players who have characters on this realm may create here";
+        case 0x45: return "Enter a name for your character";
+        case 0x46: return "Names must be at least 2 characters long";
+        case 0x47: return "Names must be no more than 12 characters long";
+        case 0x48: return "Names can only contain letters";
+        case 0x49: return "Names must contain only one language";
+        case 0x4A: return "That name contains mature language";
+        case 0x4B: return "That name is unavailable";
+        case 0x4C: return "You cannot use an apostrophe";
+        case 0x4D: return "You can only have one apostrophe";
+        case 0x4E: return "You cannot use the same letter three times consecutively";
+        case 0x4F: return "You cannot use spaces in names";
+        default: return "Character creation failed";
+    }
+}
+
+const char* charDeleteResultText(uint8_t code) {
+    switch (code) {
+        case 0x39: return "Character deleted";
+        case 0x3A: return "Character deletion failed";
+        case 0x3B: return "Character is locked for transfer";
+        default: return "Character deletion failed";
     }
 }
 

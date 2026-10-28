@@ -75,6 +75,21 @@ blp("Interface\\Minimap\\MinimapArrow.blp", 32, 32, lambda x, y: (255, 255, 0, 2
 for s in ("Head", "Neck", "Shoulder", "Chest", "Feet", "MainHand", "Bag"):
     blp("Interface\\PaperDoll\\UI-PaperDoll-Slot-%s.blp" % s, 64, 64, lambda x, y: (40, 40, 50, 255) if (x + y) % 16 else (90, 90, 110, 255))
 blp("Interface\\Glues\\CharacterCreate\\UI-CharacterCreate-Classes.blp", 256, 256, lambda x, y: ((x // 64) * 70, (y // 64) * 70, 120, 255))
+# stage 5.29: glue screens (a logo, red glue buttons, a gold border, an edit box, arrows, race / gender sheets)
+blp("Interface\\Glues\\Common\\Glues-WoW-Logo.blp", 256, 128,
+    lambda x, y: (255, 200, 40, 255) if 20 < y < 108 and (x // 16 + y // 16) % 2 else (0, 0, 0, 0))
+for state, c in (("Up", (170, 20, 10)), ("Down", (120, 10, 5)), ("Disabled", (80, 70, 70)), ("Highlight", (255, 255, 160))):
+    blp("Interface\\Glues\\Common\\Glue-Panel-Button-%s.blp" % state, 128, 32,
+        lambda x, y, c=c: (c + (255,) if 2 < x < 78 and 2 < y < 20 else (230, 180, 60, 255)) if x < 80 and y < 22 else (0, 0, 0, 0))
+blp("Interface\\Glues\\Common\\Glue-Tooltip-Border.blp", 128, 16, lambda x, y: (240, 200, 60, 255 if (x % 16) < 3 or y < 3 else 0))
+blp("Interface\\Common\\Common-Input-Border.blp", 128, 32,
+    lambda x, y: (150, 150, 150, 255) if y < 20 and (x < 4 or x > 123 or y < 3 or y > 16) else (0, 0, 0, 0))
+for side in ("Left", "Right"):
+    blp("Interface\\Glues\\Common\\Glue-%sArrow-Button-Up.blp" % side, 32, 32,
+        lambda x, y, sd=side: (255, 210, 0, 255 if (x > 16 - abs(y - 16) if sd == "Left" else x < 16 + abs(y - 16)) and 6 < x < 26 and 6 < y < 26 else 0))
+blp("Interface\\Glues\\CharacterCreate\\UI-CharacterCreate-Races.blp", 256, 256,
+    lambda x, y: (60 + (x // 64) * 50, 40 + (y // 64) * 50, 200 - (y // 128) * 100, 255))
+blp("Interface\\Glues\\CharacterCreate\\UI-CharacterCreate-Gender.blp", 128, 64, lambda x, y: ((80, 120, 255, 255) if x < 64 else (255, 120, 180, 255)))
 
 # ---- world maps: Elwynn (zone, 12 tiles) with one overlay, Azeroth (continent); Westfall has only 3 tiles (skipped)
 def mapTile(name, i, base):

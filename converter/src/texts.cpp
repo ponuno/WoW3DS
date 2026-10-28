@@ -7,6 +7,10 @@
 //                "P from to cost" per TaxiPath.dbc row (ID, from, to, cost)
 #include "conv.h"
 
+#include <algorithm>
+#include <cctype>
+#include <set>
+
 namespace w3d {
 
 namespace {
@@ -194,7 +198,110 @@ bool exportAreaTriggers(const DataDir& data, const std::string& path, bool verbo
     return true;
 }
 
-// emotes.txt: "E emote anim" per Emotes.dbc row (1.12: ID, EmoteSlashCommand, AnimID, Flags, ...): SMSG_EMOTE and
+// glue.txt (stage 5.29): what the login and character screens need besides pictures.
+//   T KEY<TAB>text      every string of Interface\GlueXML\GlueStrings.lua (race / class descriptions RACE_INFO_*,
+//                       CLASS_INFO_*, ...); "\n" stays as the two characters
+//   O race class sex disp inv ... (12 pairs)   CharStartOutfit.dbc: the clothes a new character is shown in
+//   Z area name         AreaTable.dbc: the zone names of the character list
+bool exportGlueTexts(const DataDir& data, const std::string& path, bool verbose) {
+    std::string out = "# wow3ds glue screens: T key text | O race class sex (display invtype) x N | Z area name\n";
+    size_t nt = 0, no = 0, nz = 0;
+    // ---- GlueStrings.lua: NAME = "text";  (Lua escapes \" \\ \n)
+    std::vector<uint8_t> lua;
+    if (data.read("Interface\\GlueXML\\GlueStrings.lua", lua)) {
+        std::string src(lua.begin(), lua.end());
+        size_t i = 0;
+        while (i < src.size()) {
+            size_t e = src.find('\n', i);
+            if (e == std::string::npos) e = src.size();
+            std::string line = src.substr(i, e - i);
+            i = e + 1;
+            size_t k = 0;
+            while (k < line.size() && (line[k] == ' ' || line[k] == '\t')) ++k;
+            size_t k0 = k;
+            while (k < line.size() && (std::isalnum((unsigned char)line[k]) || line[k] == '_')) ++k;
+            if (k == k0) continue;
+            std::string key = line.substr(k0, k - k0);
+            while (k < line.size() && line[k] == ' ') ++k;
+            if (k >= line.size() || line[k] != '=') continue;
+            ++k;
+            while (k < line.size() && line[k] == ' ') ++k;
+            if (k >= line.size() || line[k] != '"') continue;
+            std::string val;
+            bool closed = false;
+            for (++k; k < line.size(); ++k) {
+                char c = line[k];
+                if (c == '\\' && k + 1 < line.size()) {
+                    char n = line[++k];
+                    if (n == 'n') val += "\\n";
+                    else if (n == 't') val += ' ';
+                    else val += n;
+                } else if (c == '"') { closed = true; break; }
+                else if (c != '\r' && c != '\t') val += c;
+            }
+            if (!closed || val.empty()) continue;
+            out += "T\t" + key + "\t" + val + "\n";
+            ++nt;
+        }
+    } else if (verbose) {
+        std::fprintf(stderr, "glue: Interface\\GlueXML\\GlueStrings.lua not found (the 3DS uses its own texts)\n");
+    }
+    // ---- CharStartOutfit.dbc: ID, race/class/sex/outfit bytes, ItemID[N], DisplayItemID[N], InventoryType[N]
+    DbcTable so;
+    if (so.load(data, "CharStartOutfit.dbc") && so.fields >= 8 && (so.fields - 2) % 3 == 0) {
+        const uint32_t n = (so.fields - 2) / 3;
+        for (uint32_t r = 0; r < so.records; ++r) {
+            const uint32_t rcs = so.u32(r, 1);
+            const uint32_t race = rcs & 0xFF, cls = (rcs >> 8) & 0xFF, sex = (rcs >> 16) & 0xFF;
+            if (!race || !cls || sex > 1) continue;
+            std::string l = "O\t" + std::to_string(race) + "\t" + std::to_string(cls) + "\t" + std::to_string(sex);
+            int any = 0;
+            for (uint32_t k = 0; k < n; ++k) {
+                const uint32_t disp = so.u32(r, 2 + n + k), inv = so.u32(r, 2 + 2 * n + k);
+                if (disp == 0 || disp == 0xFFFFFFFFu || inv == 0 || inv > 28) continue;
+                l += "\t" + std::to_string(disp) + "\t" + std::to_string(inv);
+                ++any;
+            }
+            if (!any) continue;
+            out += l + "\n";
+            ++no;
+        }
+    } else if (verbose) {
+        std::fprintf(stderr, "glue: CharStartOutfit.dbc not found (new characters are shown without clothes)\n");
+    }
+    // ---- AreaTable.dbc: ID, map, parent, ... name (the column with the most names, 8..16)
+    DbcTable at;
+    if (at.load(data, "AreaTable.dbc") && at.fields > 12) {
+        uint32_t best = 0, bestCount = 0;
+        // a name column: offsets at the start of a string (the byte before is 0), many different names (a small
+        // number column such as the exploration level would point into the table at the same few strings)
+        const size_t base = 20 + (size_t)at.records * at.recSize;
+        for (uint32_t c = 8; c < std::min<uint32_t>(at.fields, 17); ++c) {
+            std::set<std::string> names;
+            bool starts = true;
+            for (uint32_t r = 0; r < at.records && r < 400 && starts; ++r) {
+                const uint32_t off = at.u32(r, c);
+                if (off == 0) continue;
+                if (off >= at.strSize || at.b[base + off - 1] != 0) starts = false;
+                std::string v = at.str(r, c);
+                if (v.size() >= 3 && std::isupper((unsigned char)v[0])) names.insert(v);
+            }
+            if (starts && names.size() > bestCount) { bestCount = (uint32_t)names.size(); best = c; }
+        }
+        if (best)
+            for (uint32_t r = 0; r < at.records; ++r) {
+                std::string v = clean(at.str(r, best));
+                if (v.empty()) continue;
+                out += "Z\t" + std::to_string(at.u32(r, 0)) + "\t" + v + "\n";
+                ++nz;
+            }
+    }
+    if (!writeText(path, out)) return false;
+    std::printf("  glue: %zu strings, %zu start outfits, %zu zone names written to %s\n", nt, no, nz, path.c_str());
+    return true;
+}
+
+// emotes.txt: "E emote anim\" per Emotes.dbc row (1.12: ID, EmoteSlashCommand, AnimID, Flags, ...): SMSG_EMOTE and
 // UNIT_NPC_EMOTESTATE carry the emote, the 3DS plays its animation.
 bool exportEmotes(const DataDir& data, const std::string& path, bool verbose) {
     DbcTable em;

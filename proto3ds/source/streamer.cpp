@@ -1269,6 +1269,26 @@ void streamerReleaseItem(ItemDisplay* it) { releaseItem(it); }
 Model* streamerAcquireItemModel(uint32_t modelId) { return modelId ? acquireModel(modelId) : nullptr; }
 void streamerReleaseItemModel(Model* m) { if (m) releaseModel(m); }
 
+int streamerCharInfo(uint32_t race, uint32_t sex, const uint8_t** blob, uint32_t* size) {
+    CharInfo* c = acquireCharInfo(w3d_char_id(race, sex));
+    if (!c) return -1;
+    if (c->state != AssetState::Ready) return 0;
+    if (!c->ok) return -1;
+    *blob = c->blob;
+    *size = c->size;
+    return 1;
+}
+
+bool streamerReadEntry(uint32_t type, uint32_t id, void* dst, uint32_t size) {
+    const W3dEntry* e = g_index ? g_index->find(type, id) : nullptr;
+    if (!e || e->size < size) return false;
+    FILE* f = fopen(g_index->files[g_index->fileIndex(e)][0] ? g_index->files[g_index->fileIndex(e)] : g_index->path, "rb");
+    if (!f) return false;
+    const bool ok = fseek(f, (long)e->offset, SEEK_SET) == 0 && fread(dst, 1, size, f) == size;
+    fclose(f);
+    return ok;
+}
+
 CreatureDisplay* streamerAcquirePlayerDisplay(const W3dLook& look, const uint32_t* equip) {
     uint32_t eq[W3D_BODY_EQ] = {};
     uint64_t key = w3d_look_key(&look);

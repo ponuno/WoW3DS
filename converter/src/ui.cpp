@@ -93,6 +93,24 @@ icon   slot_17      Interface\PaperDoll\UI-PaperDoll-Slot-Ranged.blp
 icon   slot_18      Interface\PaperDoll\UI-PaperDoll-Slot-Tabard.blp
 icon   slot_19      Interface\PaperDoll\UI-PaperDoll-Slot-Bag.blp|Interface\PaperDoll\UI-Backpack-EmptySlot.blp
 grid   class        Interface\Glues\CharacterCreate\UI-CharacterCreate-Classes.blp 4 4 1:0,0 8:1,0 4:2,0 11:3,0 3:0,1 7:1,1 5:2,1 9:3,1 2:0,2
+# stage 5.29: login and character screens (Interface\Glues); what is missing is drawn as a plain frame
+sprite glue_logo      Interface\Glues\Common\Glues-WoW-Logo.blp 0 0 1 1 192 96
+edge   glue_border    Interface\Glues\Common\Glue-Tooltip-Border.blp|Interface\Tooltips\UI-Tooltip-Border.blp 8
+nine   glue_button    Interface\Glues\Common\Glue-Panel-Button-Up.blp|Interface\Buttons\UI-Panel-Button-Up.blp 0 0 0.625 0.6875 80 22 10 6 10 6
+nine   glue_button_down Interface\Glues\Common\Glue-Panel-Button-Down.blp|Interface\Buttons\UI-Panel-Button-Down.blp 0 0 0.625 0.6875 80 22 10 6 10 6
+nine   glue_button_off Interface\Glues\Common\Glue-Panel-Button-Disabled.blp|Interface\Buttons\UI-Panel-Button-Disabled.blp 0 0 0.625 0.6875 80 22 10 6 10 6
+nine   glue_button_hl Interface\Glues\Common\Glue-Panel-Button-Highlight.blp|Interface\Buttons\UI-Panel-Button-Highlight.blp 0 0 0.625 0.6875 80 22 10 6 10 6
+nine   editbox        Interface\Common\Common-Input-Border.blp 0 0 1 0.625 128 20 8 6 8 6
+sprite glue_left      Interface\Glues\Common\Glue-LeftArrow-Button-Up.blp 0 0 1 1 20 20
+sprite glue_left_down Interface\Glues\Common\Glue-LeftArrow-Button-Down.blp 0 0 1 1 20 20
+sprite glue_right     Interface\Glues\Common\Glue-RightArrow-Button-Up.blp 0 0 1 1 20 20
+sprite glue_right_down Interface\Glues\Common\Glue-RightArrow-Button-Down.blp 0 0 1 1 20 20
+sprite glue_rotate    Interface\Glues\CharacterCreate\UI-RotationRight-Big-Up.blp 0 0 1 1 24 24
+sprite cc_highlight   Interface\Glues\CharacterCreate\UI-CharacterCreate-Highlights.blp 0 0 0.5 0.5 32 32
+sprite cc_checked     Interface\Glues\CharacterCreate\UI-CharacterCreate-Highlights.blp 0.5 0 1 0.5 32 32
+sprite cc_bevel       Interface\Glues\CharacterCreate\UI-CharacterCreate-Highlights.blp 0 0.5 0.5 1 32 32
+grid   race           Interface\Glues\CharacterCreate\UI-CharacterCreate-Races.blp 4 4 2:0,0 6:1,0 14:2,0 8:3,0 12:0,1 10:1,1 16:2,1 4:3,1 3:0,2 7:1,2 15:2,2 9:3,2 13:0,3 11:1,3 17:2,3 5:3,3
+grid   gender         Interface\Glues\CharacterCreate\UI-CharacterCreate-Gender.blp 2 1 0:0,0 1:1,0
 )";
 
 std::string lower(std::string s) {

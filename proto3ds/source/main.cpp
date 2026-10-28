@@ -16,6 +16,7 @@
 #include "unit_state.hpp"
 #include "sound_world.hpp"
 #include "world.h"
+#include "glue_data.hpp"
 #include "login.hpp"
 #include "creature_view.hpp"
 #include "game_ui.hpp"
@@ -440,6 +441,34 @@ int main() {
     std::vector<Marker> markers;
     markers.reserve(260);
     CreatureView creatureView;
+    // Stage 5.29: the 3D scene of the login screens (a GLUE entry: a static backdrop model, its camera and the character's
+    // mark) and the character standing in it.
+    struct GlueStage {
+        uint32_t id = ~0u;
+        W3dGlueScene g{};
+        bool have = false;
+        Model* model = nullptr;
+        bool active() const { return id != ~0u; }
+        void set(uint32_t sceneId) {
+            if (sceneId == id) return;
+            release();
+            id = sceneId;
+            have = streamerReadEntry(W3D_ENTRY_GLUE, sceneId, &g, sizeof g) && g.modelId;
+            if (have) model = streamerAcquireItemModel(g.modelId);
+        }
+        bool ready() const { return model && model->h && model->state == AssetState::Ready && model->texturesReady(); }
+        void release() {
+            if (model) streamerReleaseItemModel(model);
+            model = nullptr;
+            have = false;
+            id = ~0u;
+        }
+    } glueStage;
+    CreatureView glueView;
+    std::vector<CreatureSeen> glueSeen;
+    std::vector<CreatureInstance> glueCreatures;
+    std::vector<SceneModel> glueModels;
+    uint32_t glueRevShown = 0;
     GameUi gameUi;
     SoundWorld soundWorld;           // melee, spells, deaths, aggro, footsteps -> positioned sounds
     std::vector<SoundReq> soundReqs;
@@ -630,10 +659,19 @@ int main() {
 
         hidScanInput();
         u32 down = hidKeysDown(), held = hidKeysHeld();
-        if ((down & KEY_START) && !g_login.online()) break;   // online: START opens the game menu
-        // Login UI (stage 4) owns the bottom screen and the buttons until we are in the world.
-        const bool loginUi = g_login.update(down);
+        if ((down & KEY_START) && g_login.phase() == LoginFlow::Phase::Offline) break;   // flying offline: START quits
+        // The login screens (stage 4; the original client's screens since stage 5.29) own both screens and the buttons
+        // until the world: login, realms, the characters and their creation.
+        touchPosition glueTouch{};
+        const bool glueTouching = (held & KEY_TOUCH) != 0;
+        if (glueTouching) hidTouchRead(&glueTouch);
+        const bool loginUi = g_login.update(down, held, glueTouching, glueTouch.px, glueTouch.py, dt);
+        if (g_login.quitRequested()) break;
         if (loginUi) { down = 0; held = 0; }
+        else if (glueStage.active()) {   // left the screens: their scene and character go before any map change
+            glueStage.release();
+            glueView.clear();
+        }
         if (g_login.justEnteredWorld()) {
             const float* p = g_login.worldPosition();
             memcpy(pl, p, sizeof pl);   // the character, whether or not its tile is in the pack
@@ -1286,7 +1324,11 @@ int main() {
 
         // --- the touch screen's draw list (game page: GPU; login / debug pages: the console)
         bool bottomDirty = false;
-        if (g_login.online() && gameUi.gamePage()) {
+        if (loginUi) {   // the login screens' touch screen, when it changed
+            bottomDirty = !bottomGpu || g_login.glueRevision() != glueRevShown;
+            glueRevShown = g_login.glueRevision();
+            bottomGpu = true;
+        } else if (g_login.online() && gameUi.gamePage()) {
             uiIn.pos = pl;
             uiIn.nowMs = g_login.sessionMs();
             bottomDirty = gameUi.draw(g_login.game(), uiIn, fps, g_login.latencyMs()) || !bottomGpu;
@@ -1305,6 +1347,87 @@ int main() {
                 rs.waterFogEnd = lc.look.fogEnd;
             }
         }
+        // --- the login screens' scene (stage 5.29): the backdrop of the screen (the Dark Portal, a racial home) seen through
+        // its own camera; on the character screens the character stands on the scene's mark, framed like WoWee's preview
+        // (the scene camera's direction, the distance from the character's height), turned with L / R
+        Camera glueCam;
+        float glueFov = 50.0f, glueNear = 0.3f, glueFar = 600.0f;
+        bool glueScene = false;
+        glueModels.clear();
+        glueCreatures.clear();
+        if (loginUi) {
+            const LoginFlow::Scene sc = g_login.scene();
+            glueStage.set(sc.id);
+            // a pack without the scenes (older conversions): the character alone, on the clear colour, seen from the front
+            static const W3dGlueScene kBare = {0, {3.0f, 0.0f, 1.2f}, {0.0f, 0.0f, 1.0f}, 0.0f, 0.3f, 100.0f, {0, 0, 0},
+                                               W3D_GLUE_HAS_CAMERA | W3D_GLUE_HAS_STAND, 2.0f, {0, 0, 0}};
+            const bool bare = !glueStage.have && sc.character;
+            if (glueStage.ready() || bare) {
+                const W3dGlueScene& g = bare ? kBare : glueStage.g;
+                if (!bare) {
+                    SceneModel smod;
+                    smod.model = glueStage.model;
+                    glueModels.push_back(smod);
+                }
+                float dir[3] = {1, 0, 0.15f};   // from the target towards the camera
+                if (g.flags & W3D_GLUE_HAS_CAMERA)
+                    for (int k = 0; k < 3; ++k) dir[k] = g.camPos[k] - g.camTarget[k];
+                float dl = sqrtf(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+                if (dl < 1e-3f) { dir[0] = 1; dir[1] = 0; dir[2] = 0; dl = 1; }
+                for (float& d : dir) d /= dl;
+                // the M2 camera's field of view is diagonal: the vertical one of a 400x240 screen
+                if (g.fov > 0.2f && g.fov < 2.8f)
+                    glueFov = 2.0f * atanf(tanf(g.fov * 0.5f) * 240.0f / 466.5f) * 180.0f / 3.14159265f;
+                glueFov = std::clamp(glueFov, 25.0f, 75.0f);
+                float eyePos[3], target[3];
+                if (!sc.character) {   // the login screen: the artist's own camera
+                    for (int k = 0; k < 3; ++k) { eyePos[k] = g.camPos[k]; target[k] = g.camTarget[k]; }
+                    glueFar = std::max(600.0f, g.radius * 2.5f);
+                } else {
+                    const glue::RaceInfo* ri = glue::race(sc.look.race);
+                    float height = ri ? ri->height[sc.look.sex & 1] : 1.9f;
+                    float yaw = atan2f(dir[1], dir[0]) + sc.yaw;   // facing the camera, plus the player's turn
+                    CreatureSeen c;
+                    c.guid = 0xFFFF000000000001ull;
+                    c.look = w3d_look_key(&sc.look);
+                    c.lookParts = sc.look;
+                    memcpy(c.pos, g.stand, sizeof c.pos);
+                    c.yaw = yaw;
+                    memcpy(c.equip, sc.equip, sizeof c.equip);
+                    memcpy(c.equipInv, sc.equipInv, sizeof c.equipInv);
+                    glueSeen.assign(1, c);
+                    glueView.update(glueSeen, (uint32_t)(ticksToMs(frameStart - startTick)), glueCreatures);
+                    if (!glueCreatures.empty() && glueCreatures[0].disp && glueCreatures[0].disp->ready()) {
+                        const W3dCreatureHeader* h = glueCreatures[0].disp->model->h;
+                        const float sh = (h->bmax[2] - h->bmin[2]) * glueCreatures[0].disp->d.scale;
+                        if (sh > 0.3f && sh < 6.0f) height = sh;
+                    }
+                    const float tanV = tanf(glueFov * 0.5f * 3.14159265f / 180.0f);
+                    const float dist = (height * 1.3f * 0.5f) / tanV;
+                    // the character list takes the right of the screen: the character stands left of the middle
+                    const float shift = g_login.phase() == LoginFlow::Phase::CharCreate ? 0.0f : 0.33f;
+                    const float right[3] = {-dir[1], dir[0], 0};   // the camera's right: forward (-dir) x up
+                    const float hw = dist * tanV * 400.0f / 240.0f;  // half the visible width at the character
+                    for (int k = 0; k < 3; ++k) {
+                        target[k] = g.stand[k] + (k == 2 ? height * 0.52f : 0.0f) + right[k] * shift * hw;
+                        eyePos[k] = target[k] + dir[k] * dist;
+                    }
+                    glueNear = std::max(0.2f, dist * 0.08f);
+                    glueFar = std::max(400.0f, g.radius * 2.5f);
+                }
+                float f[3] = {target[0] - eyePos[0], target[1] - eyePos[1], target[2] - eyePos[2]};
+                const float fl = sqrtf(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]);
+                if (fl > 1e-4f) {
+                    memcpy(glueCam.pos, eyePos, sizeof glueCam.pos);
+                    glueCam.yaw = atan2f(f[1], f[0]);
+                    glueCam.pitch = asinf(std::clamp(f[2] / fl, -1.0f, 1.0f));
+                    glueCam.drawDist = glueFar;
+                    glueScene = true;
+                }
+            }
+            g_login.setSceneDrawn(glueScene);
+        }
+
         // --- stream, then draw
         streamerUpdate(cam.pos, cam.drawDist);
         fc = FrameCounters();
@@ -1319,17 +1442,22 @@ int main() {
             for (int eye = 0; eye < (stereo ? 2 : 1); ++eye) {
                 C3D_RenderTarget* t = eye == 0 ? left : topRight;
                 if (stereo) rendererSetEye(eye == 0 ? -iod : iod);
-                C3D_RenderTargetClear(t, C3D_CLEAR_ALL, rendererClearColor(rs), 0);
+                C3D_RenderTargetClear(t, C3D_CLEAR_ALL, loginUi ? 0x05080CFF : rendererClearColor(rs), 0);
                 C3D_FrameDrawOn(t);
-                rendererDraw(t, cam, rs, fc, &markers, &creatures);
-                uiDraw(hud, kHudW);
+                if (loginUi) {   // the login screens: their scene, then their frames
+                    if (glueScene) rendererDrawScene(glueCam, glueFov, glueNear, glueFar, glueModels, &glueCreatures, fc);
+                    uiDraw(g_login.glueTop(), kHudW);
+                } else {
+                    rendererDraw(t, cam, rs, fc, &markers, &creatures);
+                    uiDraw(hud, kHudW);
+                }
             }
             if (stereo) rendererSetEye(0);
         }
         if (bottomDirty && bottomT) {   // the touch screen only when its list changed
             C3D_RenderTargetClear(bottomT, C3D_CLEAR_COLOR, 0x080B0EFF, 0);
             C3D_FrameDrawOn(bottomT);
-            uiDraw(gameUi.screen(), kTouchW);
+            uiDraw(loginUi ? g_login.glueBottom() : gameUi.screen(), kTouchW);
         }
         C3D_FrameEnd(0);
         uiEndFrame();

@@ -856,6 +856,53 @@ void rendererDraw(C3D_RenderTarget* target, const Camera& cam, const RenderSetti
     g_fogY = keepY;
 }
 
+void rendererDrawScene(const Camera& cam, float vfovDeg, float nearZ, float farZ, const std::vector<SceneModel>& models,
+                       const std::vector<CreatureInstance>* creatures, FrameCounters& fc) {
+    const C3D_Mtx keepProj = g_proj;
+    const float keepNear = g_near, keepFar = g_far;
+    g_near = std::max(nearZ, 0.1f);
+    g_far = std::max(farZ, g_near + 1.0f);
+    if (g_iod == 0) Mtx_PerspTilt(&g_proj, C3D_AngleFromDegrees(vfovDeg), C3D_AspectRatioTop, g_near, g_far, false);
+    else Mtx_PerspStereoTilt(&g_proj, C3D_AngleFromDegrees(vfovDeg), C3D_AspectRatioTop, g_near, g_far, g_iod, 3.0f, false);
+    float f[3];
+    cam.forward(f);
+    C3D_Mtx view;
+    Mtx_LookAt(&view, FVec3_New(0, 0, 0), FVec3_New(f[0], f[1], f[2]), FVec3_New(0, 0, 1), false);
+    Camera wide = cam;
+    wide.drawDist = g_far;
+    Frustum fr;
+    fr.build(wide, g_near);
+    RenderSettings rs;
+    rs.fog = false;
+    static std::vector<Instance> inst;
+    inst.clear();
+    inst.reserve(models.size());
+    for (const SceneModel& sm : models) {
+        Model* m = sm.model;
+        if (!m || !m->h || m->state != AssetState::Ready || !m->texturesReady()) continue;
+        Instance in{};
+        in.model = m;
+        memcpy(in.pos, sm.pos, sizeof in.pos);
+        memcpy(in.rot, sm.rot, sizeof in.rot);
+        in.scale = sm.scale;
+        in.radius = 1e6f;
+        in.lightModel[0] = kSun[0]; in.lightModel[1] = kSun[1]; in.lightModel[2] = kSun[2];
+        inst.push_back(in);
+    }
+    for (const Instance& in : inst) {
+        if (in.model->visible.empty()) g_activeModels.push_back(in.model);
+        in.model->visible.push_back(&in);
+    }
+    drawModels(cam, view, rs, false, fc);
+    if (creatures) drawCreatures(cam, view, fr, rs, *creatures, fc);
+    drawModels(cam, view, rs, true, fc);
+    for (Model* m : g_activeModels) m->visible.clear();
+    g_activeModels.clear();
+    g_proj = keepProj;
+    g_near = keepNear;
+    g_far = keepFar;
+}
+
 u32 rendererClearColor(const RenderSettings& rs) {   // RGBA8 for C3D_RenderTargetClear
     if (!rs.underwater) return 0x8CB8E8FF;
     return ((u32)rs.waterFog[0] << 24) | ((u32)rs.waterFog[1] << 16) | ((u32)rs.waterFog[2] << 8) | 0xFF;

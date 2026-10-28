@@ -216,6 +216,10 @@ CreatureDisplay* streamerAcquireDisplay(uint32_t displayId);
 // (nullptr if the pack has no CHRS for the race/sex). Release with streamerReleaseDisplay.
 // equip (optional) = ItemDisplayInfo ids by W3dEquipSlot (W3D_EQ_SLOTS entries): their armour is painted on the body.
 CreatureDisplay* streamerAcquirePlayerDisplay(const W3dLook& look, const uint32_t* equip = nullptr);
+// Stage 5.29 (character creation): the CHRS entry of a race / sex: 1 = ready (blob, size), 0 = loading, -1 = not in the pack.
+int streamerCharInfo(uint32_t race, uint32_t sex, const uint8_t** blob, uint32_t* size);
+// Reads the first 'size' bytes of an entry right away (small entries only: the GLUE scenes).
+bool streamerReadEntry(uint32_t type, uint32_t id, void* dst, uint32_t size);
 // Worn items (stage 5.19): an ITEM entry (nullptr if the pack has none; check state / ok) and the item models.
 struct ItemDisplay {
     uint32_t id = 0;
@@ -274,7 +278,12 @@ void rendererInit();
 void rendererShutdown();
 void rendererSetProjection(float drawDist);   // also rebuilds the fog LUT
 void rendererSetEye(float iod);               // stereoscopic 3D: the projection of one eye (-iod left, +iod right, 0 = mono)
-u32 rendererClearColor(const RenderSettings& rs);   // the sky's colour behind everything (RGBA8), water when under it
+u32 rendererClearColor(const RenderSettings& rs);
+// Stage 5.29: a login / character screen scene: static models and creatures only (no terrain, sky, water or fog), seen
+// through a camera with its own vertical field of view and clip planes.
+struct SceneModel { Model* model = nullptr; float pos[3] = {0, 0, 0}; float rot[3] = {0, 0, 0}; float scale = 1; };
+void rendererDrawScene(const Camera& cam, float vfovDeg, float nearZ, float farZ, const std::vector<SceneModel>& models,
+                       const std::vector<CreatureInstance>* creatures, FrameCounters& fc);   // the sky's colour behind everything (RGBA8), water when under it
 void rendererDraw(C3D_RenderTarget* target, const Camera& cam, const RenderSettings& rs, FrameCounters& fc,
                   const std::vector<Marker>* markers = nullptr,
                   const std::vector<CreatureInstance>* creatures = nullptr);

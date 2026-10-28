@@ -79,6 +79,7 @@ int convertAll(const Options& oIn, const DataDir& data, const AllOptions& ao, Ui
         exportLocks(data, folder + "locks.txt", o.verbose);
         exportAreaTriggers(data, folder + "areatriggers.txt", o.verbose);
         exportEmotes(data, folder + "emotes.txt", o.verbose);
+        exportGlueTexts(data, folder + "glue.txt", o.verbose);
     }
     // ---- 2. sound
     if (ao.sound) {
@@ -191,6 +192,7 @@ int convertAll(const Options& oIn, const DataDir& data, const AllOptions& ao, Ui
     trace("creatures, players, items, ships, game objects");
     resetMapState(st);
     convertCreatures(o, data, pool, st);
+    convertGlueScenes(o, data, pool, st);   // stage 5.29: login / character screen scenes
     exportTransports(data, folder + "transports.txt", o.verbose);
 
     // ---- 5. the pool
