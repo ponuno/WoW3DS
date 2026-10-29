@@ -3,9 +3,6 @@
 A World of Warcraft **1.12.1 (Vanilla)** client for the **New Nintendo 3DS / New 2DS XL**, written from scratch in C++ for
 devkitARM (libctru + citro3d), plus a PC converter that turns *your own* 1.12 game files into packs the console can stream.
 
-> **Status: experimental hobby project.** Features are developed against PC tests (a stubbed libctru and an independent
-> Python server) and then tried on a real New 3DS against a real server; [`PLAN.md`](PLAN.md) is the detailed, honest
-> per-stage status, including what has not been confirmed on hardware yet.
 
 No game data, textures, models or sounds are in this repository. You need your own legally obtained WoW 1.12.1 client
 (`Data/*.MPQ`) and a private server that speaks the 1.12 protocol (the client was developed against a vMaNGOS-compatible
@@ -14,9 +11,9 @@ server).
 ## What works
 
 - **World:** terrain, water, doodads and WMO buildings streamed per tile; continents and instance maps as separate packs
-  (`map<ID>.w3dp`); dungeons, raids and the Deeprun Tram; in-game **loading screens** and a loading gate that keeps the
+  (`map<ID>.w3dp`); dungeons, raids; in-game **loading screens** and a loading gate that keeps the
   character frozen until the ground and its collision are ready.
-- **Walking (stage 6.18):** the exact ground of the terrain (`GRND`), unsimplified building and doodad collision, the
+- **Walking:** the exact ground of the terrain (`GRND`), unsimplified building and doodad collision, the
   original walking rules (step height, slopes steeper than 50 degrees cannot be climbed), **fall damage** (the server is
   told about long falls the way the original client does it).
 - **Water:** lakes, rivers, the sea, lava and slime of the terrain and of buildings with the game's animated textures;
@@ -30,14 +27,12 @@ server).
   reputation, talents, **skills and their progress (weapon skills, professions)**, **descriptions of spells, talents and
   item effects** taken from your client's `Spell.dbc` (stage 6.20), flight masters, mail, auction house, bank, trade,
   duels. See [`PLAN.md`](PLAN.md) for the exact list.
-- **Interface language:** **English by default everywhere** (also in the main menu); Russian can be switched on in the
-  Settings tab.
-- **Controls:** a controller scheme built for the 3DS ("Forever" layout, or "Classic" for the Old 3DS), touch-screen UI
+- **Controls:** a controller scheme built for the 3DS ("Forever" layout), touch-screen UI
   on the bottom screen; an optional ConsolePort skin (round crossbar buttons, the segmented experience bar) from your own
   copy of the addon. Top screen: normal 400x240, wide 800x240 or stereoscopic 3D.
 - **Sound:** interface sounds, footsteps, world sounds, voices, zone music and ambience (DSP firmware dump required).
 
-Not done yet: Warden (servers that require it will drop the connection), see `PLAN.md`.
+Not done yet: Warden (servers that require it will drop the connection), a lot of other minor HUD and UI stuff, a lot of not so minor gameplay stuff
 
 ## Installation (the release `.3dsx` + the converter pack)
 
@@ -117,11 +112,11 @@ Start **w3dproto** from the Homebrew Launcher. On the login screen enter the **s
 `logon.example.com`), the **account** and the **password**, then choose the realm and your character. The server, the
 account, the last realm and character are remembered in `login.cfg`; **the password is never saved**.
 
+realmlist address could be obtained from realmlist.wtf from your server client
+
 ### Updating
 
-Replace `w3dproto.3dsx`. When the release notes ask for it, also rerun the converter of the same release: `ui.bat` for
-new texts or interface parts (for example `spelldesc.bin` and `skills.txt` of stage 6.19-6.20), `all.bat` for new
-world data (collision, ground).
+Replace `w3dproto.3dsx`. When the release notes ask for it, also rerun the converter of the same release.
 
 ## Controls
 
@@ -147,10 +142,6 @@ Ground spells (Blizzard, Flamestrike): a ring appears 10 yards ahead, the C-Stic
 to cast, A cancels (or cast straight at the target: Settings, *Ground spells*). ZL / ZR can be switched to *press to
 toggle* in the Settings.
 
-### Classic scheme (Old 3DS)
-
-Circle Pad up / down walk, left / right turn; C-Stick or D-pad left / right look, D-pad up / down zoom; B jump, L next
-target, R attack, Y chat, A interact, X next hotbar set (on the touch bar), START menu.
 
 ### Touch screen
 
@@ -173,17 +164,6 @@ is wrong in a place (falling through, hanging in the air, a wall where there is 
 send `perf_events.txt`: every 3 seconds it records the height of the feet and what is under them. For converter
 problems send the `log_*.txt` of the output folder.
 
-## Repository layout
-
-| Path | What |
-|---|---|
-| `proto3ds/` | The 3DS application: streamer, renderer, controls, game UI, audio. `source/`, PC tests in `tests/` |
-| `net/` | Game protocol and world state (auth, world session, objects, movement, spells, quests, ...). Plain C++20, also built on the PC for tests (`net/tools/w3dlogin.cpp`) |
-| `converter/` | `w3dconv` (command line), `w3dgui` (Windows GUI), `w3dpreview` (PNG previews) and their tests |
-| `common/` | Shared binary formats (`w3d_format.h`, `w3d_ui.h`, ...) used by converter and client |
-| `tools/` | `armcheck` (ARM compile check on a PC), font generator |
-| `docs/DEVLOG_RU.md` | The original development log (Russian) |
-| `PLAN.md` | Staged plan and per-stage status |
 
 ## Building
 
@@ -278,32 +258,9 @@ Copy the output to the SD card as `sdmc:/3ds/w3dproto/` (`test.w3dp` or `map0.w3
 `ui.w3dp`, the `sound/` folder and the text files the converter writes next to the packs, among them `areatriggers.txt` (without it dungeon doors and the Deeprun Tram do nothing) and `glue.txt` (texts, clothes of new characters and zone names of the character screens)), then start `w3dproto.3dsx`
 through the Homebrew Launcher.
 
-## Tests (no console and no game data needed)
-
-Shared pool and `--all`: `converter/tests/run_pool_tests.sh <build dir>`.
-Login / character screens: `proto3ds/tests/run_glue.sh [ui.w3dp] [glue.txt]` (screenshots and input checks).
-Streaming order (a synthetic city read at SD-card speed): `proto3ds/tests/run_streaming.sh <build dir>`.
-Particles and lamp glows: `proto3ds/tests/run_fx.sh [wmo.w3dp]` (after run_wmo_tests.sh).
-Spell effects: `proto3ds/tests/run_spellfx.sh <build dir>`.
-Liquids: `converter/tests/run_water_tests.sh <build dir>`, `proto3ds/tests/run_swim.sh`, and `water_test` inside
-`net/tests/run_stage5.sh`.
-
-```
-converter/tests/run_wmo_tests.sh <build dir>        buildings, collision, previews
-converter/tests/run_dungeon_tests.sh <build dir>    instance maps, loading screens
-converter/tests/run_player_tests.sh <build dir>     player models
-converter/tests/run_transport_tests.sh <build dir>  ships and zeppelins
-converter/tests/run_gui_tests.sh <build dir>        GUI settings logic
-proto3ds/tests/run_streamer.sh <pack.w3dp>          the streamer on the PC with sanitizers
-proto3ds/tests/run_ui.sh, run_hud.sh, run_anim.sh   UI, HUD and animation checks
-net/tests/run_stage5.sh                             protocol tests against an independent Python server
-tools/armcheck/armcheck.sh <files>                  ARM compile check (needs a devkitPro-like sysroot)
-```
-
-Some net and UI tests replay a recorded real-server session that is not part of this repository.
 
 ## Legal
 
 This is an unofficial fan project, not affiliated with or endorsed by Blizzard Entertainment. "World of Warcraft" is a
 trademark of Blizzard Entertainment. Do not share converted packs: they contain data derived from the game. The
-converter uses [WoWee](https://github.com/Kelsidavis/WoWee) (MIT) for file-format parsing.
+converter uses [WoWee](https://github.com/Kelsidavis/WoWee) (MIT) for file-format parsing. Also game logic from the same project
