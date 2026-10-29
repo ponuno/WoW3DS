@@ -3,9 +3,9 @@
 A World of Warcraft **1.12.1 (Vanilla)** client for the **New Nintendo 3DS / New 2DS XL**, written from scratch in C++ for
 devkitARM (libctru + citro3d), plus a PC converter that turns *your own* 1.12 game files into packs the console can stream.
 
-> **Status: experimental hobby project.** Most features are tested on a PC against stand-in code (a stubbed libctru and an
-> independent Python server). Only the items listed under "Verified on hardware" were run on a real console and a real
-> server. Anything else should be treated as unverified. [`PLAN.md`](PLAN.md) is the detailed, honest per-stage status.
+> **Status: experimental hobby project.** Features are developed against PC tests (a stubbed libctru and an independent
+> Python server) and then tried on a real New 3DS against a real server; [`PLAN.md`](PLAN.md) is the detailed, honest
+> per-stage status, including what has not been confirmed on hardware yet.
 
 No game data, textures, models or sounds are in this repository. You need your own legally obtained WoW 1.12.1 client
 (`Data/*.MPQ`) and a private server that speaks the 1.12 protocol (the client was developed against a vMaNGOS-compatible
@@ -13,26 +13,163 @@ server).
 
 ## What works
 
-- **World:** terrain, water, doodads and WMO buildings streamed per tile; walking with floors, stairs and walls
-  (collision from WMO and M2 data); continents and instance maps as separate packs (`map<ID>.w3dp`); dungeons are
-  WDT-only maps converted from their global WMO; in-game **loading screens** and a loading gate that keeps the character
-  frozen until the ground and its collision are ready.
-- **Water:** lakes, rivers, the sea, lava and slime of the terrain and of buildings (Stormwind's canals, dungeon pools)
-  with the game's own animated textures and Light.dbc colours; swimming (diving with the camera, swimming up, jumping
-  out), falling into water, water walking, the underwater view, breath / fatigue bars, drowning and lava damage, fishing.
-- **World objects:** elevators and trams (TransportAnimation.dbc, vMaNGOS formula), doors and gates (open / close animation, closed doors block), tilted objects (GAMEOBJECT_ROTATION), player corpses, rings for ground spells, a compact default set of ordinary game objects (stage 5.41; unverified on hardware).
+- **World:** terrain, water, doodads and WMO buildings streamed per tile; continents and instance maps as separate packs
+  (`map<ID>.w3dp`); dungeons, raids and the Deeprun Tram; in-game **loading screens** and a loading gate that keeps the
+  character frozen until the ground and its collision are ready.
+- **Walking (stage 6.18):** the exact ground of the terrain (`GRND`), unsimplified building and doodad collision, the
+  original walking rules (step height, slopes steeper than 50 degrees cannot be climbed), **fall damage** (the server is
+  told about long falls the way the original client does it).
+- **Water:** lakes, rivers, the sea, lava and slime of the terrain and of buildings with the game's animated textures;
+  swimming, diving, water walking, the underwater view, breath / fatigue bars, drowning and lava damage, fishing.
+- **World objects:** elevators and trams, doors and gates (closed doors block), ships and zeppelins, tilted objects,
+  player corpses, rings for ground spells, ordinary game objects (chests, herbs, ore, event decorations).
 - **Characters and creatures:** skinned, animated creature and player models (race, skin, face, hair, armour layers,
-  helmets, weapons), ships and zeppelins, ordinary game objects (event decorations, chests, ...).
-- **Gameplay client:** the original client's login, realm, character selection and creation screens (their 3D scenes, the
-  character turned with L / R, race and class descriptions on the touch screen), chat, targeting, auto-attack, spells and action bar, loot,
-  vendors, trainers, quests, items and tooltips, auras, parties, reputation, talents, flight masters, mail/auction/trade
-  windows (see `PLAN.md` for the exact list).
-- **Controls:** a controller scheme built for the 3DS ("Forever" layout, or "Classic"), touch-screen UI on the bottom
-  screen, top screen modes: normal 400x240, wide 800x240, or stereoscopic 3D.
-- **Sound:** interface sounds, footsteps, world sounds, zone music and ambience (from your client's files, DSP firmware
-  dump required on the console).
+  helmets, weapons).
+- **Game client:** the original login, realm, character selection and creation screens (with their 3D scenes), chat,
+  targeting, auto-attack, spells and hotbars, pets, loot, vendors, trainers, quests, items and tooltips, auras, parties,
+  reputation, talents, **skills and their progress (weapon skills, professions)**, **descriptions of spells, talents and
+  item effects** taken from your client's `Spell.dbc` (stage 6.20), flight masters, mail, auction house, bank, trade,
+  duels. See [`PLAN.md`](PLAN.md) for the exact list.
+- **Interface language:** **English by default everywhere** (also in the main menu); Russian can be switched on in the
+  Settings tab.
+- **Controls:** a controller scheme built for the 3DS ("Forever" layout, or "Classic" for the Old 3DS), touch-screen UI
+  on the bottom screen; an optional ConsolePort skin (round crossbar buttons, the segmented experience bar) from your own
+  copy of the addon. Top screen: normal 400x240, wide 800x240 or stereoscopic 3D.
+- **Sound:** interface sounds, footsteps, world sounds, voices, zone music and ambience (DSP firmware dump required).
 
+Not done yet: Warden (servers that require it will drop the connection), see `PLAN.md`.
 
+## Installation (the release `.3dsx` + the converter pack)
+
+### What you need
+
+- A **New Nintendo 3DS / New 2DS XL** (an Old 3DS works with the Classic scheme, but slowly) with custom firmware
+  (Luma3DS) and the **Homebrew Launcher**.
+- `sdmc:/3ds/dspfirm.cdc` for sound: run the **DSP1** homebrew once if you do not have it.
+- An SD card (FAT32) with room for the packs: a few hundred MB for a test region, several GB for the whole game.
+- Your own **WoW 1.12.1 client** (the `Data` folder with the `.MPQ` files) and a Windows PC.
+- **7-Zip** (https://www.7-zip.org) to unpack the converter pack.
+- An account on a 1.12.1 private server (developed against vMaNGOS-compatible servers).
+
+### Step 1. The 3DS application
+
+Download `w3dproto.3dsx` from the releases (or build it, see *Building*) and copy it to the SD card as
+`sdmc:/3ds/w3dproto/w3dproto.3dsx`. The same folder `sdmc:/3ds/w3dproto/` holds the packs and settings.
+
+### Step 2. Unpack the converter pack
+
+Unpack the converter pack (`w3dconv-win64.7z`) with 7-Zip into a folder **without non-Latin characters in its path**
+(for example `C:\w3dconv`). It contains:
+
+| File | What |
+|---|---|
+| `w3dgui.exe` | the converter with a window (recommended) |
+| `w3dconv.exe` | the command-line converter (`w3dgui.exe` runs it) |
+| `w3dpreview.exe` | PNG previews of a pack (maps, models, collision) |
+| `all.bat` | **everything in one run**: interface, texts, sound, every map and dungeon |
+| `ui.bat`, `sound.bat` | only the interface and texts / only the sound |
+| `convert.bat` | a small test region (Elwynn Forest and Northshire) |
+| `ui_skin.txt` | the interface skin description (keep it next to `w3dconv.exe`) |
+| `README_RU.txt` | notes per converter version (Russian) |
+| `w3dlogin.exe`, `*_test.bat` | developer tools (login and movement tests on the PC) |
+
+**Optional, ConsolePort look:** put your own copy of the ConsolePort addon (the `ConsolePort` folder with
+`ConsolePort` and `ConsolePort_Bar` inside, as in `Interface/AddOns`; the unpacked GitHub download `ConsolePort-master` works too) next to `w3dconv.exe`
+before converting the interface; the log says `consoleport: ...`. Without it the plain crossbar is used.
+
+### Step 3. Convert your game files
+
+**With the window:** start `w3dgui.exe`, choose the client's `Data` folder and an output folder, tick **EVERYTHING** and
+press **Start** (details below in *Using the Windows GUI converter*).
+
+**With the batch file:** open a command prompt in the converter folder and run
+
+```
+all.bat "D:\WoW 1.12\Data" "D:\w3d_out"
+```
+
+The first argument is the client's `Data` folder, the second the output folder (it may be `<SD>:\3ds\w3dproto` on the
+card itself). Without arguments `all.bat` uses the paths written at its top - edit them once with Notepad if you like.
+The full conversion takes **hours** and several GB; `convert.bat` makes a quick test region first.
+
+### Step 4. Copy to the SD card
+
+Copy **everything in the output folder** except `log_*.txt` and `preview\` to `sdmc:/3ds/w3dproto/`:
+
+```
+sdmc:/3ds/w3dproto/
+  w3dproto.3dsx
+  map0.w3dp, map1.w3dp, map<ID>.w3dp ...   maps (Eastern Kingdoms, Kalimdor, dungeons)
+  common.w3dp, common1.w3dp ...            the shared textures and models (they belong to the maps of the same run)
+  ui.w3dp                                  interface, icons, fonts, zone maps, loading screens
+  sound/                                   sound and music
+  *.txt, spelldesc.bin                     texts: spells, spell descriptions, talents, skills, factions, flight paths,
+                                           area triggers (dungeon doors, the tram), glue texts, transports ...
+```
+
+Packs of two different runs do not mix: after a new `all.bat` replace all `map*.w3dp` and `common*.w3dp` together.
+
+### Step 5. Play
+
+Start **w3dproto** from the Homebrew Launcher. On the login screen enter the **server** (the realmlist address, e.g.
+`logon.example.com`), the **account** and the **password**, then choose the realm and your character. The server, the
+account, the last realm and character are remembered in `login.cfg`; **the password is never saved**.
+
+### Updating
+
+Replace `w3dproto.3dsx`. When the release notes ask for it, also rerun the converter of the same release: `ui.bat` for
+new texts or interface parts (for example `spelldesc.bin` and `skills.txt` of stage 6.19-6.20), `all.bat` for new
+world data (collision, ground).
+
+## Controls
+
+### Forever scheme (default, New 3DS)
+
+| Input | Action |
+|---|---|
+| Circle Pad | move (push fully to run, a little to walk); the character turns to the stick direction |
+| C-Stick | camera; while L or R is held it aims the target ring |
+| **B** | jump (held: swim up) |
+| **A** | cancel (spell cast, target, open window) |
+| **Y** | interact (talk, loot, open); in combat: attack |
+| **X** | context menu of the target |
+| D-pad | hotbar slots 1-4 |
+| **ZL** / **ZR** / **ZL+ZR** (held) | hotbar sets 1 / 2 / 3 on the D-pad and the face buttons (28 slots per page) |
+| **R** held (enemy mode) | X or D-pad: next enemy; Y attack; B last hostile target; A assist |
+| **L** held (friendly mode) | X next friendly unit; D-pad party members 1-4; B target yourself; A assist |
+| **L+R** held | D-pad left / right: hotbar page; up / down: camera zoom; A: centre the camera |
+| START | menu |
+| SELECT | free camera (tap); SELECT + D-pad left / right: switch the touch-screen tabs |
+
+Ground spells (Blizzard, Flamestrike): a ring appears 10 yards ahead, the C-Stick moves it, press the spell button again
+to cast, A cancels (or cast straight at the target: Settings, *Ground spells*). ZL / ZR can be switched to *press to
+toggle* in the Settings.
+
+### Classic scheme (Old 3DS)
+
+Circle Pad up / down walk, left / right turn; C-Stick or D-pad left / right look, D-pad up / down zoom; B jump, L next
+target, R attack, Y chat, A interact, X next hotbar set (on the touch bar), START menu.
+
+### Touch screen
+
+Tabs: **Chat, Bags, Gear, Spells** (spell book, talents, skills), **Quests, Combat, Map, Social, Settings**. Tap an item
+or spell for its tooltip / description; in the Spells tab tap a spell, then press a button (with ZL / ZR for the other
+sets) or tap a bar cell to put it on the hotbar. The Settings tab has the control scheme, the **language (English /
+Russian)**, draw distance, number of creatures drawn, the top screen mode (wide / 3D), effects, volumes, FPS display and
+the performance log.
+
+### Login and character screens
+
+D-pad and A to choose on the screen (or tap); L / R turn the character. Character selection: A enter the world, X create,
+Y delete, SELECT change the realm, B back. Character creation: X random look, Y name, START create, B back.
+
+## Files the client writes, reporting problems
+
+All in `sdmc:/3ds/w3dproto/`: `pad.txt` (settings: `language 0` English, `1` Russian), `login.cfg` (server and account),
+the hotbars per character, and with the performance log on (Settings) `perf.csv` and `perf_events.txt`. When something
+is wrong in a place (falling through, hanging in the air, a wall where there is none), stand there for 5-10 seconds and
+send `perf_events.txt`: every 3 seconds it records the height of the feet and what is under them. For converter
+problems send the `log_*.txt` of the output folder.
 
 ## Repository layout
 
