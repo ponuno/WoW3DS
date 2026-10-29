@@ -77,6 +77,8 @@ Unpack the converter pack (`w3dconv-win64.7z`) with 7-Zip into a folder **withou
 `ConsolePort` and `ConsolePort_Bar` inside, as in `Interface/AddOns`; the unpacked GitHub download `ConsolePort-master` works too) next to `w3dconv.exe`
 before converting the interface; the log says `consoleport: ...`. Without it the plain crossbar is used.
 
+ConsolePort: https://github.com/seblindfors/ConsolePort
+
 ### Step 3. Convert your game files
 
 **With the window:** start `w3dgui.exe`, choose the client's `Data` folder and an output folder, tick **EVERYTHING** and
