@@ -98,6 +98,10 @@ void GameSession::attach(WorldClient& wc, uint32_t nowMs) {
     auction = AuctionWindow();
     trade = TradeState();
     mailTextAsked_.clear();
+    for (MirrorTimer& m : mirror) m = MirrorTimer();
+    envDamageTaken = lastEnvDamageMs = 0;
+    fishBiteMs = 0;
+    fishBiteGuid = 0;
     const float* p = wc.position();
     mover = Mover();   // a new session: default speeds, no water walking / walk mode from the last one
     mover.reset(p[0], p[1], p[2], wc.orientation(), nowMs);
@@ -143,6 +147,8 @@ void GameSession::update(uint32_t nowMs) {
     updateQuests(nowMs);
     updateVendor(nowMs);
     updateServices(nowMs);
+    updatePet(nowMs);
+    updateGuildNames(nowMs);
     sendItemQueries(nowMs);
     // A cast whose SPELL_GO / failure never arrived must not block the bar for ever.
     if (cast.active && nowMs - cast.startMs > cast.durMs + 2000) cast = CastState();
@@ -227,6 +233,7 @@ bool GameSession::handle(uint16_t op, const Bytes& data, uint32_t nowMs) {
             // anything still queued was measured from the old spot.
             mover.queue().clear();
             teleported_ = true;
+            triggerWatch.rearm();   // we stand where the server put us: no trigger fires until we walk into one
             ++stats.teleports;
             return true;
         }
@@ -236,6 +243,7 @@ bool GameSession::handle(uint16_t op, const Bytes& data, uint32_t nowMs) {
             if (r.bad) return true;
             objects.clear();
             objects.setSelf(self_);
+            triggerWatch.rearm();
             mover.reset(x, y, z, o, nowMs);
             send(MoveOp::WorldportAck, {}, nowMs);
             sendActiveMover(nowMs);
@@ -289,7 +297,7 @@ bool GameSession::handle(uint16_t op, const Bytes& data, uint32_t nowMs) {
                    handleLife(op, data, nowMs) || handleFactions(op, data, nowMs) || handleVendor(op, data, nowMs) ||
                    handleQuests(op, data, nowMs) || handleGroup(op, data, nowMs) || handleFriends(op, data, nowMs) ||
                    handleServices(op, data, nowMs) || handleMail(op, data, nowMs) || handleAuction(op, data, nowMs) ||
-                   handleTrade(op, data, nowMs);
+                   handleTrade(op, data, nowMs) || handleWater(op, data, nowMs) || handlePet(op, data, nowMs);
     }
 }
 

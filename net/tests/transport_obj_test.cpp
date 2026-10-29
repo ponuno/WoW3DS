@@ -117,6 +117,29 @@ int main() {
         m.reset(1, 2, 3, 0, 400);
         CHECK(!m.onTransport());
     }
+    {   // 6.14: platforms among the objects ("S" lines), a transport whose model the filter missed, the fall window
+        TransportTable tt;
+        CHECK(tt.parse("S\t4006\t1.00\t-4.00\t-1.50\t4.00\t1.50\nM\t4005\t0.30\t-3.00\t-1.25\t3.00\t1.25\n"));
+        CHECK(tt.staticDeckCount() == 1 && tt.staticDeck(4006) && !tt.staticDeck(4005));
+        CHECK(tt.deck(4006) && tt.deck(4005));   // a transport falls back to a platform's deck; an M line is not a platform
+        const DeckInfo* d = tt.staticDeck(4006);
+        // a bridge at (100, 50, 10), turned 90 degrees (its x axis points to +y), scale 2: the deck is 16 x 6 yd, 2 yd up
+        const float pos[3] = {100, 50, 10};
+        const float yaw = 1.5707963f;
+        float z = 0;
+        CHECK(d && staticDeckAt(*d, pos, yaw, 2.0f, 100, 50 + 7.9f, &z) && std::fabs(z - 12.0f) < 1e-4f);   // near the +x end
+        CHECK(!staticDeckAt(*d, pos, yaw, 2.0f, 100, 50 + 8.2f, &z));                                          // beyond it
+        CHECK(!staticDeckAt(*d, pos, yaw, 2.0f, 100 + 3.2f, 50, &z));                                          // beside it (half width 3)
+        CHECK(staticDeckAt(*d, pos, yaw, 2.0f, 100 - 2.9f, 50, &z));
+        // the window: a step up and a slow fall
+        CHECK(deckReaches(10.0f, 9.0f, 1.5f, 0));          // 1 yd above the feet: a step
+        CHECK(!deckReaches(10.0f, 8.0f, 1.5f, 0));         // 2 yd above: too high
+        CHECK(deckReaches(10.0f, 11.0f, 1.5f, 0));         // 1 yd below: standing
+        CHECK(!deckReaches(10.0f, 14.0f, 1.5f, 0));        // 4 yd below: a walker passing it
+        CHECK(deckReaches(10.0f, 14.0f, 1.5f, 3.0f));      // ... but one that fell 3 yd this frame has just gone through it
+        CHECK(!deckReaches(10.0f, 14.0f, 1.5f, 1.0f));
+        CHECK(deckReaches(10.0f, 14.0f, 1.5f, -5.0f) == deckReaches(10.0f, 14.0f, 1.5f, 0));   // a negative drop is nothing
+    }
     printf("TRANSPORT-OBJ: %s\n", fails ? "FAIL" : "PASS");
     return fails != 0;
 }

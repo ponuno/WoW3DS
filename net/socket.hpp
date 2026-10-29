@@ -10,6 +10,7 @@ namespace w3n {
 
 bool netInit();       // WSAStartup / socInit (3DS); safe to call repeatedly
 void netShutdown();
+bool netRadioExclusive();   // 3DS: the Wi-Fi is ours alone (no StreetPass scans / SpotPass), see netInit
 
 class TcpSocket {
 public:

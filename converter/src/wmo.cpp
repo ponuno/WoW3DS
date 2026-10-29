@@ -8,6 +8,7 @@
 // placements. Placement maths follows WoWee terrain_manager.cpp:
 //   wmoMatrix = T(pos) * Rz * Ry * Rx (placementEuler), doodad = wmoMatrix * T * R(quat) * S.
 #include "conv.h"
+#include "w3d_collision.h"
 
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/wmo_group_path.hpp"
@@ -20,6 +21,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
+#include <exception>
 #include <map>
 
 namespace w3d {
@@ -33,7 +36,28 @@ struct WmoAsset {
     std::vector<glm::vec3> coll;               // collidable triangles (WMO space), 3 vertices each
     struct Doodad { std::string path; glm::mat4 local; };
     std::vector<std::vector<Doodad>> sets;     // per doodad set
+    // Liquids (stage 5.26): wet MLIQ cells of every group, WMO space, corners in order, with their kind.
+    struct LiquidCell { glm::vec3 p[4]; uint8_t kind; };
+    std::vector<LiquidCell> liquid;
 };
+
+// Root MOHD fields the WoWee loader does not keep: flags (u16 at +60) and the WMO id (u32 at +32).
+void rootHeader(const std::vector<uint8_t>& b, uint32_t* flags, uint32_t* id) {
+    *flags = 0; *id = 0;
+    for (size_t p = 0; p + 8 <= b.size();) {
+        uint32_t len;
+        std::memcpy(&len, &b[p + 4], 4);
+        if (!std::memcmp(&b[p], "DHOM", 4) && len >= 62 && p + 8 + 62 <= b.size()) {
+            uint16_t f;
+            std::memcpy(&f, &b[p + 8 + 60], 2);
+            std::memcpy(id, &b[p + 8 + 32], 4);
+            *flags = f;
+            return;
+        }
+        if (len > b.size() - p - 8) return;
+        p += 8 + len;
+    }
+}
 
 std::map<std::string, WmoAsset> g_wmoCache;    // normalized path -> converted asset
 
@@ -78,8 +102,31 @@ float matrixToPlacement(const float m4[16], float outRot[3]) {
 
 void resetWmoCache() { g_wmoCache.clear(); }
 
+static const WmoAsset& loadWmoImpl(PackWriter& pack, const DataDir& data, const std::string& path, const Options& o,
+                                   ConvStats& st);
+
+// A building that cannot be converted (a C++ exception: out of memory, a length error from a broken table, ...) is skipped
+// with a line in the log instead of ending a run that has been going for hours. (Access violations are not exceptions:
+// those are reported by the crash guard, and the data that caused the known ones is now sanitised.)
 static const WmoAsset& loadWmo(PackWriter& pack, const DataDir& data, const std::string& path, const Options& o,
                                ConvStats& st) {
+    const std::string key = DataDir::normalize(path);
+    auto it = g_wmoCache.find(key);
+    if (it != g_wmoCache.end()) return it->second;
+    trace("WMO %s", path.c_str());
+    try {
+        return loadWmoImpl(pack, data, path, o, st);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "  WMO FAILED, skipped: %s (%s)\n", path.c_str(), e.what());
+        WmoAsset& a = g_wmoCache[key];
+        a = WmoAsset{};
+        ++st.wmoFailed;
+        return a;
+    }
+}
+
+static const WmoAsset& loadWmoImpl(PackWriter& pack, const DataDir& data, const std::string& path, const Options& o,
+                                   ConvStats& st) {
     std::string key = DataDir::normalize(path);
     auto it = g_wmoCache.find(key);
     if (it != g_wmoCache.end()) return it->second;
@@ -139,10 +186,45 @@ static const WmoAsset& loadWmo(PackWriter& pack, const DataDir& data, const std:
         }
     }
 
+    // Liquids of the groups (canals, fountains, dungeon pools): MLIQ = xVerts x yVerts heights from basePosition in steps
+    // of W3D_LIQ_CELL, a flag byte per cell ((flags & 0x0F) == 0x0F: dry), kind as the server's extractor resolves it.
+    if (!o.noWmoWater) {
+        uint32_t rootFlags = 0, rootId = 0;
+        rootHeader(bytes, &rootFlags, &rootId);
+        for (const auto& g : w.groups) {
+            const auto& L = g.liquid;
+            if (!L.hasLiquid() || L.xTiles == 0 || L.yTiles == 0 || L.xTiles > 1024 || L.yTiles > 1024) continue;
+            if (L.heights.size() < (size_t)L.xVerts * L.yVerts || L.flags.size() < (size_t)L.xTiles * L.yTiles) continue;
+            if (L.xVerts < L.xTiles + 1 || L.yVerts < L.yTiles + 1) continue;
+            int kind = wmoLiquidKind(rootFlags, rootId, g.flags, g.liquidType, L.flags.data(), L.flags.size());
+            if (kind < 0) continue;
+            size_t before = a.liquid.size();
+            for (uint32_t ty = 0; ty < L.yTiles; ++ty)
+                for (uint32_t tx = 0; tx < L.xTiles; ++tx) {
+                    if ((L.flags[ty * L.xTiles + tx] & 0x0F) == 0x0F) continue;
+                    WmoAsset::LiquidCell c;
+                    c.kind = (uint8_t)kind;
+                    const uint32_t vx[4] = {tx, tx + 1, tx + 1, tx}, vy[4] = {ty, ty, ty + 1, ty + 1};
+                    for (int k = 0; k < 4; ++k) {
+                        float h = L.heights[vy[k] * L.xVerts + vx[k]];
+                        if (!std::isfinite(h) || std::fabs(h - L.basePosition.z) > 2000.0f) h = L.basePosition.z;
+                        c.p[k] = glm::vec3(L.basePosition.x + vx[k] * W3D_LIQ_CELL, L.basePosition.y + vy[k] * W3D_LIQ_CELL, h);
+                    }
+                    a.liquid.push_back(c);
+                }
+            if (a.liquid.size() > before) ++st.liquidWmoGroups;
+            if (o.verbose && a.liquid.size() > before)
+                std::printf("    liquid in group %s: %u x %u cells, kind %d, %zu wet\n", g.name.c_str(), (unsigned)L.xTiles,
+                            (unsigned)L.yTiles, kind, a.liquid.size() - before);
+        }
+    }
+
     size_t groupsOk = 0;
     for (uint32_t gi = 0; gi < w.groups.size(); ++gi) {
         const auto& g = w.groups[gi];
         if (g.vertices.empty() || g.indices.empty()) continue;
+        trace("WMO %s group %u/%u (%zu vertices, %zu indices, %zu batches)", path.c_str(), gi, (unsigned)w.groups.size(),
+              g.vertices.size(), g.indices.size(), g.batches.size());
         if (o.wmoExteriorOnly && (g.flags & 0x2000) && !(g.flags & 0x8)) { ++st.wmoGroupsSkipped; continue; }
         // Group centre = centre of the vertices actually used by render batches.
         glm::vec3 lo(1e30f), hi(-1e30f);
@@ -171,6 +253,7 @@ static const WmoAsset& loadWmo(PackWriter& pack, const DataDir& data, const std:
         for (const auto& b : g.batches) {
             if (b.materialId == 0xFF || b.indexCount < 3) continue;
             if ((size_t)b.startIndex + b.indexCount > g.indices.size()) continue;
+            // (an index count that is not a multiple of 3 is trimmed by buildModelBlob)
             ModelSource::Sub s;
             s.texId = UINT32_MAX;
             s.blend = W3D_BLEND_OPAQUE;
@@ -204,12 +287,15 @@ static const WmoAsset& loadWmo(PackWriter& pack, const DataDir& data, const std:
         if (src.subs.empty()) continue;
         size_t tris = 0;
         int flipped = 0;
-        auto blob = buildModelBlob(src, o.wmoGroupTris, &tris, &flipped);
+        auto blob = buildModelBlob(src, o.wmoGroupTris, &tris, &flipped, o.drawMaxError);
         st.wmoSubsFlipped += flipped;
+        if (src.dropped && o.verbose)
+            std::printf("    group %u of %s: %zu bad indices dropped (partial triangle or index out of range)\n", gi, path.c_str(),
+                        src.dropped);
         if (blob.empty()) { ++st.wmoGroupsFailed; continue; }
         char idKey[600];
         std::snprintf(idKey, sizeof idKey, "%s#%u", key.c_str(), gi);
-        uint32_t id = w3d_fnv1a(idKey);
+        uint32_t id = pack.keyId(W3D_ENTRY_MODEL, idKey);
         pack.add(W3D_ENTRY_MODEL, id, std::move(blob));
         a.groups.push_back({id, center});
         st.wmoTris += tris;
@@ -301,7 +387,7 @@ static void addCollisionTris(const Options& o, ConvStats& st, const glm::vec3* s
         glm::vec3 n = glm::cross(v[1] - v[0], v[2] - v[0]);
         float len = glm::length(n);
         if (!(len > 1e-6f)) continue;                     // degenerate (or NaN from a broken model)
-        bool wall = std::fabs(n.z) / len < 0.5f;          // steeper than 60 degrees
+        bool wall = std::fabs(n.z) / len < W3D_WALK_MIN_NZ;   // steeper than the walkable slope (w3d_collision.h, 6.18c)
         if (wall && o.noWalls) continue;
         if (wall) (fromM2 ? st.m2CollWalls : st.collWalls)++;
         else (fromM2 ? st.m2CollWalkable : st.collWalkable)++;
@@ -309,11 +395,13 @@ static void addCollisionTris(const Options& o, ConvStats& st, const glm::vec3* s
         float minX = std::min({v[0].x, v[1].x, v[2].x}), maxX = std::max({v[0].x, v[1].x, v[2].x});
         float minY = std::min({v[0].y, v[1].y, v[2].y}), maxY = std::max({v[0].y, v[1].y, v[2].y});
         // tiles overlapped: tileY from x, tileX from y (tile min corner = (32 - t - 1) * TS)
-        int ty0 = (int)std::floor(32.0f - maxX / TS), ty1 = (int)std::floor(32.0f - minX / TS);
-        int tx0 = (int)std::floor(32.0f - maxY / TS), tx1 = (int)std::floor(32.0f - minY / TS);
+        // The float -> int conversion is clamped: a vertex far outside the world (a broken model, 1e30) made it undefined, and
+        // the loops below then ran for ~2^31 steps (a hang). Only the tiles of the region are visited.
+        auto tileOf = [](float v) { return !(v > -1e6f) ? -1000000 : v > 1e6f ? 1000000 : (int)std::floor(v); };
+        int ty0 = std::max(tileOf(32.0f - maxX / TS), o.tileY0), ty1 = std::min(tileOf(32.0f - minX / TS), o.tileY1);
+        int tx0 = std::max(tileOf(32.0f - maxY / TS), o.tileX0), tx1 = std::min(tileOf(32.0f - minY / TS), o.tileX1);
         for (int tx = tx0; tx <= tx1; ++tx)
             for (int ty = ty0; ty <= ty1; ++ty) {
-                if (tx < o.tileX0 || tx > o.tileX1 || ty < o.tileY0 || ty > o.tileY1) continue;
                 float rx0 = (32.0f - ty - 1.0f) * TS, ry0 = (32.0f - tx - 1.0f) * TS;
                 std::vector<glm::vec3> poly = clipToRect(v, rx0, ry0, rx0 + TS, ry0 + TS);
                 if (poly.size() < 3) continue;
@@ -347,6 +435,9 @@ void emitCollision(const Options& o, PackWriter& pack, ConvStats& st) {
     const float TS = 533.33333f;
     for (auto& [tid, tris] : st.collTris) {
         if (tris.empty()) continue;
+        // Collision of a building/doodad that overhangs a tile the map has no terrain for: the pack validator rejects it
+        // ("collision without terrain tile") and the console never loads a tile without terrain. Skip it.
+        if (!pack.has(W3D_ENTRY_TERRAIN, tid)) { ++st.collOrphanTiles; continue; }
         // Finer grid for dense tiles (cities, forests with trunk collision): walls are tested
         // every step, so fewer triangles per cell matter more than the index size.
         const uint32_t N = tris.size() > 6000 ? 64 : 32;
@@ -435,6 +526,21 @@ void placeWmo(PackWriter& pack, const DataDir& data, const std::string& path, co
     }
     ++st.wmoPlacements;
     if (!o.noFloors) addCollisionTris(o, st, a.coll.data(), a.coll.size(), W, false);
+    // liquids: each cell goes to the tile under its centre (inside the region)
+    for (const auto& c : a.liquid) {
+        ConvStats::LiquidQuad q;
+        glm::vec3 mid(0.0f);
+        for (int k = 0; k < 4; ++k) {
+            glm::vec3 v = glm::vec3(W * glm::vec4(c.p[k], 1.0f));
+            q.p[k][0] = v.x; q.p[k][1] = v.y; q.p[k][2] = v.z;
+            mid += 0.25f * v;
+        }
+        q.kind = c.kind;
+        int tx, ty;
+        if (!placementOwner(o, mid.x, mid.y, tx, ty)) continue;
+        st.liquids[w3d_tile_id(tx, ty)].quads.push_back(q);
+        ++st.liquidQuads;
+    }
     if (o.noWmoDoodads) return;
     std::vector<size_t> sets = {0};
     if (doodadSet > 0 && doodadSet < a.sets.size()) sets.push_back(doodadSet);

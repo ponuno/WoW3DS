@@ -81,7 +81,7 @@ const char* itemSubclassName(uint32_t cls, uint32_t sub) {
     return "";
 }
 
-std::vector<std::string> itemTooltip(const ItemInfo& i, const InvItem* it, const SpellNames& spells) {
+std::vector<std::string> itemTooltip(const ItemInfo& i, const InvItem* it, const SpellNames& spells, const SpellDescTable* desc) {
     std::vector<std::string> out;
     char b[96];
     out.push_back(i.name.empty() ? "Item " + std::to_string(i.entry) : i.name);
@@ -126,7 +126,8 @@ std::vector<std::string> itemTooltip(const ItemInfo& i, const InvItem* it, const
         if (!i.spellId[k]) continue;
         const char* how = i.spellTrigger[k] == 0 ? "Use: " : i.spellTrigger[k] == 1 ? "Equip: " : i.spellTrigger[k] == 2 ? "Chance on hit: " : "";
         if (!how[0]) continue;
-        out.push_back(how + spells.name(i.spellId[k]));
+        std::string what = desc ? desc->text(i.spellId[k]) : std::string();
+        out.push_back(how + (what.empty() ? spells.name(i.spellId[k]) : what));
     }
     if (!i.description.empty()) out.push_back("\"" + i.description + "\"");
     if (i.sellPrice) out.push_back("Sell price: " + moneyText(i.sellPrice * (it && it->count > 1 ? it->count : 1)));
@@ -233,6 +234,29 @@ void GameSession::useItem(const InvItem& it, uint32_t nowMs) {
     w.u8(it.slot);
     w.u8(0);      // spell slot of the item (its first on-use spell)
     w.u16(0);     // targets: none = self (food, drink, potions, hearthstone)
+    send(CMSG_USE_ITEM, w.b, nowMs);
+}
+
+uint32_t GameSession::itemGroundSpell(uint32_t entry) const {
+    const ItemInfo* i = itemInfoIfKnown(entry);
+    if (!i) return 0;
+    for (int k = 0; k < 5; ++k)
+        if (i->spellId[k] && i->spellTrigger[k] == 0 && spellNames.ground(i->spellId[k])) return i->spellId[k];
+    return 0;
+}
+
+void GameSession::useItemAt(const InvItem& it, const float pos[3], uint32_t nowMs) {
+    const ItemInfo* i = itemInfoIfKnown(it.entry);
+    uint8_t index = 0;   // which of the item's spells: the ground one
+    if (i)
+        for (int k = 0; k < 5; ++k)
+            if (i->spellId[k] && i->spellTrigger[k] == 0 && spellNames.ground(i->spellId[k])) { index = (uint8_t)k; break; }
+    Writer w;
+    w.u8(it.bag);
+    w.u8(it.slot);
+    w.u8(index);
+    w.u16(0x40);   // TARGET_FLAG_DEST_LOCATION
+    w.f32(pos[0]); w.f32(pos[1]); w.f32(pos[2]);
     send(CMSG_USE_ITEM, w.b, nowMs);
 }
 
@@ -353,7 +377,10 @@ bool GameSession::handleItems(uint16_t op, const Bytes& data, uint32_t nowMs) {
             for (int k = 0; k < 5; ++k) {
                 i.spellId[k] = r.u32();
                 i.spellTrigger[k] = r.u32();
-                r.u32(); r.u32(); r.u32(); r.u32();   // charges, cooldown, category, category cooldown
+                r.u32();                    // charges
+                i.spellCooldown[k] = (int32_t)r.u32();
+                i.spellCategory[k] = r.u32();
+                i.spellCatCooldown[k] = (int32_t)r.u32();
             }
             i.bonding = r.u32();
             i.description = r.cstr();
@@ -384,7 +411,7 @@ bool GameSession::handleItems(uint16_t op, const Bytes& data, uint32_t nowMs) {
                 uint32_t lvl = r.u32();
                 if (!r.bad) t = "You must reach level " + std::to_string(lvl) + " to use that item.";
             }
-            addLocal(t, nowMs);
+            error(t, vocalForInventoryResult(res), nowMs);
             return true;
         }
         case SMSG_ITEM_PUSH_RESULT: {
@@ -414,7 +441,7 @@ bool GameSession::handleItems(uint16_t op, const Bytes& data, uint32_t nowMs) {
             if (r.bad) return true;
             if (lootType == 0) {
                 uint8_t err = r.u8();
-                addLocal(lootErrorText(r.bad ? 255 : err), nowMs);
+                error(lootErrorText(r.bad ? 255 : err), vocalForLootError(r.bad ? 255 : err), nowMs);
                 return true;
             }
             uint32_t gold = r.u32();

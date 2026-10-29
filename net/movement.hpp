@@ -79,6 +79,12 @@ public:
     // dirFlags: any of Forward/Backward/StrafeLeft/StrafeRight (others ignored).
     void update(uint32_t dirFlags, float x, float y, float z, float o, uint32_t nowMs);
     void jump(uint32_t nowMs);              // MSG_MOVE_JUMP (caller simulates the arc)
+    // 6.18d: walked off a ledge (or came out of the water over nothing): the falling flag goes out with a heartbeat, like the
+    // stock client; the server measures the fall from it and deals fall damage when land() reports the landing.
+    void fall(uint32_t nowMs);
+    // 6.19b: on the way down (after a jump's apex or off a ledge): MOVEFLAG_FALLINGFAR (0x4000) joins the jumping flag, with a
+    // heartbeat at once. vMaNGOS Player::HandleFall deals no fall damage unless the last packet before FALL_LAND had it.
+    void descend(uint32_t nowMs);
     void land(float z, uint32_t nowMs);     // MSG_MOVE_FALL_LAND
     void stopAll(uint32_t nowMs);           // release every key (e.g. leaving walk mode)
     void setRooted(bool rooted);
@@ -92,6 +98,17 @@ public:
     static constexpr uint32_t kStickyFlags = MoveFlag::WaterWalking | MoveFlag::SafeFall | MoveFlag::Hover;
     bool rooted() const { return (m_.flags & MoveFlag::Root) != 0; }
     bool airborne() const { return (m_.flags & MoveFlag::Jumping) != 0; }
+
+    // Swimming (stage 5.26). The flag may only appear with MSG_MOVE_START_SWIM and go with MSG_MOVE_STOP_SWIM (vMaNGOS
+    // MovementAnticheat: any other packet changing it is a flag-change cheat). START_SWIM also ends a jump or fall
+    // (a fall-end opcode like FALL_LAND, carrying the fall time; the server deals no fall damage for it). While
+    // swimming the packets carry the pitch: MSG_MOVE_SET_PITCH when it changed, and a heartbeat also when only the
+    // height changed (swimming straight up or down).
+    void startSwim(uint32_t nowMs);
+    void stopSwim(uint32_t nowMs);
+    void setSwimPitch(float pitch, uint32_t nowMs);
+    bool swimming() const { return (m_.flags & MoveFlag::Swimming) != 0; }
+    float pitchEpsilon = 0.08f;             // radians before a SET_PITCH is sent
 
     // Standing on a transport (stage 5.21): MoveFlag::OnTransport with the guid and the offset on it go into every packet;
     // x / y / z given to update() stay world coordinates (the server takes the offset). A teleport (reset) clears it.
@@ -115,7 +132,7 @@ private:
     void emit(uint16_t op, uint32_t nowMs);
     MovementInfo m_;
     uint32_t lastSendMs_ = 0, jumpStartMs_ = 0;
-    float lastSentO_ = 0;
+    float lastSentO_ = 0, lastSentZ_ = 0, lastSentPitch_ = 0;
     std::vector<OutPacket> out_;
 };
 

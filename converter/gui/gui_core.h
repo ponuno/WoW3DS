@@ -20,6 +20,8 @@ struct Settings {
     bool gameobjects = false;         // models of ordinary game objects (--gameobjects; a keyword list goes into Extra)
     bool dungeons = false;            // instance maps (--dungeons): one map<ID>.w3dp per dungeon, same creature/player options
     bool ui = true, sound = true;
+    bool everything = false;          // stage 5.27: w3dconv --all, every map and dungeon with one shared asset pool
+                                      // (map<ID>.w3dp + common.w3dp); the world/dungeon choices above are not used then
     int quality = 0;                  // texture encoder: 0 low (fast), 1 medium, 2 high
     std::string extra;                // more w3dconv options for the world pack, as typed
 };
@@ -72,6 +74,7 @@ inline std::string quoteArg(const std::string& a) {
 inline std::string validate(const Settings& s) {
     if (s.data.empty()) return "The Data folder of the 1.12 client is not set.";
     if (s.out.empty()) return "The output folder is not set.";
+    if (s.everything) return "";
     if (!s.packWorld && !s.ui && !s.sound && !s.dungeons) return "Nothing is selected.";
     if (s.packWorld) {
         if (s.map.empty()) return "The map is not set.";
@@ -92,7 +95,29 @@ inline std::string worldPackName(const std::string& map) {
 // UI and sound first (minutes), the world last (the long one): a wrong Data folder shows up at once.
 inline std::vector<Step> buildSteps(const Settings& s) {
     std::vector<Step> v;
-    if (s.ui) v.push_back({"Interface and texts (ui.w3dp, spells/talents/taxi ...)", "log_ui.txt", {"--data", s.data, "--ui", "-o", joinPath(s.out, "ui.w3dp"), "-v"}});
+    if (s.everything) {   // one run: interface, sound, every map, creatures, players, ships into one pool
+        Step a;
+        a.title = "Everything: every map and dungeon, one shared asset pool (map<ID>.w3dp, common.w3dp)";
+        a.logFile = "log_all.txt";
+        a.args = {"--data", s.data, "--all"};
+        if (!s.ui) a.args.push_back("--no-ui");
+        if (!s.sound) a.args.push_back("--no-sound-step");
+        if (!s.items) a.args.push_back("--no-items");
+        if (s.gameobjects) a.args.push_back("--gameobjects");
+        if (s.quality > 0) { a.args.push_back("--tex-quality"); a.args.push_back(s.quality == 1 ? "medium" : "high"); }
+        for (auto& x : splitArgs(s.extra)) a.args.push_back(x);
+        a.args.push_back("-o");
+        a.args.push_back(s.out);
+        a.args.push_back("-v");
+        v.push_back(a);
+        return v;
+    }
+    if (s.ui) {   // Extra options too (e.g. --consoleport "C:\\path")
+        Step u{"Interface and texts (ui.w3dp, spells/talents/taxi ...)", "log_ui.txt", {"--data", s.data, "--ui"}};
+        for (auto& x : splitArgs(s.extra)) u.args.push_back(x);
+        for (const std::string& x : {std::string("-o"), joinPath(s.out, "ui.w3dp"), std::string("-v")}) u.args.push_back(x);
+        v.push_back(u);
+    }
     if (s.sound) v.push_back({"Sound and music (folder sound)", "log_sound.txt", {"--data", s.data, "--sound", "-o", joinPath(s.out, "sound"), "-v"}});
     if (s.packWorld) {
         Step w;
@@ -150,6 +175,7 @@ inline std::string serialize(const Settings& s) {
     put("tx0", std::to_string(s.tx0)); put("ty0", std::to_string(s.ty0)); put("tx1", std::to_string(s.tx1)); put("ty1", std::to_string(s.ty1));
     put("packWorld", b(s.packWorld)); put("creatures", b(s.creatures)); put("players", b(s.players)); put("items", b(s.items));
     put("transports", b(s.transports)); put("gameobjects", b(s.gameobjects)); put("dungeons", b(s.dungeons)); put("ui", b(s.ui)); put("sound", b(s.sound));
+    put("everything", b(s.everything));
     put("quality", std::to_string(s.quality)); put("extra", s.extra);
     return r;
 }
@@ -174,6 +200,7 @@ inline Settings parse(const std::string& text) {
     num("tx0", s.tx0); num("ty0", s.ty0); num("tx1", s.tx1); num("ty1", s.ty1); num("quality", s.quality);
     flag("world", s.world); flag("packWorld", s.packWorld); flag("creatures", s.creatures); flag("players", s.players);
     flag("items", s.items); flag("transports", s.transports); flag("gameobjects", s.gameobjects); flag("dungeons", s.dungeons); flag("ui", s.ui); flag("sound", s.sound);
+    flag("everything", s.everything);
     return s;
 }
 

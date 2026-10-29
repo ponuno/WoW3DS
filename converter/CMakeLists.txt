@@ -35,7 +35,7 @@ file(GLOB MESHOPT_SRC ${meshoptimizer_SOURCE_DIR}/src/*.cpp)
 # Converter core as a static library: the tool and the tests link it.
 add_library(w3dcore STATIC
   src/pack.cpp src/mpq.cpp src/texture.cpp src/model.cpp src/terrain.cpp src/synthetic.cpp src/wmo.cpp
-  src/creature_model.cpp src/creatures.cpp src/items.cpp src/spells.cpp src/progress.cpp src/ui.cpp src/ui_font.cpp src/texts.cpp src/sound.cpp src/dungeon.cpp
+  src/creature_model.cpp src/creatures.cpp src/items.cpp src/spells.cpp src/spelltext.cpp src/progress.cpp src/ui.cpp src/ui_font.cpp src/texts.cpp src/sound.cpp src/dungeon.cpp src/liquid.cpp src/all.cpp src/crashguard.cpp src/glue.cpp src/spellfx.cpp
   ${MESHOPT_SRC}
   ${rgetc1_SOURCE_DIR}/rg_etc1.cpp
   ${wowee_SOURCE_DIR}/src/pipeline/adt_loader.cpp
@@ -71,10 +71,18 @@ option(W3D_TESTS "Build converter tests" ON)
 if(W3D_TESTS AND NOT MINGW)
   add_executable(creature_test tests/creature_test.cpp)
   target_link_libraries(creature_test PRIVATE w3dcore)
+  add_executable(pool_test tests/pool_test.cpp)
+  target_link_libraries(pool_test PRIVATE w3dcore)
   add_executable(uv_range_test tests/uv_range_test.cpp)
   target_link_libraries(uv_range_test PRIVATE w3dcore)
+  add_executable(wmo_hole_test tests/wmo_hole_test.cpp)
+  target_link_libraries(wmo_hole_test PRIVATE w3dcore)
   add_executable(skin_simplify_test tests/skin_simplify_test.cpp)
   target_link_libraries(skin_simplify_test PRIVATE w3dcore)
+  add_executable(lod_thin_test tests/lod_thin_test.cpp)
+  target_link_libraries(lod_thin_test PRIVATE w3dcore)
+  add_executable(spell_text_test tests/spell_text_test.cpp)
+  target_link_libraries(spell_text_test PRIVATE w3dcore)
 endif()
 
 # Debug viewer: decodes a pack back to PNGs (textures + top-down terrain).

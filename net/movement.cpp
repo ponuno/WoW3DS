@@ -27,6 +27,11 @@ const char* MoveOp::name(uint16_t op) {
         case StopStrafe: return "STOP_STRAFE";
         case Jump: return "JUMP";
         case FallLand: return "FALL_LAND";
+        case StartSwim: return "START_SWIM";
+        case StopSwim: return "STOP_SWIM";
+        case SetPitch: return "SET_PITCH";
+        case SetRunMode: return "SET_RUN_MODE";
+        case SetWalkMode: return "SET_WALK_MODE";
         case SetFacing: return "SET_FACING";
         case Heartbeat: return "HEARTBEAT";
         case TeleportAck: return "TELEPORT_ACK";
@@ -85,6 +90,8 @@ void Mover::reset(float x, float y, float z, float o, uint32_t nowMs) {
     m_.x = x; m_.y = y; m_.z = z; m_.o = normalizeAngle(o);
     m_.time = nowMs;
     lastSentO_ = m_.o;
+    lastSentZ_ = m_.z;
+    lastSentPitch_ = 0;
     lastSendMs_ = nowMs;
     out_.clear();
 }
@@ -102,6 +109,8 @@ void Mover::emit(uint16_t op, uint32_t nowMs) {
     out_.push_back({op, std::move(w.b)});
     lastSendMs_ = nowMs;
     lastSentO_ = m_.o;
+    lastSentZ_ = m_.z;
+    lastSentPitch_ = m_.pitch;
     ++packetsSent;
 }
 
@@ -139,7 +148,11 @@ void Mover::update(uint32_t dir, float x, float y, float z, float o, uint32_t no
         emit(MoveOp::SetFacing, nowMs);
         return;
     }
-    bool moving = (m_.flags & MoveFlag::MaskMoving) || airborne();
+    if (swimming() && std::fabs(m_.pitch - lastSentPitch_) > pitchEpsilon && nowMs - lastSendMs_ >= facingIntervalMs) {
+        emit(MoveOp::SetPitch, nowMs);
+        return;
+    }
+    bool moving = (m_.flags & MoveFlag::MaskMoving) || airborne() || (swimming() && std::fabs(m_.z - lastSentZ_) > 0.05f);
     if (moving && nowMs - lastSendMs_ >= heartbeatMs) {
         emit(MoveOp::Heartbeat, nowMs);
         ++heartbeats;
@@ -184,6 +197,22 @@ void Mover::jump(uint32_t nowMs) {
     emit(MoveOp::Jump, nowMs);
 }
 
+void Mover::fall(uint32_t nowMs) {
+    if (airborne() || rooted() || swimming()) return;
+    m_.flags |= MoveFlag::Jumping;
+    jumpStartMs_ = nowMs;
+    m_.jumpZSpeed = 0;   // no upward speed: dropped, not jumped
+    m_.jumpSin = m_.jumpCos = 0;
+    m_.jumpXYSpeed = 0;
+    emit(MoveOp::Heartbeat, nowMs);
+}
+
+void Mover::descend(uint32_t nowMs) {
+    if (!airborne() || (m_.flags & MoveFlag::FallingFar)) return;
+    m_.flags |= MoveFlag::FallingFar;
+    emit(MoveOp::Heartbeat, nowMs);
+}
+
 void Mover::land(float z, uint32_t nowMs) {
     if (!airborne()) return;
     m_.z = z;
@@ -200,6 +229,41 @@ void Mover::land(float z, uint32_t nowMs) {
     ++packetsSent;
     m_.fallTime = 0;
     m_.jumpZSpeed = m_.jumpSin = m_.jumpCos = m_.jumpXYSpeed = 0;
+}
+
+void Mover::startSwim(uint32_t nowMs) {
+    if (swimming()) return;
+    const bool fell = airborne();
+    MovementInfo s = m_;
+    s.flags = (s.flags & ~(uint32_t)(MoveFlag::Jumping | MoveFlag::FallingFar)) | MoveFlag::Swimming;
+    s.time = nowMs;
+    s.fallTime = fell ? nowMs - jumpStartMs_ : 0;
+    s.pitch = 0;
+    s.jumpZSpeed = s.jumpSin = s.jumpCos = s.jumpXYSpeed = 0;
+    Writer w;
+    writeMovementInfo(w, s);
+    out_.push_back({MoveOp::StartSwim, std::move(w.b)});
+    m_.flags = s.flags;
+    m_.pitch = 0;
+    m_.fallTime = 0;
+    m_.jumpZSpeed = m_.jumpSin = m_.jumpCos = m_.jumpXYSpeed = 0;
+    lastSendMs_ = nowMs;
+    lastSentO_ = m_.o;
+    lastSentZ_ = m_.z;
+    lastSentPitch_ = 0;
+    ++packetsSent;
+}
+
+void Mover::stopSwim(uint32_t nowMs) {
+    if (!swimming()) return;
+    m_.flags &= ~(uint32_t)MoveFlag::Swimming;   // the flag is gone in the STOP_SWIM itself
+    m_.pitch = 0;
+    emit(MoveOp::StopSwim, nowMs);
+}
+
+void Mover::setSwimPitch(float pitch, uint32_t /*nowMs*/) {
+    if (!swimming()) return;
+    m_.pitch = pitch;   // sent by update(): SET_PITCH when it moved enough, and in every other packet
 }
 
 void Mover::stopAll(uint32_t nowMs) {

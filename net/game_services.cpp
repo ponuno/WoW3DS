@@ -14,9 +14,11 @@ enum : uint16_t {
     CMSG_TAXINODE_STATUS_QUERY = 0x1AA, SMSG_TAXINODE_STATUS = 0x1AB, SMSG_SHOWTAXINODES = 0x1A9,
     CMSG_TAXIQUERYAVAILABLENODES = 0x1AC, CMSG_ACTIVATETAXI = 0x1AD, SMSG_ACTIVATETAXIREPLY = 0x1AE,
     SMSG_NEW_TAXI_PATH = 0x1AF, CMSG_ACTIVATETAXIEXPRESS = 0x312,
+    CMSG_AREATRIGGER = 0x0B4, SMSG_AREA_TRIGGER_MESSAGE = 0x2B8,
     CMSG_BANKER_ACTIVATE = 0x1B7, SMSG_SHOW_BANK = 0x1B8, CMSG_BUY_BANK_SLOT = 0x1B9, SMSG_BUY_BANK_SLOT_RESULT = 0x1BA,
     CMSG_AUTOSTORE_BANK_ITEM = 0x282, CMSG_AUTOBANK_ITEM = 0x283,
     CMSG_LEARN_TALENT = 0x251,
+    CMSG_UNLEARN_SKILL = 0x202,
 };
 constexpr uint16_t kCharacterPoints1 = 1102;   // PLAYER_CHARACTER_POINTS1
 
@@ -150,6 +152,36 @@ uint32_t GameSession::classId() const {
     return me ? (me->field(UF::UNIT_BYTES_0) >> 8) & 0xFF : 0;
 }
 
+// ------------------------------------------------------------------ skills (stage 6.19)
+// vMaNGOS Player.cpp: PLAYER_SKILL_INDEX(x) = PLAYER_SKILL_INFO_1_1 + x*3 holds the skill id in its low 16 bits, +1 the value
+// (low) and the maximum (high), +2 the temporary (low) and permanent (high) bonus as int16.
+std::vector<GameSession::SkillState> GameSession::playerSkills() const {
+    std::vector<SkillState> out;
+    const WorldObject* me = selfObject();
+    if (!me) return out;
+    for (int k = 0; k < 128; ++k) {
+        const uint32_t id = me->field((uint16_t)(UF::PLAYER_SKILL_INFO_1_1 + k * 3)) & 0xFFFF;
+        if (!id) continue;
+        const uint32_t v = me->field((uint16_t)(UF::PLAYER_SKILL_INFO_1_1 + k * 3 + 1));
+        const uint32_t b = me->field((uint16_t)(UF::PLAYER_SKILL_INFO_1_1 + k * 3 + 2));
+        SkillState s;
+        s.id = id;
+        s.value = (uint16_t)(v & 0xFFFF);
+        s.max = (uint16_t)(v >> 16);
+        s.tempBonus = (int16_t)(b & 0xFFFF);
+        s.permBonus = (int16_t)(b >> 16);
+        out.push_back(s);
+    }
+    return out;
+}
+
+void GameSession::unlearnSkill(uint32_t skill, uint32_t nowMs) {
+    if (!skill) return;
+    Writer w;
+    w.u32(skill);
+    send(CMSG_UNLEARN_SKILL, w.b, nowMs);
+}
+
 int GameSession::talentRank(const Talent& t) const {
     return talents.rankOf(t, [&](uint32_t s) { return knowsSpell(s); });
 }
@@ -179,7 +211,7 @@ bool GameSession::learnTalent(uint32_t talentId, uint32_t nowMs) {
 
 // Bank, flight master, auctioneer and mailbox windows close 10 yd away (the original's "too far" closing).
 void GameSession::updateServices(uint32_t nowMs) {
-    if (!bank.open && !taxi.open && !auction.open && !mail.open) return;
+    if (!bank.open && !taxi.open && !auction.open && !mail.open && !stable.open) return;
     const MovementInfo& m = mover.info();
     auto far = [&](uint64_t g) {
         const WorldObject* o = objects.find(g);
@@ -193,12 +225,33 @@ void GameSession::updateServices(uint32_t nowMs) {
     if (taxi.open && far(taxi.npc)) closeTaxi();
     if (auction.open && far(auction.npc)) closeAuction();
     if (mail.open && far(mail.box)) closeMail();
+    if (stable.open && far(stable.npc)) closeStable();
 }
 
 // ------------------------------------------------------------------ server packets
+int GameSession::checkAreaTriggers(const float pos[3], uint32_t nowMs) {
+    if (!areaTriggers.loaded()) return 0;
+    std::vector<uint32_t> entered;
+    triggerWatch.update(areaTriggers, map_, pos, entered);
+    for (uint32_t id : entered) {
+        Writer w;
+        w.u32(id);
+        send(CMSG_AREATRIGGER, w.b, nowMs);
+        ++stats.areaTriggers;
+    }
+    return (int)entered.size();
+}
+
 bool GameSession::handleServices(uint16_t op, const Bytes& data, uint32_t nowMs) {
     Reader r(data);
     switch (op) {
+        case SMSG_AREA_TRIGGER_MESSAGE: {   // u32 length, string: "You must be level 55 to enter." (a locked door)
+            r.u32();
+            std::string text = r.cstr();
+            if (r.bad || text.empty()) return true;
+            addLocal(text, nowMs);
+            return true;
+        }
         case SMSG_SHOW_BANK: {
             uint64_t npc = r.u64();
             if (r.bad) return true;

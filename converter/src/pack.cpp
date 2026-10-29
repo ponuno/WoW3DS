@@ -1,4 +1,8 @@
+#include <cmath>
 #include "conv.h"
+#include "w3d_liquid.h"
+#include "w3d_ground.h"
+#include "w3d_fx.h"
 #include <unordered_set>
 #include "w3d_ui.h"
 
@@ -15,6 +19,7 @@ namespace w3d {
 PackWriter::PackWriter() = default;
 
 PackWriter::~PackWriter() {
+    textureFlush();   // 5.35h: no texture of the pool may still be on its way to this pack
     if (spill_) {
         std::fclose(spill_);
         std::remove(spillPath_.c_str());
@@ -30,7 +35,21 @@ bool PackWriter::setSpillPath(const std::string& path) {
     return true;
 }
 
+uint32_t PackWriter::keyId(uint32_t type, const std::string& key) {
+    if (pool_) return pool_->keyId(type, key);
+    uint32_t id = w3d_fnv1a(key.c_str());
+    for (uint32_t salt = 1;; ++salt) {
+        if (id == 0) id = 1;   // 0 means "none" in many tables
+        auto [it, fresh] = names_.emplace(((uint64_t)type << 32) | id, key);
+        if (fresh && salt > 1) ++collisions_;   // a new name that had to move off another's hash
+        if (fresh || it->second == key) return id;
+        const std::string salted = key + "#" + std::to_string(salt);
+        id = w3d_fnv1a(salted.c_str());
+    }
+}
+
 bool PackWriter::add(uint32_t type, uint32_t id, std::vector<uint8_t> blob) {
+    if (pool_ && !w3d_is_tile_entry(type)) return pool_->add(type, id, std::move(blob));
     const uint64_t key = ((uint64_t)type << 32) | id;
     if (!keys_.insert(key).second) return false;
     Item it{type, id, pos_, (uint32_t)blob.size()};
@@ -77,11 +96,11 @@ size_t PackWriter::count(uint32_t type) const {
     return n;
 }
 
-bool PackWriter::write(const std::string& path) const {
+std::vector<const PackWriter::Item*> PackWriter::fileOrder() const {
     // Order: terrain, placements, models, textures — the client reads in file
     // order, so the small structural entries come first.
     std::vector<const Item*> order;
-    const uint32_t known[] = {W3D_ENTRY_TERRAIN, W3D_ENTRY_PLACEMENT, W3D_ENTRY_WATER, W3D_ENTRY_COLLISION, W3D_ENTRY_MODEL,
+    const uint32_t known[] = {W3D_ENTRY_PACKINFO, W3D_ENTRY_TERRAIN, W3D_ENTRY_PLACEMENT, W3D_ENTRY_WATER, W3D_ENTRY_LIQUID, W3D_ENTRY_GROUND, W3D_ENTRY_COLLISION, W3D_ENTRY_MODEL,
                               W3D_ENTRY_DISPLAY, W3D_ENTRY_CHARACTER, W3D_ENTRY_ITEM, W3D_ENTRY_CREATURE, W3D_ENTRY_TEXTURE,
                               W3D_ENTRY_CHARIMG};
     for (uint32_t t : known)
@@ -89,7 +108,11 @@ bool PackWriter::write(const std::string& path) const {
             if (it.type == t) order.push_back(&it);
     for (const auto& it : items_)   // anything newer than this list still gets written
         if (std::find(std::begin(known), std::end(known), it.type) == std::end(known)) order.push_back(&it);
+    return order;
+}
 
+bool PackWriter::writeItems(const std::string& path, const std::vector<const Item*>& orderIn, const W3dPackInfo* info) const {
+    static const uint8_t pad0[W3D_BLOB_ALIGN] = {};
     FILE* f = std::fopen(path.c_str(), "wb");
     if (!f) return false;
     std::setvbuf(f, nullptr, _IOFBF, 1 << 20);
@@ -100,9 +123,15 @@ bool PackWriter::write(const std::string& path) const {
         at += n;
     };
     std::vector<W3dEntry> index;
-    index.reserve(order.size());
+    const std::vector<const Item*>& order = orderIn;
+    index.reserve(order.size() + 1);
     W3dPackHeader zero{};
     put(&zero, sizeof zero);
+    if (info) {   // PINF first: the client reads it before anything else
+        while (at % W3D_BLOB_ALIGN) put(pad0, 1);
+        index.push_back(W3dEntry{W3D_ENTRY_PACKINFO, 0, (uint32_t)at, (uint32_t)sizeof(W3dPackInfo)});
+        put(info, sizeof *info);
+    }
     std::vector<uint8_t> buf(1 << 20);
     const uint8_t pad[W3D_BLOB_ALIGN] = {};
     uint64_t total = 0;
@@ -146,6 +175,7 @@ bool PackWriter::write(const std::string& path) const {
         FILE* r = std::fopen(path.c_str(), "rb");
         W3dPackHeader h{};
         bool good = r && std::fread(&h, sizeof h, 1, r) == 1 && h.magic == W3DP_MAGIC && h.entryCount == index.size();
+        if (!good && r) std::fprintf(stderr, "  VERIFY: header of %s does not match\n", path.c_str());
         size_t missing = 0;
         if (good) {
             std::vector<W3dEntry> back(h.entryCount);
@@ -154,10 +184,12 @@ bool PackWriter::write(const std::string& path) const {
             if (good) {
                 std::unordered_set<uint64_t> have;
                 for (const W3dEntry& e : back) have.insert(((uint64_t)e.type << 32) | e.id);
-                for (uint64_t k : keys_)
+                for (const Item* it : order) {
+                    const uint64_t k = ((uint64_t)it->type << 32) | it->id;
                     if (!have.count(k)) {
                         if (missing++ < 10) std::fprintf(stderr, "  VERIFY: entry type %u id %08x is not in the written pack\n", (unsigned)(k >> 32), (unsigned)k);
                     }
+                }
             }
         }
         if (r) std::fclose(r);
@@ -165,6 +197,41 @@ bool PackWriter::write(const std::string& path) const {
         else std::printf("pack verify: %zu entries, every added entry is in the index\n", index.size());
     }
     return ok;
+}
+
+bool PackWriter::write(const std::string& path) const {
+    textureFlush();
+    if (pool_) {   // a map pack: its tiles only, and the PINF naming the pool
+        std::vector<const Item*> order = fileOrder();
+        return writeItems(path, order, haveInfo_ ? &info_ : nullptr);
+    }
+    return writeItems(path, fileOrder(), haveInfo_ ? &info_ : nullptr);
+}
+
+int PackWriter::writeParts(const std::string& basePath, uint64_t partBytes) const {
+    textureFlush();
+    const std::vector<const Item*> order = fileOrder();
+    std::vector<std::vector<const Item*>> parts(1);
+    uint64_t used = 0;
+    const uint64_t limit = std::max<uint64_t>(partBytes, 1 << 14);
+    for (const Item* it : order) {
+        const uint64_t need = it->size + W3D_BLOB_ALIGN + sizeof(W3dEntry);
+        if (used && used + need > limit) { parts.emplace_back(); used = 0; }
+        parts.back().push_back(it);
+        used += need;
+    }
+    std::string stem = basePath;
+    if (stem.size() > 5 && stem.compare(stem.size() - 5, 5, ".w3dp") == 0) stem.resize(stem.size() - 5);
+    for (size_t k = 0; k < parts.size(); ++k) {
+        W3dPackInfo info = info_;
+        info.kind = W3D_PACK_POOL;
+        info.part = (uint16_t)k;
+        info.partCount = (uint16_t)parts.size();
+        const std::string p = k ? stem + std::to_string(k) + ".w3dp" : stem + ".w3dp";
+        if (!writeItems(p, parts[k], &info)) return 0;
+        std::printf("  pool part %zu: %s, %zu entries\n", k, p.c_str(), parts[k].size());
+    }
+    return (int)parts.size();
 }
 
 // ------------------------------------------------------------ DataDir
@@ -205,10 +272,7 @@ bool DataDir::read(const std::string& gamePath, std::vector<uint8_t>& out) const
         it = files_.find("data/" + key);
         if (it == files_.end()) return false;
     }
-    std::ifstream f(it->second, std::ios::binary);
-    if (!f) return false;
-    out.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
-    return true;
+    return readFileFast(it->second, out);
 }
 
 // ------------------------------------------------------------ validator
@@ -220,12 +284,17 @@ const char* typeName(uint32_t t) {
         case W3D_ENTRY_MODEL: return "MODL";
         case W3D_ENTRY_PLACEMENT: return "PLCM";
         case W3D_ENTRY_WATER: return "WATR";
+        case W3D_ENTRY_LIQUID: return "LIQD";
+        case W3D_ENTRY_PACKINFO: return "PINF";
         case W3D_ENTRY_COLLISION: return "COLL";
+        case W3D_ENTRY_GROUND: return "GRND";
         case W3D_ENTRY_CREATURE: return "CMDL";
         case W3D_ENTRY_DISPLAY: return "CDSP";
         case W3D_ENTRY_CHARACTER: return "CHRS";
         case W3D_ENTRY_CHARIMG: return "CIMG";
         case W3D_ENTRY_ITEM: return "ITEM";
+        case W3D_ENTRY_GLUE: return "GLUE";
+        case W3D_ENTRY_SPELLFX: return "SVFX";
         case W3D_ENTRY_UI_DIR: return "UIDR";
         case W3D_ENTRY_UI_TEX: return "UITX";
     }
@@ -237,10 +306,19 @@ const char* fmtName(uint8_t f) {
 }
 }  // namespace
 
+bool readFileFast(const std::string& path, std::vector<uint8_t>& out) {
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (!f) return false;
+    const std::streamoff size = f.tellg();
+    if (size < 0) return false;
+    f.seekg(0);
+    out.resize((size_t)size);
+    return size == 0 || (bool)f.read(reinterpret_cast<char*>(out.data()), size);
+}
+
 int printPackInfo(const std::string& path) {
-    std::ifstream f(path, std::ios::binary);
-    if (!f) { std::fprintf(stderr, "cannot open %s\n", path.c_str()); return 1; }
-    std::vector<uint8_t> b((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    std::vector<uint8_t> b;
+    if (!readFileFast(path, b)) { std::fprintf(stderr, "cannot open %s\n", path.c_str()); return 1; }
     auto fail = [](const char* m) { std::fprintf(stderr, "INVALID: %s\n", m); return 2; };
     if (b.size() < sizeof(W3dPackHeader)) return fail("too small");
     W3dPackHeader h;
@@ -258,13 +336,71 @@ int printPackInfo(const std::string& path) {
         countBy[e[i].type]++;
         byKey[{e[i].type, e[i].id}] = &e[i];
     }
+    // stage 5.27: a map pack or a pool part refers to entries of the other pool parts next to it
+    std::vector<std::vector<W3dEntry>> companions;
+    if (const auto* pe = byKey.count({W3D_ENTRY_PACKINFO, 0}) ? byKey[{W3D_ENTRY_PACKINFO, 0}] : nullptr) {
+        W3dPackInfo pi{};
+        std::memcpy(&pi, b.data() + pe->offset, std::min<size_t>(sizeof pi, pe->size));
+        static const char* kKind[3] = {"standalone", "pool part", "map"};
+        std::printf("  PINF: %s, build %08x, part %u of %u, map %u\n", pi.kind < 3 ? kKind[pi.kind] : "?", pi.buildId, pi.part,
+                    pi.partCount, pi.mapId);
+        if (pi.kind == W3D_PACK_MAP || pi.kind == W3D_PACK_POOL) {
+            const fs::path dir = fs::path(path).parent_path();
+            auto readIndex = [&](const fs::path& p, std::vector<W3dEntry>& out, W3dPackInfo* info) -> bool {
+                std::ifstream g(p, std::ios::binary);
+                W3dPackHeader gh;
+                if (!g.read(reinterpret_cast<char*>(&gh), sizeof gh) || gh.magic != W3DP_MAGIC) return false;
+                out.resize(gh.entryCount);
+                g.seekg(gh.indexOffset);
+                if (!g.read(reinterpret_cast<char*>(out.data()), (std::streamsize)(out.size() * sizeof(W3dEntry)))) return false;
+                for (const W3dEntry& x : out)
+                    if (x.type == W3D_ENTRY_PACKINFO) {
+                        g.seekg(x.offset);
+                        g.read(reinterpret_cast<char*>(info), std::min<size_t>(sizeof *info, x.size));
+                    }
+                return true;
+            };
+            int parts = pi.kind == W3D_PACK_POOL ? pi.partCount : 1;
+            for (int k = 0; k < parts; ++k) {
+                if (pi.kind == W3D_PACK_POOL && k == pi.part) continue;
+                const fs::path p = dir / (k ? "common" + std::to_string(k) + ".w3dp" : std::string("common.w3dp"));
+                std::vector<W3dEntry> idx;
+                W3dPackInfo ci{};
+                if (!readIndex(p, idx, &ci)) return fail(("the pool part " + p.string() + " is missing").c_str());
+                if (ci.buildId != pi.buildId) return fail(("the pool part " + p.string() + " is from another conversion").c_str());
+                if (k == 0 && pi.kind == W3D_PACK_MAP) parts = std::max<int>(1, ci.partCount);
+                {   // stage 6.12: do the pool's models carry the LOD table? (a sample: reading them all would take minutes)
+                    std::ifstream g(p, std::ios::binary);
+                    size_t seenM = 0, lodM = 0, seenC = 0, lodC = 0;
+                    std::vector<uint8_t> blob;
+                    for (const W3dEntry& x : idx) {
+                        const bool model = x.type == W3D_ENTRY_MODEL, cre = x.type == W3D_ENTRY_CREATURE;
+                        if ((!model && !cre) || (model ? seenM : seenC) >= 400 || x.size > (8u << 20)) continue;
+                        blob.resize(x.size);
+                        g.seekg(x.offset);
+                        if (!g.read(reinterpret_cast<char*>(blob.data()), x.size)) break;
+                        if (model) { ++seenM; lodM += w3d_model_lods(blob.data(), x.size) != nullptr; }
+                        else { ++seenC; lodC += w3d_creature_lods(blob.data(), x.size) != nullptr; }
+                    }
+                    std::printf("  %s: LOD table (6.12) in %zu of %zu sampled models, %zu of %zu creature models\n",
+                                p.filename().string().c_str(), lodM, seenM, lodC, seenC);
+                }
+                companions.push_back(std::move(idx));
+            }
+            size_t n = 0;
+            for (auto& c : companions)
+                for (const W3dEntry& x : c)
+                    if (x.type != W3D_ENTRY_PACKINFO) { byKey.emplace(std::make_pair(x.type, x.id), &x); ++n; }
+            std::printf("  pool: %zu other file(s) of this conversion read, %zu entries\n", companions.size(), n);
+        }
+    }
     auto texOk = [&](uint32_t id) { return byKey.count({W3D_ENTRY_TEXTURE, id}) != 0; };
 
     std::printf("%s: %zu bytes, %u entries\n", path.c_str(), b.size(), h.entryCount);
     for (auto& [t, n] : countBy)
         std::printf("  %s x%-4zu %8.1f KB\n", typeName(t), n, bytesBy[t] / 1024.0);
 
-    size_t texGpu = 0, missingTex = 0, totalPlacements = 0;
+    size_t texGpu = 0, missingTex = 0, totalPlacements = 0, fxModels = 0, fxEmitters = 0, fxGlows = 0, fxAnimated = 0, lodModels = 0, lodCreatures = 0;
     std::map<uint8_t, size_t> fmtCount;
     for (uint32_t i = 0; i < h.entryCount; ++i) {
         const uint8_t* p = b.data() + e[i].offset;
@@ -290,6 +426,7 @@ int printPackInfo(const std::string& path) {
                     sum += bt[k].indexCount[l];
                 }
                 if (bt[k].tex0 >= t.texCount || bt[k].tex1 >= t.texCount) return fail("batch tex index");
+                if (const uint16_t* t2 = w3d_terrain_tex2(&t, p)) if (t2[k] >= t.texCount) return fail("batch tex2 index");
                 lod0 += bt[k].indexCount[0]; lod1 += bt[k].indexCount[1]; lod2 += bt[k].indexCount[2];
             }
             const uint32_t* ids = reinterpret_cast<const uint32_t*>(p + t.offTexIds);
@@ -303,13 +440,34 @@ int printPackInfo(const std::string& path) {
             const uint16_t* idx = reinterpret_cast<const uint16_t*>(p + t.offIndices);
             for (uint32_t k = 0; k < t.indexCount; ++k) if (idx[k] >= t.vertexCount) return fail("water index >= vertexCount");
             const W3dWaterBatch* bt = reinterpret_cast<const W3dWaterBatch*>(p + t.offBatches);
+            uint32_t frames = 0;
             for (uint32_t k = 0; k < t.batchCount; ++k) {
                 if (bt[k].firstIndex + bt[k].indexCount > t.indexCount) return fail("water batch range");
-                if (bt[k].tex >= t.texCount) return fail("water batch tex");
+                if (bt[k].tex + std::max<uint32_t>(1, bt[k].frames) > t.texCount) return fail("water batch tex");
+                if (bt[k].liquid > 3) return fail("water batch liquid");
+                frames = std::max<uint32_t>(frames, bt[k].frames);
             }
+            std::printf("  water %u_%u: %u tris, %u batches, %u textures (%u frames)\n", t.tileX, t.tileY, t.indexCount / 3,
+                        t.batchCount, t.texCount, frames);
             const uint32_t* ids = reinterpret_cast<const uint32_t*>(p + t.offTexIds);
             for (uint32_t k = 0; k < t.texCount; ++k) if (!texOk(ids[k])) ++missingTex;
             if (!byKey.count({W3D_ENTRY_TERRAIN, e[i].id})) return fail("water without terrain tile");
+        } else if (e[i].type == W3D_ENTRY_LIQUID) {
+            if (!w3d_liquid_valid(p, e[i].size)) return fail("liquid grid");
+            if (!byKey.count({W3D_ENTRY_TERRAIN, e[i].id})) return fail("liquid without terrain tile");
+            W3dLiquidHeader lh; std::memcpy(&lh, p, sizeof lh);
+            const W3dLiquidChunk* lc = reinterpret_cast<const W3dLiquidChunk*>(p + lh.offChunks);
+            size_t cells[4] = {0, 0, 0, 0}, deep = 0, wmo = 0;
+            for (uint32_t k = 0; k < lh.chunkCount; ++k)
+                for (uint8_t f : lc[k].cell) {
+                    if (f == W3D_LIQ_DRY) continue;
+                    ++cells[f & W3D_LIQ_KIND];
+                    deep += (f & W3D_LIQ_DEEP) != 0;
+                    wmo += (f & W3D_LIQ_WMO) != 0;
+                }
+            std::printf("  liquid %u_%u: %u chunks, cells water %zu ocean %zu magma %zu slime %zu (deep %zu, buildings %zu), "
+                        "fog %u %u %u / %.0f yd\n", lh.tileX, lh.tileY, lh.chunkCount, cells[0], cells[1], cells[2], cells[3], deep,
+                        wmo, lh.look[0].fog[0], lh.look[0].fog[1], lh.look[0].fog[2], lh.look[0].fogEnd);
         } else if (e[i].type == W3D_ENTRY_MODEL) {
             W3dModelHeader m; std::memcpy(&m, p, sizeof m);
             if (m.offIndices + m.indexCount * 2 > e[i].size) return fail("model index range");
@@ -322,6 +480,84 @@ int printPackInfo(const std::string& path) {
             }
             const uint32_t* ids = reinterpret_cast<const uint32_t*>(p + m.offTexIds);
             for (uint32_t k = 0; k < m.texCount; ++k) if (!texOk(ids[k])) ++missingTex;
+            if (m.offTexIds >= W3D_MODEL_HDR_LOD_END && m.lodCount) {   // stage 6.12
+                if (!w3d_model_lods(p, e[i].size)) return fail("model LOD table");
+                ++lodModels;
+            }
+            if (const W3dFxHeader* fx = w3d_model_fx(p, e[i].size)) {   // stage 5.32: effects behind the footer
+                ++fxModels;
+                fxEmitters += fx->emitterCount;
+                fxGlows += fx->glowCount;
+                const uint32_t* fid = reinterpret_cast<const uint32_t*>(p + fx->offTexIds);
+                for (uint32_t k = 0; k < fx->texCount; ++k) if (!texOk(fid[k])) ++missingTex;
+                const W3dFxEmitter* em = reinterpret_cast<const W3dFxEmitter*>(p + fx->offEmitters);
+                for (uint32_t k = 0; k < fx->emitterCount; ++k)
+                    if ((em[k].tex != 0xFFFF && em[k].tex >= fx->texCount) || !em[k].rows || !em[k].cols || !(em[k].life > 0))
+                        return fail("fx emitter");
+                if (fx->animOff4) {   // stage 5.35: the bone animation must be a valid block that fits the mesh and the fx
+                    ++fxAnimated;
+                    const W3dFxAnimView av = w3d_fx_anim(p, e[i].size, fx);
+                    if (!av.a || av.a->subCount != m.submeshCount || av.a->emitterCount != fx->emitterCount ||
+                        av.a->glowCount != fx->glowCount) return fail("fx animation block");
+                    for (uint32_t k = 0; k < av.a->subCount; ++k) if (av.subBone[k] >= av.a->boneCount) return fail("fx animation bone");
+                    for (uint32_t k = 0; k < av.a->emitterCount; ++k) if (av.emitterBone[k] >= av.a->boneCount) return fail("fx animation bone");
+                    for (uint32_t k = 0; k < av.a->glowCount; ++k) if (av.glowBone[k] >= av.a->boneCount) return fail("fx animation bone");
+                    for (uint32_t k = 0; k < (uint32_t)av.a->frames * av.a->boneCount * 12u; ++k)
+                        if (!std::isfinite(av.mat[k])) return fail("fx animation matrix");
+                }
+            }
+        } else if (e[i].type == W3D_ENTRY_SPELLFX) {   // stage 5.33
+            W3dSpellFxHeader h; std::memcpy(&h, p, sizeof h);
+            if (h.magic != W3D_SVFX_MAGIC || h.offEffects + (uint64_t)h.effectCount * sizeof(W3dSpellEffect) > e[i].size ||
+                h.offVisuals + (uint64_t)h.visualCount * sizeof(W3dSpellVisual) > e[i].size ||
+                h.offSpells + (uint64_t)h.spellCount * sizeof(W3dSpellRef) > e[i].size) return fail("spell fx range");
+            const W3dSpellEffect* ef = reinterpret_cast<const W3dSpellEffect*>(p + h.offEffects);
+            const W3dSpellVisual* vi = reinterpret_cast<const W3dSpellVisual*>(p + h.offVisuals);
+            const W3dSpellRef* sr = reinterpret_cast<const W3dSpellRef*>(p + h.offSpells);
+            for (uint32_t k = 0; k < h.effectCount; ++k) if (!byKey.count({W3D_ENTRY_MODEL, ef[k].model})) return fail("spell effect model not packed");
+            size_t missiles = 0;
+            for (uint32_t k = 0; k < h.visualCount; ++k) {
+                if (k && vi[k].id <= vi[k - 1].id) return fail("spell visuals not sorted");
+                for (int s = 0; s < W3D_SFX_STAGES; ++s)
+                    for (int j = 0; j < 2; ++j)
+                        if (vi[k].effect[s][j] != 0xFFFF && vi[k].effect[s][j] >= h.effectCount) return fail("spell visual effect index");
+                missiles += vi[k].effect[W3D_SFX_MISSILE][0] != 0xFFFF;
+            }
+            size_t states = 0, channels = 0;
+            for (uint32_t k = 0; k < h.visualCount; ++k) {
+                states += vi[k].effect[W3D_SFX_STATE][0] != W3D_SFX_NONE;
+                channels += vi[k].effect[W3D_SFX_CHANNEL][0] != W3D_SFX_NONE;
+            }
+            if ((h.levelUp != W3D_SFX_NONE && h.levelUp >= h.effectCount) || (h.loot != W3D_SFX_NONE && h.loot >= h.effectCount))
+                return fail("spell fx special effect index");
+            size_t withSpeed = 0;
+            for (uint32_t k = 0; k < h.spellCount; ++k) {
+                if (k && sr[k].spell <= sr[k - 1].spell) return fail("spell refs not sorted");
+                if (sr[k].visual >= h.visualCount) return fail("spell ref visual index");
+                withSpeed += sr[k].speed > 0;
+            }
+            std::printf("  spell fx: %u spells (%zu with a missile speed), %u visuals (%zu with a missile), %u effect models\n",
+                        h.spellCount, withSpeed, h.visualCount, missiles, h.effectCount);
+            {   // 5.35f: a few well-known spells (Fireball, Frostbolt, Smite, Lesser Heal, Wrath, Immolate, Shadow Bolt, Lightning Bolt)
+                const W3dSpellRef* sr = reinterpret_cast<const W3dSpellRef*>(p + h.offSpells);
+                std::printf("  spell fx known:");
+                for (uint32_t id : {133u, 116u, 585u, 2050u, 5176u, 348u, 686u, 403u}) {
+                    bool found = false;
+                    for (uint32_t k = 0; k < h.spellCount && !found; ++k) found = sr[k].spell == id;
+                    std::printf(" %u:%s", id, found ? "yes" : "NO");
+                }
+                std::printf("\n");
+            }
+            std::printf("  spell fx: %zu auras, %zu channels, level-up %s, loot sparkle %s\n", states, channels,
+                        h.levelUp != W3D_SFX_NONE ? "yes" : "no", h.loot != W3D_SFX_NONE ? "yes" : "no");
+        } else if (e[i].type == W3D_ENTRY_GROUND) {
+            if (!w3d_ground_valid(p, e[i].size)) return fail("ground range");
+            if (!byKey.count({W3D_ENTRY_TERRAIN, e[i].id})) return fail("ground without terrain tile");
+            const W3dGroundHeader* gh = reinterpret_cast<const W3dGroundHeader*>(p);
+            const W3dGroundChunk* gc = reinterpret_cast<const W3dGroundChunk*>(p + sizeof(W3dGroundHeader));
+            uint32_t present = 0, holes = 0;
+            for (int k = 0; k < 256; ++k) { present += (gc[k].flags & W3D_GROUND_CHUNK_PRESENT) != 0; holes += gc[k].holes != 0; }
+            std::printf("  ground %u_%u: %u of 256 chunks, %u with holes, zScale %.4f\n", gh->tileX, gh->tileY, present, holes, gh->zScale);
         } else if (e[i].type == W3D_ENTRY_COLLISION) {
             W3dCollHeader c; std::memcpy(&c, p, sizeof c);
             uint64_t cells = (uint64_t)c.gridN * c.gridN + 1;
@@ -352,6 +588,10 @@ int printPackInfo(const std::string& path) {
                 return fail("creature range");
             const uint16_t* idx = reinterpret_cast<const uint16_t*>(p + c.offIndices);
             for (uint32_t k = 0; k < c.indexCount; ++k) if (idx[k] >= c.vertexCount) return fail("creature index");
+            if (c.offTex >= sizeof(W3dCreatureHeader) && c.lodCount) {   // stage 6.12
+                if (!w3d_creature_lods(p, e[i].size)) return fail("creature LOD table");
+                ++lodCreatures;
+            }
             const W3dSkinSubmesh* sm = reinterpret_cast<const W3dSkinSubmesh*>(p + c.offSubmeshes);
             const W3dBonePalette* pal = reinterpret_cast<const W3dBonePalette*>(p + c.offPalettes);
             const W3dSkinVertex* vx = reinterpret_cast<const W3dSkinVertex*>(p + c.offVertices);
@@ -421,6 +661,12 @@ int printPackInfo(const std::string& path) {
             }
             for (uint32_t m : d.helm)
                 if (m && !byKey.count({W3D_ENTRY_MODEL, m})) return fail("item helmet model not packed");
+        } else if (e[i].type == W3D_ENTRY_GLUE) {
+            if (e[i].size < sizeof(W3dGlueScene)) return fail("glue scene size");
+            W3dGlueScene g; std::memcpy(&g, p, sizeof g);
+            if (g.modelId && !byKey.count({W3D_ENTRY_MODEL, g.modelId})) return fail("glue scene model not packed");
+            std::printf("  glue scene %u: model %08x, camera %s, stand %s, radius %.1f\n", e[i].id, g.modelId,
+                        (g.flags & W3D_GLUE_HAS_CAMERA) ? "yes" : "no", (g.flags & W3D_GLUE_HAS_STAND) ? "yes" : "no", g.radius);
         } else if (e[i].type == W3D_ENTRY_PLACEMENT) {
             W3dPlacementHeader ph; std::memcpy(&ph, p, sizeof ph);
             if (sizeof ph + ph.count * sizeof(W3dPlacement) > e[i].size) return fail("placement range");
@@ -432,6 +678,8 @@ int printPackInfo(const std::string& path) {
         }
     }
     std::printf("  placements: %zu\n", totalPlacements);
+    std::printf("  LODs (6.12): %zu models, %zu creature models with lighter versions\n", lodModels, lodCreatures);
+    if (fxModels) std::printf("  effects: %zu models, %zu particle emitters, %zu glow sprites, %zu with bone animation\n", fxModels, fxEmitters, fxGlows, fxAnimated);
     std::printf("  texture GPU memory: %.1f KB (", texGpu / 1024.0);
     for (auto& [fmt, n] : fmtCount) std::printf(" %s:%zu", fmtName(fmt), n);
     std::printf(" )\n");

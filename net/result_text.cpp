@@ -235,4 +235,91 @@ std::string inventoryResultText(uint32_t code) {
     return "That bag is full";   // the client shows any larger value as \"bag full\"
 }
 
+// ------------------------------------------------------------------ the character's voice (UI stage 8)
+// Tokens of the original's error speech files (<Race><Gender>_err_<token>NN.wav, the same names WoWee probes).
+namespace {
+const char* const kVocalToken[(int)Vocal::Count] = {
+    "", "nomana", "norage", "noenergy", "outofrange", "genericnotarget", "invalidattacktarget", "spellcooldown",
+    "abilitycooldown", "itemcooldown", "noammo", "chestinuse", "inventoryfull", "bagfull", "itemmaxcount", "notabag",
+    "cantuseitem", "itemlocked", "notequippable", "cantequiplevel", "cantequipskill", "cantequipever",
+    "cantdropsoulbounditem", "notenoughmoney", "cantlearnspell", "loottoofar", "lootdidntkill", "cantloot",
+};
+}  // namespace
+
+const char* vocalToken(Vocal v) { return (unsigned)v < (unsigned)Vocal::Count ? kVocalToken[(int)v] : ""; }
+
+Vocal vocalFromToken(const std::string& t) {
+    for (int i = 1; i < (int)Vocal::Count; ++i)
+        if (t == kVocalToken[i]) return (Vocal)i;
+    return Vocal::None;
+}
+
+Vocal vocalForCastResult(uint32_t code, uint8_t powerType, uint32_t cls) {
+    const bool ability = cls == 1 || cls == 4;   // warriors and rogues: "That ability isn't ready yet"
+    switch (code) {
+        case 77:   // SPELL_FAILED_NO_POWER: "Not enough mana / rage / energy" by our power
+            return powerType == 1 ? Vocal::NoRage : powerType == 3 ? Vocal::NoEnergy : powerType == 0 ? Vocal::NoMana : Vocal::None;
+        case 89: return Vocal::OutOfRange;                      // SPELL_FAILED_OUT_OF_RANGE
+        case 60: return ability ? Vocal::AbilityCooldown : Vocal::SpellCooldown;   // SPELL_FAILED_NOT_READY
+        case 40: return Vocal::ItemCooldown;                    // SPELL_FAILED_ITEM_NOT_READY
+        case 9: return Vocal::NoTarget;                         // SPELL_FAILED_BAD_IMPLICIT_TARGETS: "You have no target"
+        case 10: case 101: case 105: case 107: case 113:        // BAD_TARGETS, TARGETS_DEAD, TARGET_ENEMY / FRIENDLY / NOT_PLAYER
+            return Vocal::InvalidTarget;
+        case 67: case 47: return Vocal::NoAmmo;                 // NO_AMMO, NEED_AMMO
+        case 21: return Vocal::ChestInUse;                      // CHEST_IN_USE
+        case 41: case 43: return Vocal::CantUseItem;            // LEVEL_REQUIREMENT, LOWLEVEL
+        default: return Vocal::None;
+    }
+}
+
+Vocal vocalForInventoryResult(uint32_t code) {
+    switch (code) {
+        case 50: return Vocal::InventoryFull;
+        case 4: case 53: case 56: case 62: return Vocal::BagFull;
+        case 17: return Vocal::ItemMaxCount;
+        case 30: return Vocal::NotABag;
+        case 1: return Vocal::CantEquipLevel;
+        case 2: case 8: return Vocal::CantEquipSkill;
+        case 10: case 11: return Vocal::CantEquipEver;
+        case 3: case 20: return Vocal::NotEquippable;
+        case 24: return Vocal::CantDropSoulbound;
+        case 29: return Vocal::NotEnoughMoney;
+        case 36: return Vocal::ItemLocked;
+        case 25: return Vocal::OutOfRange;
+        default: return Vocal::None;
+    }
+}
+
+Vocal vocalForLootError(uint8_t e) {
+    switch (e) {
+        case 4: return Vocal::LootTooFar;
+        case 0: return Vocal::LootDidntKill;   // no permission: "I didn't kill that"
+        default: return Vocal::CantLoot;
+    }
+}
+
+void GameSession::error(const std::string& text, Vocal v, uint32_t nowMs, const std::string& chatLine) {
+    addLocal(chatLine.empty() ? text : chatLine, nowMs);
+    if (!text.empty()) {
+        // the same text again: renew it rather than stacking copies (spamming a key on cooldown)
+        for (auto it = uiErrors.begin(); it != uiErrors.end(); ++it)
+            if (it->text == text) { uiErrors.erase(it); break; }
+        uiErrors.push_back({text, nowMs});
+        while (uiErrors.size() > 3) uiErrors.pop_front();
+    }
+    vocal(v);
+}
+
+uint64_t GameSession::npcWindow() const {
+    if (gossip.open) return gossip.npc;
+    if (vendor.open) return vendor.npc;
+    if (trainer.open) return trainer.npc;
+    if (questDialog.open()) return questDialog.npc;
+    if (bank.open) return bank.npc;
+    if (taxi.open) return taxi.npc;
+    if (auction.open) return auction.npc;
+    if (binderConfirm) return binderConfirm;
+    return 0;
+}
+
 }  // namespace w3n

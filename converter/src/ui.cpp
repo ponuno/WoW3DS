@@ -14,12 +14,18 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <set>
 #include <sstream>
 
 #include "w3d_ui.h"
+
+#define STB_IMAGE_STATIC
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_ONLY_PNG
+#include "stb_image.h"
 
 namespace w3d {
 
@@ -70,6 +76,12 @@ icon   tab_social   Interface\Icons\Spell_Holy_PrayerOfFortitude.blp|Interface\I
 icon   tab_settings Interface\Icons\INV_Misc_Gear_01.blp|Interface\Icons\Trade_Engineering.blp
 icon   talents      Interface\Icons\Ability_Marksmanship.blp|Interface\Icons\INV_Misc_Book_07.blp
 icon   attack       Interface\Icons\Ability_MeleeDamage.blp|Interface\Icons\INV_Sword_04.blp
+icon   pet_attack   Interface\Icons\Ability_GhoulFrenzy.blp|Interface\Icons\Ability_MeleeDamage.blp
+icon   pet_follow   Interface\Icons\Ability_Tracking.blp|Interface\Icons\INV_Misc_Map_01.blp
+icon   pet_stay     Interface\Icons\Spell_Nature_TimeStop.blp|Interface\Icons\INV_Misc_PocketWatch_01.blp
+icon   pet_passive  Interface\Icons\Ability_Seal.blp|Interface\Icons\Spell_Holy_SealOfProtection.blp
+icon   pet_defensive Interface\Icons\Ability_Defend.blp|Interface\Icons\INV_Shield_04.blp
+icon   pet_aggressive Interface\Icons\Ability_Racial_BloodRage.blp|Interface\Icons\Ability_Warrior_Rampage.blp
 icon   money        Interface\Icons\INV_Misc_Coin_01.blp
 icon   unknown      Interface\Icons\INV_Misc_QuestionMark.blp
 icon   slot_0       Interface\PaperDoll\UI-PaperDoll-Slot-Head.blp
@@ -93,6 +105,52 @@ icon   slot_17      Interface\PaperDoll\UI-PaperDoll-Slot-Ranged.blp
 icon   slot_18      Interface\PaperDoll\UI-PaperDoll-Slot-Tabard.blp
 icon   slot_19      Interface\PaperDoll\UI-PaperDoll-Slot-Bag.blp|Interface\PaperDoll\UI-Backpack-EmptySlot.blp
 grid   class        Interface\Glues\CharacterCreate\UI-CharacterCreate-Classes.blp 4 4 1:0,0 8:1,0 4:2,0 11:3,0 3:0,1 7:1,1 5:2,1 9:3,1 2:0,2
+# stage 5.29: login and character screens (Interface\Glues); what is missing is drawn as a plain frame
+sprite glue_logo      Interface\Glues\Common\Glues-WoW-Logo.blp 0 0 1 1 192 96
+edge   glue_border    Interface\Glues\Common\Glue-Tooltip-Border.blp|Interface\Tooltips\UI-Tooltip-Border.blp 8
+nine   glue_button    Interface\Glues\Common\Glue-Panel-Button-Up.blp|Interface\Buttons\UI-Panel-Button-Up.blp 0 0 0.625 0.6875 80 22 10 6 10 6
+nine   glue_button_down Interface\Glues\Common\Glue-Panel-Button-Down.blp|Interface\Buttons\UI-Panel-Button-Down.blp 0 0 0.625 0.6875 80 22 10 6 10 6
+nine   glue_button_off Interface\Glues\Common\Glue-Panel-Button-Disabled.blp|Interface\Buttons\UI-Panel-Button-Disabled.blp 0 0 0.625 0.6875 80 22 10 6 10 6
+nine   glue_button_hl Interface\Glues\Common\Glue-Panel-Button-Highlight.blp|Interface\Buttons\UI-Panel-Button-Highlight.blp 0 0 0.625 0.6875 80 22 10 6 10 6
+nine   editbox        Interface\Common\Common-Input-Border.blp 0 0 1 0.625 128 20 8 6 8 6
+sprite glue_left      Interface\Glues\Common\Glue-LeftArrow-Button-Up.blp 0 0 1 1 20 20
+sprite glue_left_down Interface\Glues\Common\Glue-LeftArrow-Button-Down.blp 0 0 1 1 20 20
+sprite glue_right     Interface\Glues\Common\Glue-RightArrow-Button-Up.blp 0 0 1 1 20 20
+sprite glue_right_down Interface\Glues\Common\Glue-RightArrow-Button-Down.blp 0 0 1 1 20 20
+sprite glue_rotate    Interface\Glues\CharacterCreate\UI-RotationRight-Big-Up.blp 0 0 1 1 24 24
+sprite cc_highlight   Interface\Glues\CharacterCreate\UI-CharacterCreate-Highlights.blp 0 0 0.5 0.5 32 32
+sprite cc_checked     Interface\Glues\CharacterCreate\UI-CharacterCreate-Highlights.blp 0.5 0 1 0.5 32 32
+sprite cc_bevel       Interface\Glues\CharacterCreate\UI-CharacterCreate-Highlights.blp 0 0.5 0.5 1 32 32
+grid   race           Interface\Glues\CharacterCreate\UI-CharacterCreate-Races.blp 4 4 2:0,0 6:1,0 14:2,0 8:3,0 12:0,1 10:1,1 16:2,1 4:3,1 3:0,2 7:1,2 15:2,2 9:3,2 13:0,3 11:1,3 17:2,3 5:3,3
+grid   gender         Interface\Glues\CharacterCreate\UI-CharacterCreate-Gender.blp 2 1 0:0,0 1:1,0
+# UI stage 8: the unit frames of the top screen (the 232 x 100 frame from u = 24 of the 256 x 128 texture, made 0.55 the
+# size), their state icons (resting / combat), the party leader's crown, the skull of ?? levels and the rested tick
+sprite unitframe          Interface\TargetingFrame\UI-TargetingFrame.blp 0.09375 0 1 0.78125 128 55
+sprite unitframe_elite    Interface\TargetingFrame\UI-TargetingFrame-Elite.blp 0.09375 0 1 0.78125 128 55
+sprite unitframe_rare     Interface\TargetingFrame\UI-TargetingFrame-Rare.blp 0.09375 0 1 0.78125 128 55
+sprite unitframe_rareelite Interface\TargetingFrame\UI-TargetingFrame-Rare-Elite.blp|Interface\TargetingFrame\UI-TargetingFrame-Elite.blp 0.09375 0 1 0.78125 128 55
+sprite state_rest         Interface\CharacterFrame\UI-StateIcon.blp 0 0 0.5 0.421875 22 24
+sprite state_combat       Interface\CharacterFrame\UI-StateIcon.blp 0.5 0 1 0.484375 23 23
+sprite leader             Interface\GroupFrame\UI-Group-LeaderIcon.blp 0 0 1 1 12 12
+sprite skull              Interface\TargetingFrame\UI-TargetingFrame-Skull.blp 0 0 1 1 12 12
+sprite exhaustion_tick    Interface\MainMenuBar\UI-ExhaustionTickNormal.blp 0 0 1 1 12 12
+# UI stage 11: ConsolePort (the user's own copy of the addon, --consoleport DIR or a "ConsolePort" folder next to w3dconv;
+# Artistic License 2.0, github.com/seblindfors/ConsolePort): round crossbar buttons, targeting icons, button glyphs, the
+# experience bar's overlay. Without the folder these lines are skipped (the plain crossbar).
+sprite cp_ring            CP:ConsolePort_Bar/Assets/Textures/Button/Normal.blp 0 0 1 1 32 32
+sprite cp_ring_hl         CP:ConsolePort_Bar/Assets/Textures/Button/Hilite.blp 0 0 1 1 32 32
+sprite cp_target_enemy    CP:ConsolePort_Bar/Assets/Textures/Icons/Target_Wide_Enemy.png 0 0 1 1 24 24
+sprite cp_target_friend   CP:ConsolePort_Bar/Assets/Textures/Icons/Target_Wide_Friend.png 0 0 1 1 24 24
+sprite cp_target_neutral  CP:ConsolePort_Bar/Assets/Textures/Icons/Target_Wide_Neutral.png 0 0 1 1 24 24
+sprite cp_xpbar           CP:ConsolePort_Bar/Assets/Textures/XPBar.blp 0 0 1 1 256 8
+sprite cp_btn_a           CP:ConsolePort/Assets/Icons/64/xbox_r_a.blp 0 0 1 1 16 16
+sprite cp_btn_b           CP:ConsolePort/Assets/Icons/64/xbox_r_b.blp 0 0 1 1 16 16
+sprite cp_btn_x           CP:ConsolePort/Assets/Icons/64/xbox_r_x.blp 0 0 1 1 16 16
+sprite cp_btn_y           CP:ConsolePort/Assets/Icons/64/xbox_r_y.blp 0 0 1 1 16 16
+sprite cp_dpad_up         CP:ConsolePort/Assets/Icons/64/dpad_up.blp 0 0 1 1 16 16
+sprite cp_dpad_right      CP:ConsolePort/Assets/Icons/64/dpad_right.blp 0 0 1 1 16 16
+sprite cp_dpad_down       CP:ConsolePort/Assets/Icons/64/dpad_down.blp 0 0 1 1 16 16
+sprite cp_dpad_left       CP:ConsolePort/Assets/Icons/64/dpad_left.blp 0 0 1 1 16 16
 )";
 
 std::string lower(std::string s) {
@@ -108,10 +166,33 @@ bool readFile(const std::string& path, std::vector<uint8_t>& out) {
 }
 
 // The first of "a|b|c" that decodes.
+// UI stage 11: "CP:relative/path" = a file of the ConsolePort addon folder (BLP or PNG), not of the game.
+std::string g_cpRoot;
+bool loadCp(const std::string& rel, Image& out) {
+    if (g_cpRoot.empty()) return false;
+    std::string p = g_cpRoot + "/" + rel;
+    for (char& c : p) if (c == '\\') c = '/';
+    std::vector<uint8_t> bytes;
+    if (!readFile(p, bytes) || bytes.size() < 8) return false;
+    if (!std::memcmp(bytes.data(), "BLP", 3)) return decodeBlp(bytes, out) && out.w > 0 && out.h > 0;
+    int w = 0, h = 0, n = 0;
+    unsigned char* px = stbi_load_from_memory(bytes.data(), (int)bytes.size(), &w, &h, &n, 4);
+    if (!px) return false;
+    out.w = w;
+    out.h = h;
+    out.rgba.assign(px, px + (size_t)w * h * 4);
+    stbi_image_free(px);
+    return true;
+}
+
 bool loadBlp(const DataDir& data, const std::string& paths, Image& out, std::string* used = nullptr) {
     std::stringstream ss(paths);
     std::string p;
     while (std::getline(ss, p, '|')) {
+        if (!p.compare(0, 3, "CP:")) {
+            if (loadCp(p.substr(3), out)) { if (used) *used = p; return true; }
+            continue;
+        }
         std::vector<uint8_t> bytes;
         if (data.read(p, bytes) && decodeBlp(bytes, out) && out.w > 0 && out.h > 0) {
             if (used) *used = p;
@@ -267,6 +348,20 @@ std::vector<std::string> splitWs(const std::string& line) {
 }  // namespace
 
 bool convertUi(const UiOptions& uo, const DataDir& data, bool verbose) {
+    {   // UI stage 11: the ConsolePort folder (the given one, else one next to us)
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        g_cpRoot.clear();
+        std::vector<std::string> cand;
+        if (!uo.consolePort.empty()) cand.push_back(uo.consolePort);
+        cand.push_back("ConsolePort");
+        cand.push_back("ConsolePort-master");
+        for (const std::string& c : cand)
+            if (fs::is_directory(fs::path(c) / "ConsolePort_Bar", ec)) { g_cpRoot = c; break; }
+        if (!uo.consolePort.empty() && g_cpRoot.empty())
+            std::fprintf(stderr, "ui: %s is not a ConsolePort folder (no ConsolePort_Bar inside)\n", uo.consolePort.c_str());
+        std::printf("  consoleport: %s\n", g_cpRoot.empty() ? "not found (the plain crossbar)" : g_cpRoot.c_str());
+    }
     PackWriter pack;
     std::vector<W3dUiTex> texs;
     auto addTex = [&](const Image& im, uint8_t fmt, uint8_t kind) {
@@ -320,6 +415,7 @@ bool convertUi(const UiOptions& uo, const DataDir& data, bool verbose) {
                 continue;
             }
             Image src;
+            if (!path.compare(0, 3, "CP:") && g_cpRoot.empty()) continue;   // no ConsolePort folder: not missing, just not wanted
             if (!loadBlp(data, path, src)) { ++skinMissing; if (verbose) std::fprintf(stderr, "  ui: %s missing (%s)\n", name.c_str(), path.c_str()); continue; }
             if (kind == "edge") {
                 int size = std::max(2, (int)num(3, 8));

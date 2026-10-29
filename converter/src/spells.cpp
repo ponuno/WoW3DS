@@ -153,6 +153,93 @@ bool exportSpellNames(const DataDir& data, const std::string& path, bool verbose
             ++auras;
         }
     }
+    // UI stage 10: spells placed on the ground (Blizzard, Flamestrike, Rain of Fire, Volley, Hurricane, the engineers'
+    // bombs ...): "@ground<TAB>id<TAB>max range<TAB>radius" (yards). Ground = the Targets mask asks for a destination
+    // (TARGET_FLAG_DEST_LOCATION 0x40) or an effect hits the units around a chosen point (ImplicitTarget 16 / 28 / 31 / 34,
+    // vMaNGOS SpellTarget). 1.12 columns relative to the name (120): Targets 13, RangeIndex 36, ImplicitTargetA 82-84,
+    // ImplicitTargetB 85-87, EffectRadiusIndex 88-90; SpellRange.dbc MaxRange 2, SpellRadius.dbc Radius 1. Every spell
+    // (items' spells are not in SkillLineAbility); the old client skips these lines (no id before the first tab).
+    size_t ground = 0;
+    if (nameCol >= 107) {
+        Table range, radius;
+        std::unordered_map<uint32_t, float> rangeOf, radiusOf;
+        if (range.load(data, "SpellRange.dbc") && range.fields > 2)
+            for (uint32_t r = 0; r < range.records; ++r) rangeOf[range.u32(r, 0)] = range.f32(r, 2);
+        if (radius.load(data, "SpellRadius.dbc") && radius.fields > 1)
+            for (uint32_t r = 0; r < radius.records; ++r) radiusOf[radius.u32(r, 0)] = radius.f32(r, 1);
+        const uint32_t tgtCol = (uint32_t)nameCol - 107, rangeCol = (uint32_t)nameCol - 84, aCol = (uint32_t)nameCol - 38,
+                       bCol = (uint32_t)nameCol - 35, radCol = (uint32_t)nameCol - 32;
+        auto areaAtDest = [](uint32_t t) { return t == 16 || t == 28 || t == 31 || t == 34; };
+        std::string known;
+        for (uint32_t r = 0; r < spell.records; ++r) {
+            const uint32_t id = spell.u32(r, 0);
+            if (!id) continue;
+            bool g = (spell.u32(r, tgtCol) & 0x40) != 0;
+            float rad = 0;
+            for (uint32_t k = 0; k < 3; ++k) {
+                if (areaAtDest(spell.u32(r, aCol + k)) || areaAtDest(spell.u32(r, bCol + k))) g = true;
+                auto it = radiusOf.find(spell.u32(r, radCol + k));
+                if (it != radiusOf.end()) rad = std::max(rad, it->second);
+            }
+            if (!g) continue;
+            auto rg = rangeOf.find(spell.u32(r, rangeCol));
+            const float maxRange = rg != rangeOf.end() ? rg->second : 30.0f;
+            if (maxRange <= 0.5f) continue;   // "self" range: centred on the caster, nothing to place
+            char line[96];
+            std::snprintf(line, sizeof line, "@ground\t%u\t%.1f\t%.1f\n", id, maxRange, rad > 0 ? rad : 5.0f);
+            out += line;
+            ++ground;
+            if (id == 10 || id == 2120 || id == 5740 || id == 1510 || id == 16914 || id == 4064)
+                known += " " + std::to_string(id) + "(" + spell.str(r, (uint32_t)nameCol) + ")";
+        }
+        std::printf("  ground-targeted spells: %zu (known among them:%s)\n", ground, known.empty() ? " none" : known.c_str());
+    }
+    // 5.48: spells that need no unit target: "@self<TAB>id". Every effect's ImplicitTargetA/B (vMaNGOS SpellTarget) is the
+    // caster (1), its party / the friends or hostiles around it (20, 30, 33, 34, 36) - Battle Shout, Thorns-like self buffs,
+    // Thunder Clap. Spells with any single-unit target (6 chain damage, 21 friend ...) or an unknown one are left out.
+    size_t selfCasts = 0;
+    if (nameCol >= 107) {
+        const uint32_t effC = (uint32_t)nameCol - 59, aC = (uint32_t)nameCol - 38, bC = (uint32_t)nameCol - 35;
+        auto selfKind = [](uint32_t t) { return t == 1 || t == 20 || t == 30 || t == 33 || t == 34 || t == 36; };
+        for (uint32_t r = 0; r < spell.records; ++r) {
+            const uint32_t id = spell.u32(r, 0);
+            if (!id) continue;
+            bool any = false, ok = true;
+            for (uint32_t k = 0; k < 3 && ok; ++k) {
+                if (!spell.u32(r, effC + k)) continue;   // no effect in this slot
+                for (uint32_t t : {spell.u32(r, aC + k), spell.u32(r, bC + k)}) {
+                    if (!t) continue;
+                    if (selfKind(t)) any = true; else ok = false;
+                }
+            }
+            if (!any || !ok) continue;
+            out += "@self\t" + std::to_string(id) + "\n";
+            ++selfCasts;
+        }
+        std::printf("  spells without a unit target: %zu\n", selfCasts);
+    }
+    // UI stage 12: cooldowns, "@cd id recovery category categoryRecovery onEvent" (ms): the 1.12 server sends none for an
+    // ordinary cast, the client starts them itself from Spell.dbc. Columns relative to the name (120): Category 2,
+    // Attributes 6 (0x02000000 SPELL_ATTR_COOLDOWN_ON_EVENT), RecoveryTime 19, CategoryRecoveryTime 20.
+    size_t cds = 0;
+    if (nameCol >= 118) {
+        const uint32_t catCol = (uint32_t)nameCol - 118, attrCol = (uint32_t)nameCol - 114, recCol = (uint32_t)nameCol - 101,
+                       catRecCol = (uint32_t)nameCol - 100;
+        std::string known;
+        for (uint32_t r = 0; r < spell.records; ++r) {
+            const uint32_t id = spell.u32(r, 0), rec = spell.u32(r, recCol), catRec = spell.u32(r, catRecCol);
+            const uint32_t cat = spell.u32(r, catCol);
+            const bool onEvent = (spell.u32(r, attrCol) & 0x02000000u) != 0;
+            if (!id || (!rec && !catRec && !onEvent) || rec > 86400000u || catRec > 86400000u) continue;
+            char line[96];
+            std::snprintf(line, sizeof line, "@cd\t%u\t%u\t%u\t%u\t%u\n", id, rec, cat, catRec, onEvent ? 1u : 0u);
+            out += line;
+            ++cds;
+            if (id == 871 || id == 2139 || id == 1953 || id == 100 || id == 20271)
+                known += " " + std::to_string(id) + "(" + spell.str(r, (uint32_t)nameCol) + " " + std::to_string(rec ? rec : catRec) + " ms)";
+        }
+        std::printf("  spell cooldowns: %zu (known among them:%s)\n", cds, known.empty() ? " none" : known.c_str());
+    }
     FILE* f = std::fopen(path.c_str(), "wb");
     if (!f) {
         std::fprintf(stderr, "spells: cannot write %s\n", path.c_str());

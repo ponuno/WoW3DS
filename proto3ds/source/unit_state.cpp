@@ -1,5 +1,8 @@
 #include "unit_state.hpp"
 
+#include "w3d_character.h"
+#include "w3d_worldobj.h"
+
 using namespace w3n;
 
 CreatureWeapon weaponFromSubclass(uint32_t cls, uint32_t sub) {
@@ -115,4 +118,44 @@ void fillUnitState(GameSession& g, const WorldObject& o, uint32_t nowMs, Creatur
     c.mountDisplay = o.field(UF::UNIT_MOUNTDISPLAYID);
     c.flying = o.taxiFlight();
     fillEquipment(g, o, c);
+}
+
+void fillGameObjectState(const WorldObject& o, CreatureSeen& c) {
+    c.isGo = true;
+    c.goState = (uint8_t)std::min<uint32_t>(o.goState(), 255);
+    c.goStateMs = o.stateChangeMs;
+    float q[4];
+    c.tilted = o.goTilt(q);
+    if (c.tilted) w3d_obj_rot_from_quat(q, c.rot);
+}
+
+bool fillCorpse(const WorldObject& o, CreatureSeen& c) {
+    if (o.type != ObjType::Corpse || !o.hasPos || o.corpseBones()) return false;
+    const uint32_t b1 = o.field(UF::CORPSE_FIELD_BYTES_1), b2 = o.field(UF::CORPSE_FIELD_BYTES_2);
+    // vMaNGOS Corpse::Create: BYTES_1 = race << 8 | gender << 16 | skin << 24; BYTES_2 = face | hairstyle << 8 | haircolor << 16 | facial << 24
+    W3dLook l{};
+    l.race = (uint8_t)((b1 >> 8) & 0xFF);
+    l.sex = (uint8_t)((b1 >> 16) & 0xFF);
+    l.skin = (uint8_t)((b1 >> 24) & 0xFF);
+    l.face = (uint8_t)(b2 & 0xFF);
+    l.hairStyle = (uint8_t)((b2 >> 8) & 0xFF);
+    l.hairColor = (uint8_t)((b2 >> 16) & 0xFF);
+    l.facialHair = (uint8_t)((b2 >> 24) & 0xFF);
+    if (!l.race || l.race > 8) return false;   // the eight races of 1.12
+    c.lookParts = l;
+    c.look = w3d_look_key(&c.lookParts);
+    c.displayId = o.corpseDisplay();
+    c.dead = true;
+    const uint32_t flags = o.corpseFlags();
+    for (uint32_t& e : c.equip) e = 0;
+    for (uint8_t& e : c.equipInv) e = 0;
+    for (int slot = 0; slot < W3D_EQ_SLOTS; ++slot) {   // slots 0..18 are the inventory slots, like PLAYER_VISIBLE_ITEM
+        const uint32_t v = o.field((uint16_t)(UF::CORPSE_FIELD_ITEM + slot));
+        if (!v) continue;
+        if (slot == W3D_EQ_HEAD && (flags & 0x08)) continue;   // CORPSE_FLAG_HIDE_HELM
+        if (slot == W3D_EQ_BACK && (flags & 0x10)) continue;   // CORPSE_FLAG_HIDE_CLOAK
+        c.equip[slot] = v & 0x00FFFFFF;
+        c.equipInv[slot] = (uint8_t)(v >> 24);
+    }
+    return true;
 }

@@ -36,11 +36,14 @@ src = os.path.join(out, "tmp", "coin_src.wav"); tone_wav(src, 1500, 0.25, rate=2
 ffmpeg(src, path("Sound\\Interface\\coin.wav"), "-c:a", "adpcm_ms")           # MS ADPCM stereo
 src = os.path.join(out, "tmp", "lvl_src.wav"); tone_wav(src, 600, 0.6)
 ffmpeg(src, path("Sound\\Interface\\levelup.mp3"), "-c:a", "libmp3lame", "-b:a", "96k")
+tone_wav(path("Sound\\Interface\\discover.wav"), 1200, 0.3)                    # found by the "*discover" name search
 # music: two day tracks, one night track (stereo MP3s), ambience WAV loop
 for name, hz in (("day1", 440), ("day2", 330), ("night1", 220)):
     src = os.path.join(out, "tmp", name + ".wav"); tone_wav(src, hz, 3.0, ch=2)
     ffmpeg(src, path("Sound\\Music\\ZoneMusic\\" + name + ".mp3"), "-c:a", "libmp3lame", "-b:a", "128k")
 tone_wav(path("Sound\\Ambience\\forest.wav"), 300, 2.0, rate=44100)
+src = os.path.join(out, "tmp", "glue.wav"); tone_wav(src, 550, 2.0, ch=2)   # the login screen theme
+ffmpeg(src, path("Sound\\Music\\GlueScreenMusic\\wow_main_theme.mp3"), "-c:a", "libmp3lame", "-b:a", "128k")
 
 S = [b"\0"]
 def s(t):
@@ -65,19 +68,41 @@ rows = [
     se(3, "igCharacterInfoTab", ["tab.wav"], "Sound\\Interface"),
     se(4, "LOOTWINDOWCOINSOUND", ["coin.wav"], "Sound\\Interface"),
     se(5, "LevelUp", ["levelup.mp3"], "Sound\\Interface"),
+    se(6, "ZoneDiscoveredChime", ["discover.wav"], "Sound\\Interface"),
     se(100, "Zone-ElwynnDay", ["day1.mp3", "day2.mp3"], "Sound\\Music\\ZoneMusic", 0.7),
     se(101, "Zone-ElwynnNight", ["night1.mp3"], "Sound\\Music\\ZoneMusic"),
     se(200, "ForestDay", ["forest.wav"], "Sound\\Ambience"),
+    se(400, "GS_LoginScreen", ["wow_main_theme.mp3"], "Sound\\Music\\GlueScreenMusic", 0.8),
 ]
 # world sounds: a wolf's cries, weapon impacts, a fire spell, footsteps (pitches 2000 + k * 100 Hz)
 WORLD = [(300, "WolfAggro"), (301, "WolfDeath"), (302, "WolfWoundA"), (303, "WolfWoundCrit"), (304, "WolfAttackA"),
          (305, "WolfAttackCrit"), (310, "m1hSwordHitFlesh"), (311, "m1hSwordHitFleshCrit"), (312, "m1hSwordHitMetal"),
          (320, "PreCastFireHigh"), (321, "FireCast"), (322, "FireBallImpact"), (330, "FootStepsMediumDirt"),
-         (331, "FootStepsMediumGrass")]
+         (331, "FootStepsMediumGrass"),
+         # liquids (stage 5.26): found by keyword (splash, swim, wade) and by the id the server plays at a bite (3355)
+         (350, "EnterWaterMediumA"), (351, "SwimSlowMedium"), (352, "FootStepsWaterSmall"), (3355, "FishBite")]
 for k, (i, n) in enumerate(WORLD):
     tone_wav(path("Sound\\Creature\\%s.wav" % n), 2000 + k * 100, 0.4 if i != 320 else 5.0, rate=22050)
     rows.append(se(i, n, [n + ".wav", n + ".wav"], "Sound\\Creature", 0.8))
 rows.append(se(340, "igSpellPrecast", [], ""))   # no files: must be skipped
+# UI stage 8 voices: an NPC voice set (NPCSounds), our error lines listed in SoundEntries (human male), a generic race
+# voice (human female), an emote voice; more files that only exist in the archives (orc female errors with sparse numbers,
+# dwarf male generic NPC greetings) are found by their names
+VOICE = [(500, "GuardGreetings", "Sound\\Creature\\Guard", ["GuardGreet01.wav", "GuardGreet02.wav", "GuardGreet03.wav"]),
+         (501, "GuardFarewell", "Sound\\Creature\\Guard", ["GuardBye01.wav"]),
+         (502, "GuardPissed", "Sound\\Creature\\Guard", ["GuardPissed01.wav"]),
+         (503, "BakerGreetings", "Sound\\Creature\\Baker", ["BakerGreet01.wav"]),
+         (504, "SmithGreetings", "Sound\\Creature\\Smith", ["SmithGreet01.wav"]),
+         (600, "HumanMaleErrorNoRage", "Sound\\Character\\Human\\MaleErrorMessages", ["HumanMale_err_norage01.wav", "HumanMale_err_norage02.wav"]),
+         (601, "HumanMaleErrorOutOfRange", "Sound\\Character\\Human\\MaleErrorMessages", ["HumanMale_err_outofrange01.wav"]),
+         (700, "HumanFemaleStandardNPCGreetings", "Sound\\Creature\\HumanFemaleStandardNPC", ["HumanFemaleStandardNPCGreeting01.wav"]),
+         (800, "HumanMaleCheer", "Sound\\Character\\Human", ["HumanMaleCheer01.wav"])]
+for k, (i, n, d, files) in enumerate(VOICE):
+    for f in files: tone_wav(path(d + "\\" + f), 1200 + k * 50, 0.6, rate=22050)
+    rows.append(se(i, n, files, d))
+for f in ("OrcFemale_err_nomana01.wav", "OrcFemale_err_nomana03.wav"):
+    tone_wav(path("Sound\\Character\\Orc\\OrcFemaleErrorMessages\\" + f), 900, 0.5, rate=22050)
+tone_wav(path("Sound\\Creature\\DwarfMaleStandardNPC\\DwarfMaleStandardNPCGreeting01.wav"), 950, 0.5, rate=22050)
 dbc("SoundEntries.dbc", 29, rows, strtab())
 
 def zrow(n, vals):
@@ -88,7 +113,13 @@ def zrow(n, vals):
 # stand 8, footstep 9, aggro 10, ... (30 fields); two creatures share the wolf's sounds
 csd = [zrow(30, {0: i, 1: 304, 2: 305, 3: 302, 4: 303, 6: 301, 9: 7, 10: 300}) for i in (1, 2)]
 dbc("CreatureSoundData.dbc", 30, csd, b"\0")
-dbc("CreatureDisplayInfo.dbc", 12, [zrow(12, {0: 100, 1: 1, 2: 1}), zrow(12, {0: 101, 1: 2, 2: 2}), zrow(12, {0: 102, 1: 3, 2: 0})], b"\0")
+# CreatureDisplayInfo: ID, model, sound 2, extra 3, ..., NPCSounds 11 (UI stage 8)
+dbc("CreatureDisplayInfo.dbc", 12, [zrow(12, {0: 100, 1: 1, 2: 1}), zrow(12, {0: 101, 1: 2, 2: 2}), zrow(12, {0: 102, 1: 3, 2: 0}),
+    zrow(12, {0: 103, 1: 4, 11: 7}), zrow(12, {0: 104, 1: 4, 11: 8}), zrow(12, {0: 105, 1: 4, 11: 9}),
+    zrow(12, {0: 106, 1: 5, 3: 50}), zrow(12, {0: 107, 1: 5, 3: 51})], b"\0")
+dbc("NPCSounds.dbc", 5, [[7, 500, 501, 502, 0], [8, 503, 0, 0, 0], [9, 504, 0, 0, 0]], b"\0")
+dbc("CreatureDisplayInfoExtra.dbc", 20, [zrow(20, {0: 50, 1: 1, 2: 1}), zrow(20, {0: 51, 1: 3, 2: 0})], b"\0")
+dbc("EmotesTextSound.dbc", 5, [[1, 21, 1, 0, 800], [2, 21, 1, 1, 9999]], b"\0")   # (9999: no such sound - skipped)
 dbc("FootstepTerrainLookup.dbc", 5, [[1, 7, 3, 331, 0], [2, 7, 1, 330, 0]], b"\0")
 S[:] = [b"\0"]
 dbc("TerrainType.dbc", 6, [[1, s("Dirt"), 0, 0, 0, 0], [3, s("Grass"), 0, 0, 0, 0]], strtab())

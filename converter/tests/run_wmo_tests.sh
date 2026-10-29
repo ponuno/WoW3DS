@@ -14,10 +14,11 @@ T=$(cd "$(dirname "$0")" && pwd)
 OUT=${OUT:-/tmp/w3d_wmo}
 rm -rf "$OUT" && mkdir -p "$OUT/prev"
 python3 "$T/gen_wmo_data.py" "$OUT/Data" "$OUT/expect.json"
-"$B/w3dconv" --data "$OUT/Data" --map Test --tiles 32 48 33 48 -o "$OUT/wmo.w3dp" --dump-placements "$OUT/dump.txt" | tee "$OUT/conv.log" | grep -E "buildings|instances|floors|collision|COLL|winding|duplicate|^OK"
+"$B/w3dconv" --data "$OUT/Data" --map Test --tiles 32 48 33 48 -o "$OUT/wmo.w3dp" --dump-placements "$OUT/dump.txt" | tee "$OUT/conv.log" | grep -E "buildings|instances|floors|collision|COLL|winding|duplicate|invisible|^OK"
 grep -q "4 duplicate placements skipped" "$OUT/conv.log"   # house, stairs, lamp, border fence
 grep -q "1 WMO submeshes flipped" "$OUT/conv.log"
-grep -q "1 models with" "$OUT/conv.log" && grep -q "collision (1 simplified)" "$OUT/conv.log"   # fence: 432 -> <= 96 triangles
+grep -q "2 models with" "$OUT/conv.log" && grep -q "collision (0 simplified)" "$OUT/conv.log"   # 6.18b: no limit on doodad collision triangles any more (the fence keeps all 432); the invisible wall
+grep -q "1 of them invisible walls" "$OUT/conv.log"   # 6.14: no drawn batch, still solid
 python3 "$T/check_wmo_dump.py" "$OUT/dump.txt" "$OUT/expect.json"
 python3 "$T/check_pack_models.py" "$OUT/wmo.w3dp"
 "$B/w3dconv" --info "$OUT/wmo.w3dp" | grep -E "floors|^OK"
@@ -37,4 +38,6 @@ fi
 echo "negative control (--no-walls): $(tail -1 "$OUT/nowalls_check.txt")"
 "$B/w3dpreview" "$OUT/wmo.w3dp" "$OUT/prev"
 "$B/w3dpreview" "$OUT/wmo.w3dp" "$OUT/prev" --coll | grep -q "coll_32_48.png: .* walls"
+# stage 5.31: simplified building groups keep every wall closed (no cracks between panels)
+if [ -x "$B/wmo_hole_test" ]; then "$B/wmo_hole_test"; fi
 echo "WMO TESTS: PASS"

@@ -41,6 +41,8 @@ uint32_t chatColor(uint8_t type) {
         case Chat::Officer: return hudRgba(64, 192, 64);
         case Chat::System: return kYellow;
         case Chat::Channel: return hudRgba(255, 192, 192);
+        case Chat::ChannelNotice: return hudRgba(255, 170, 170);
+        case Chat::Afk: case Chat::Dnd: case Chat::Ignored: return hudRgba(255, 128, 255);
         case Chat::Emote: case Chat::TextEmote: case Chat::MonsterEmote: return hudRgba(255, 128, 64);
         case Chat::Local: return kCyan;
         case Chat::Loot: return hudRgba(0, 170, 0);
@@ -48,7 +50,7 @@ uint32_t chatColor(uint8_t type) {
     }
 }
 
-// Chat tabs: 0 all, 1 say (and other nearby speech), 2 group, 3 guild, 4 whispers, 5 system / combat / loot
+// Chat tabs: 0 all, 1 say (and other nearby speech), 2 group, 3 guild, 4 whispers, 5 channels, 6 system / combat / loot
 bool chatInChannel(uint8_t type, int ch) {
     using namespace w3n;
     switch (ch) {
@@ -56,8 +58,10 @@ bool chatInChannel(uint8_t type, int ch) {
                        type == Chat::MonsterSay || type == Chat::MonsterYell || type == Chat::MonsterEmote;
         case 2: return type == Chat::Party || type == Chat::Raid || type == Chat::RaidLeader || type == Chat::RaidWarning;
         case 3: return type == Chat::Guild || type == Chat::Officer;
-        case 4: return type == Chat::Whisper || type == Chat::WhisperInform || type == Chat::MonsterWhisper;
-        case 5: return type == Chat::System || type == Chat::Local || type == Chat::Loot || type == Chat::Skill || type == Chat::Channel;
+        case 4: return type == Chat::Whisper || type == Chat::WhisperInform || type == Chat::MonsterWhisper || type == Chat::Afk ||
+                       type == Chat::Dnd || type == Chat::Ignored;
+        case 5: return type == Chat::Channel || type == Chat::ChannelNotice;
+        case 6: return type == Chat::System || type == Chat::Local || type == Chat::Loot || type == Chat::Skill;
         default: return true;
     }
 }
@@ -83,12 +87,14 @@ std::string secs(uint32_t ms) {
 // ------------------------------------------------------------------ Combat: party, target of target, auras, cooldowns, nearby
 void GameUi::drawCombat(w3n::GameSession& g, const Input& in) {
     const int L = 4, LW = 154, R = 164, RW = 152;
+    const int stripH = g.pet.active ? 36 : 0;   // UI stage 13: the pet's buttons take the bottom
+    const int limitY = kTabY - stripH;
     rows_.clear();
     list_.text(L, kTop + 2, tr("Group and nearby", "Группа и рядом"), kGold);
     int y = kTop + 14;
     // party members first
     for (const w3n::PartyMember& pm : g.party.members) {
-        if (y > kTabY - 26) break;
+        if (y > limitY - 26) break;
         w3n::PartyMember v = g.memberView(pm);
         const bool tgt = g.target() == pm.guid;
         list_.rect(L, y, LW, 24, tgt ? kRowSel : kRow);
@@ -118,7 +124,7 @@ void GameUi::drawCombat(w3n::GameSession& g, const Input& in) {
     }
     std::sort(near.begin(), near.end(), [](const Near& a, const Near& b) { return a.d < b.d; });
     for (const Near& n : near) {
-        if (y > kTabY - 24) break;
+        if (y > limitY - 24) break;
         const w3n::WorldObject& o = *n.o;
         const bool tgt = g.target() == o.guid, aimed = o.guid == aim_;
         list_.rect(L, y, LW, 22, tgt ? kRowSel : kRowAlt);
@@ -175,22 +181,68 @@ void GameUi::drawCombat(w3n::GameSession& g, const Input& in) {
     int shown = 0;
     if (barsView_) {
         std::vector<uint32_t> seen;
-        for (int s = 0; s < kPadSlots && ry + 20 <= kTabY; ++s) {
+        for (int s = 0; s < kPadSlots && ry + 20 <= limitY; ++s) {
             const ActionSlot& a = barsView_->at(s);
-            if (a.type != ActionSlot::Spell || std::find(seen.begin(), seen.end(), a.id) != seen.end()) continue;
-            seen.push_back(a.id);
-            uint32_t cd = g.cooldownLeftMs(a.id, in.nowMs);
+            if (a.type == ActionSlot::Empty || a.type > ActionSlot::Item) continue;
+            const uint32_t key = a.type == ActionSlot::Spell ? a.id : (a.id | 0x80000000u);
+            if (std::find(seen.begin(), seen.end(), key) != seen.end()) continue;
+            seen.push_back(key);
+            const bool item = a.type == ActionSlot::Item;   // UI stage 12: items too
+            uint32_t cd = item ? g.itemCooldownLeftMs(a.id, in.nowMs) : g.cooldownLeftMs(a.id, in.nowMs);
             if (cd <= 1500) continue;   // the global cooldown is not news
-            iconBox(R + 1, ry + 1, 16, spellIcon(a.id), g.spellNames.name(a.id), kFrameDim, true);
-            list_.textFit(R + 22, ry + 2, g.spellNames.name(a.id), RW - 52, kText, false);
+            const std::string nm = item ? g.itemName(a.id) : g.spellNames.name(a.id);
+            iconBox(R + 1, ry + 1, 16, item ? itemIcon(g, a.id) : spellIcon(a.id), nm, kFrameDim, true);
+            list_.textFit(R + 22, ry + 2, nm, RW - 52, kText, false);
             list_.textRight(R + RW - 2, ry + 2, secs(cd), kYellow, false);
             ry += 20;
             ++shown;
         }
     }
     if (!shown) list_.text(R + 2, ry + 2, tr("all ready", "всё готово"), kGrey, false);
-    if (g.cast.active) btn(R, kTabY - 24, RW, 22, tr("Cancel the cast", "Прервать заклинание"), Act::CancelCast, 0, Style::Danger, Font::Small);
+    if (g.cast.active) btn(R, limitY - 24, RW, 22, tr("Cancel the cast", "Прервать заклинание"), Act::CancelCast, 0, Style::Danger, Font::Small);
+    petStrip(g, in);
 }
+
+// ------------------------------------------------------------------ the pet's buttons (UI stage 13)
+// Orders (attack / follow / stay), stances (passive / defensive / aggressive), the pet's castable spells (the server's bar
+// slots 3..6) and the button that opens the pet window. Tap = do it; drag onto the crossbars = bind it.
+int GameUi::petStrip(w3n::GameSession& g, const Input& in) {
+    if (!g.pet.active) return 0;
+    const int y = kTabY - 31, cell = 26, gap = 2;
+    list_.rect(2, y - 4, kTouchW - 4, 34, kRowAlt);
+    static const uint32_t kCmds[6] = {kPetCmdAttack, kPetCmdFollow, kPetCmdStay, kPetCmdPassive, kPetCmdDefensive, kPetCmdAggressive};
+    int x = 5;
+    for (int i = 0; i < 6; ++i) {
+        const uint32_t id = kCmds[i];
+        const ActionSlot a{ActionSlot::PetCmd, id};
+        iconBox(x, y, cell, actionIcon(g, a), petCmdName(id), petCmdActive(g, id) ? kGold : kFrameDim, !g.pet.enabled);
+        Button& b = region(x, y, cell, cell, Act::PetCommand, (int)id);
+        b.dragKind = 3;
+        b.dragId = id;
+        x += cell + gap + (i == 2 ? 4 : 0);
+    }
+    x += 4;
+    for (int slot = 3; slot < 7 && x + cell < kTouchW - 34; ++slot) {
+        const uint32_t sp = w3n::PetState::spellOf(g.pet.bar[slot]);
+        const uint8_t ty = w3n::PetState::typeOf(g.pet.bar[slot]);
+        if (!sp || ty == w3n::PetAct::Command || ty == w3n::PetAct::Reaction) continue;
+        const uint32_t cd = g.petCooldownLeftMs(sp, in.nowMs);
+        iconBox(x, y, cell, spellIcon(sp), g.spellNames.name(sp), ty == w3n::PetAct::Enabled ? kGreen : kFrameDim, cd > 1500 || ty == w3n::PetAct::Passive || !g.pet.enabled);
+        if (cd > 1500) list_.textCentered(x + cell / 2, y + 8, secs(cd), kYellow, true);
+        if (ty == w3n::PetAct::Enabled) list_.rect(x + cell - 6, y + 1, 5, 5, kYellow);   // auto-cast on
+        if (ty != w3n::PetAct::Passive) {
+            Button& b = region(x, y, cell, cell, Act::PetCast, (int)sp);
+            b.dragKind = 4;
+            b.dragId = sp;
+            b.infoKind = 2;
+            b.infoId = sp;
+        }
+        x += cell + gap;
+    }
+    btn(kTouchW - 34, y, 30, cell, "...", Act::PetOpen, 0, Style::Normal, Font::Small);
+    return 36;
+}
+
 
 // ------------------------------------------------------------------ Map: the zone (or continent) with us, units, quest givers
 void GameUi::drawMap(w3n::GameSession& g, const Input& in) {
@@ -218,7 +270,15 @@ void GameUi::drawMap(w3n::GameSession& g, const Input& in) {
             list_.rect(mx, my + mh * k / 4, mw, 1, hudRgba(40, 50, 56));
             list_.rect(mx + mw * k / 4, my, 1, mh, hudRgba(40, 50, 56));
         }
-        list_.textCentered(mx + mw / 2, my + mh - 12, tr("no map (convert ui.w3dp)", "нет карты (сконвертируйте ui.w3dp)"), kGrey, false);
+        char why[96];
+        if (!assets().loaded())
+            snprintf(why, sizeof why, "%s", tr("no ui.w3dp", "нет ui.w3dp"));
+        else if (!assets().mapCount())
+            snprintf(why, sizeof why, "%s", tr("ui.w3dp has no maps (log_ui: maps)", "в ui.w3dp нет карт (log_ui: maps)"));
+        else
+            snprintf(why, sizeof why, tr("no map #%u in ui.w3dp (%u maps)", "нет карты #%u в ui.w3dp (карт: %u)"),
+                     (unsigned)in.mapId, (unsigned)assets().mapCount());
+        list_.textCentered(mx + mw / 2, my + mh - 12, why, kGrey, false);
     }
     list_.outline(mx - 1, my - 1, mw + 2, mh + 2, kFrame);
     // world -> screen
@@ -326,10 +386,10 @@ void GameUi::drawMap(w3n::GameSession& g, const Input& in) {
 // ------------------------------------------------------------------ Chat: channel tabs, lines, keyboard, quick phrases
 void GameUi::drawChat(w3n::GameSession& g, const Input& in) {
     (void)in;
-    const char* names[6] = {tr("All", "Все"), tr("Say", "Рядом"), tr("Group", "Группа"), tr("Guild", "Гильдия"), tr("Whisper", "Шёпот"),
-                            tr("System", "Систем.")};
-    for (int i = 0; i < 6; ++i)
-        btn(2 + i * 53, kTop + 2, 51, 18, names[i], Act::ChatChannel, i, chatChannel_ == i ? Style::ToggleOn : Style::Toggle, Font::Small);
+    const char* names[7] = {tr("All", "Все"), tr("Say", "Рядом"), tr("Group", "Группа"), tr("Guild", "Гильд."), tr("Whisp.", "Шёпот"),
+                            tr("Chan.", "Кан."), tr("System", "Систем.")};
+    for (int i = 0; i < 7; ++i)
+        btn(2 + i * 45, kTop + 2, 43, 18, names[i], Act::ChatChannel, i, chatChannel_ == i ? Style::ToggleOn : Style::Toggle, Font::Small);
     const Font f = listFont();
     const int lh = HudList::lineHeight(f), top = kTop + 24, bottom = kTabY - 28, rows = (bottom - top) / lh;
     // newest lines first, wrapped
@@ -351,16 +411,39 @@ void GameUi::drawChat(w3n::GameSession& g, const Input& in) {
     }
     if (lines.empty()) list_.text(8, top + 4, tr("No messages.", "Сообщений нет."), kGrey);
     const int by = kTabY - 24;
-    btn(2, by, 104, 22, tr("Write", "Написать"), Act::ChatWrite, chatChannel_, Style::Primary, Font::Small);
-    btn(110, by, 96, 22, tr("Phrases", "Фразы"), Act::ChatPhrases, 0, phrases_ ? Style::ToggleOn : Style::Normal, Font::Small);
-    btn(212, by, 50, 22, "▲", Act::ChatScroll, 3, chatScroll_ < maxScroll ? Style::Normal : Style::Disabled);
-    btn(266, by, 50, 22, "▼", Act::ChatScroll, -3, chatScroll_ > 0 ? Style::Normal : Style::Disabled);
+    {   // the destination of Write (tap: the next one) - if it went away (left the group, the channel), say
+        const std::vector<std::string> ds = chatDests(g);
+        if (std::find(ds.begin(), ds.end(), chatDest_) == ds.end()) chatDest_ = "s";
+    }
+    btn(2, by, 64, 22, tr("Write", "Писать"), Act::ChatWrite, chatChannel_, Style::Primary, Font::Small);
+    btn(68, by, 100, 22, chatDestLabel(g, chatDest_), Act::ChatDest, 0, Style::Normal, Font::Small);
+    btn(170, by, 56, 22, tr("More", "Ещё"), Act::ChatPhrases, 0, phrases_ ? Style::ToggleOn : Style::Normal, Font::Small);
+    btn(230, by, 42, 22, "▲", Act::ChatScroll, 3, chatScroll_ < maxScroll ? Style::Normal : Style::Disabled);
+    btn(274, by, 42, 22, "▼", Act::ChatScroll, -3, chatScroll_ > 0 ? Style::Normal : Style::Disabled);
     if (phrases_) {   // quick phrases over the lines
         window(20, kTop + 22, kTouchW - 40, 128, true);
         // two pages: phrases, and (the animation stage) emotes (CMSG_TEXT_EMOTE) with sitting down / standing up
         btn(28, kTop + 27, 80, 18, tr("Phrases", "Фразы"), Act::EmotePick, 2000, phrasePage_ == 0 ? Style::ToggleOn : Style::Toggle, Font::Small);
         btn(112, kTop + 27, 80, 18, tr("Emotes", "Эмоции"), Act::EmotePick, 2001, phrasePage_ == 1 ? Style::ToggleOn : Style::Toggle, Font::Small);
-        if (phrasePage_ == 0) {
+        btn(196, kTop + 27, 80, 18, tr("Channels", "Каналы"), Act::EmotePick, 2002, phrasePage_ == 2 ? Style::ToggleOn : Style::Toggle, Font::Small);
+        if (phrasePage_ == 2) {   // stage 5.46: the joined channels: write, list who is in, leave; and join another
+            const std::vector<std::string>& ch = g.channelSlots();
+            int row = 0;
+            for (size_t i = 0; i < ch.size() && row < 4; ++i) {
+                if (ch[i].empty()) continue;
+                const int y = kTop + 49 + row * 20, n = (int)i + 1;
+                std::string nm = ch[i];
+                size_t dash = nm.find(" - ");
+                if (dash != std::string::npos) nm.resize(dash);
+                list_.text(30, y + 3, std::to_string(n) + ". " + nm, kText, true, Font::Small);
+                btn(138, y, 48, 18, tr("Write", "Писать"), Act::ChannelSay, n, Style::Normal, Font::Small);
+                btn(190, y, 40, 18, tr("Who", "Кто"), Act::ChannelList, n, Style::Normal, Font::Small);
+                btn(234, y, 42, 18, tr("Leave", "Выйти"), Act::ChannelLeave, n, Style::Normal, Font::Small);
+                ++row;
+            }
+            if (!row) list_.text(30, kTop + 56, tr("Not in any channel.", "Вы не в каналах."), kGrey, true, Font::Small);
+            btn(28, kTop + 131, 120, 18, tr("Join channel...", "Войти в канал..."), Act::ChannelJoin, 0, Style::Primary, Font::Small);
+        } else if (phrasePage_ == 0) {
             for (int i = 0; i < 8; ++i)
                 btn(28 + (i % 2) * 134, kTop + 50 + (i / 2) * 24, 128, 22, gameUiPhrase(i), Act::PhrasePick, i, Style::Normal, Font::Small);
         } else {
@@ -402,6 +485,12 @@ void GameUi::drawItems(w3n::GameSession& g, const Input& in) {
         const int x = 6 + (k % cols) * cell, y = kTop + 24 + (k / cols) * cell;
         const w3n::ItemInfo* info = g.itemInfo(it.entry);
         iconBox(x + 1, y + 1, cell - 4, itemIcon(g, it.entry), g.itemName(it.entry), qualityColor(info ? info->quality : 1));
+        if (const uint32_t cd = g.itemCooldownLeftMs(it.entry, in.nowMs)) {   // UI stage 12: potions, stones, trinkets
+            const uint32_t total = std::max(cd, g.itemCooldownTotalMs(it.entry));
+            const int h = (int)((cell - 4) * (float)cd / (float)total + 0.5f);
+            list_.rect(x + 1, y + 1 + (cell - 4 - h), cell - 4, h, hudRgba(0, 0, 0, 160));
+            list_.textCentered(x + cell / 2 - 1, y + cell / 2 - 7, secs(cd), cd <= 5000 ? kRed : kYellow, true);
+        }
         if (it.count > 1) list_.textRight(x + cell - 4, y + cell - 14, std::to_string(it.count), kWhite, true);
         if (it.maxDurability && it.durability * 4 < it.maxDurability) list_.text(x + 3, y + 2, "!", kRed, true, Font::Normal);
         if (idx == selected_) { list_.outline(x - 1, y - 1, cell, cell, kGold); list_.outline(x - 2, y - 2, cell + 2, cell + 2, kGold); }
@@ -497,9 +586,14 @@ void GameUi::drawPaperDoll(w3n::GameSession& g, const Input& in) {
 }
 
 // ------------------------------------------------------------------ Spells: the book (tap = bind, drag = bind, hold = info)
+void GameUi::spellTabs(int active) {
+    btn(2, kTop + 2, 72, 18, tr("Book", "Книга"), Act::SubView, 0, active == 0 ? Style::ToggleOn : Style::Toggle, Font::Small);
+    btn(76, kTop + 2, 72, 18, tr("Talents", "Таланты"), Act::SubView, 1, active == 1 ? Style::ToggleOn : Style::Toggle, Font::Small);
+    btn(150, kTop + 2, 72, 18, tr("Skills", "Навыки"), Act::SubView, 2, active == 2 ? Style::ToggleOn : Style::Toggle, Font::Small);
+}
+
 void GameUi::drawSpells(w3n::GameSession& g, const Input& in) {
-    btn(2, kTop + 2, 72, 18, tr("Book", "Книга"), Act::SubView, 0, Style::ToggleOn, Font::Small);
-    btn(76, kTop + 2, 72, 18, tr("Talents", "Таланты"), Act::SubView, 1, Style::Toggle, Font::Small);
+    spellTabs(0);
     if (barsView_) {
         char b[48];
         snprintf(b, sizeof b, "%s %d/%d", tr("bar page", "стр. панели"), barsView_->page + 1, ActionLayout::kPages);
@@ -536,8 +630,7 @@ void GameUi::drawSpells(w3n::GameSession& g, const Input& in) {
 // ------------------------------------------------------------------ Talents: the class's trees (talents.txt)
 void GameUi::drawTalents(w3n::GameSession& g, const Input& in) {
     (void)in;
-    btn(2, kTop + 2, 72, 18, tr("Book", "Книга"), Act::SubView, 0, Style::Toggle, Font::Small);
-    btn(76, kTop + 2, 72, 18, tr("Talents", "Таланты"), Act::SubView, 1, Style::ToggleOn, Font::Small);
+    spellTabs(1);
     char b[64];
     snprintf(b, sizeof b, "%s %u", tr("points:", "очки:"), (unsigned)g.talentPoints());
     list_.textRight(kTouchW - 6, kTop + 5, b, g.talentPoints() ? kGreen : kGrey);
@@ -610,11 +703,126 @@ void GameUi::drawTalents(w3n::GameSession& g, const Input& in) {
                 std::string l = std::string(tr("Needs: ", "Нужно: ")) + g.spellNames.name(req->rankSpell[0]);
                 for (const std::string& w : HudList::wrap(l, iw - 12)) { list_.text(ix + 6, ty, w, kRed); ty += 11; }
             }
+    {   // 6.20: what the current rank does (rank 1 when none is learned yet), then the next rank's text
+        const std::string d = g.spellDesc.text(shown);
+        for (const std::string& l : HudList::wrap(d, iw - 12, Font::Small)) {
+            if (ty + 10 > kTabY - 50) break;
+            list_.text(ix + 6, ty, l, kText, false, Font::Small);
+            ty += HudList::lineHeight(Font::Small);
+        }
+        ty += 2;
+    }
     if (rank < maxr && sel->rankSpell[rank]) {
         list_.textFit(ix + 6, ty + 2, std::string(tr("Next: ", "Далее: ")) + spellLabel(g, sel->rankSpell[rank]), iw - 12, kGrey);
+        ty += 12;
+        const std::string d = rank > 0 ? g.spellDesc.text(sel->rankSpell[rank]) : std::string();
+        for (const std::string& l : HudList::wrap(d, iw - 12, Font::Small)) {
+            if (ty + 10 > kTabY - 34) break;
+            list_.text(ix + 6, ty, l, kGrey, false, Font::Small);
+            ty += HudList::lineHeight(Font::Small);
+        }
     }
     const bool can = rank < maxr && g.talentPoints() > 0;
     btn(ix + 6, kTabY - 30, iw - 12, 24, tr("Learn", "Изучить"), Act::TalentLearn, 0, can ? Style::Primary : Style::Disabled);
+}
+
+// ------------------------------------------------------------------ Skills (6.19): weapon skills, professions, languages ... like the original's page
+// Groups in the original's order; a header folds its group away. A bar per skill: value / maximum (+ bonus), the rank title of a
+// profession ("Journeyman"); a tap selects a skill and shows its description; a primary profession can be unlearned.
+void GameUi::drawSkills(w3n::GameSession& g, const Input& in) {
+    (void)in;
+    spellTabs(2);
+    struct Group { int cat; const char* en; const char* ru; };
+    static const Group kGroups[] = {
+        {7, "Class Skills", "Классовые навыки"}, {11, "Professions", "Профессии"}, {9, "Secondary Skills", "Вторичные навыки"},
+        {6, "Weapon Skills", "Оружейные навыки"}, {8, "Armor Proficiencies", "Владение доспехами"}, {10, "Languages", "Языки"},
+    };
+    const std::vector<w3n::GameSession::SkillState> mine = g.playerSkills();
+    if (!g.skills.loaded()) {
+        window(10, kTop + 30, kTouchW - 20, 70);
+        list_.textCentered(kTouchW / 2, kTop + 44, tr("No skills.txt on the SD card", "Нет skills.txt на SD-карте"), kText, true, Font::Normal);
+        list_.textCentered(kTouchW / 2, kTop + 64, tr("(w3dconv --ui or --texts-only writes it)", "(его пишет w3dconv --ui или --texts-only)"), kGrey);
+        return;
+    }
+    struct Row { bool header; int cat; int count; const w3n::GameSession::SkillState* s; const w3n::SkillLine* line; };
+    std::vector<Row> rows;
+    for (const Group& gr : kGroups) {
+        std::vector<Row> items;
+        for (const w3n::GameSession::SkillState& s : mine) {
+            const w3n::SkillLine* l = g.skills.find(s.id);
+            if (l && l->category == gr.cat) items.push_back({false, gr.cat, 0, &s, l});
+        }
+        if (items.empty()) continue;
+        rows.push_back({true, gr.cat, (int)items.size(), nullptr, nullptr});
+        if (!(skillFolded_ & (1u << gr.cat))) rows.insert(rows.end(), items.begin(), items.end());
+    }
+    if (rows.empty()) {
+        list_.text(8, kTop + 30, tr("No skills yet.", "Навыков пока нет."), kGrey);
+        return;
+    }
+    const int per = 6, rowH = 14, top = kTop + 22;
+    const int pages = std::max(1, ((int)rows.size() + per - 1) / per);
+    page_ = std::min(page_, pages - 1);
+    const w3n::GameSession::SkillState* sel = nullptr;
+    const w3n::SkillLine* selLine = nullptr;
+    char b[64];
+    for (int k = 0; k < per; ++k) {
+        const int idx = page_ * per + k;
+        if (idx >= (int)rows.size()) break;
+        const Row& r = rows[idx];
+        const int y = top + k * rowH;
+        if (r.header) {
+            const Group* gr = nullptr;
+            for (const Group& c : kGroups) if (c.cat == r.cat) gr = &c;
+            const bool folded = (skillFolded_ & (1u << r.cat)) != 0;
+            list_.rect(2, y, kTouchW - 4, rowH - 1, kRowSel);
+            snprintf(b, sizeof b, "%s %s (%d)", folded ? "+" : "-", tr(gr->en, gr->ru), r.count);
+            list_.text(6, y + 2, b, kGold, true, Font::Small);
+            region(2, y, kTouchW - 4, rowH - 1, Act::SkillHeader, r.cat);
+            continue;
+        }
+        const bool isSel = skillSel_ == r.s->id;
+        if (isSel) { sel = r.s; selLine = r.line; }
+        list_.rect(2, y, kTouchW - 4, rowH - 1, isSel ? kRowSel : (k % 2 ? kRowAlt : kRow));
+        list_.textFit(8, y + 2, r.line->name, 112, kText, false, Font::Small);
+        const int bx = 124, bw = kTouchW - 4 - bx - 2;
+        if (r.s->max > 1) {
+            const int bonus = r.s->tempBonus + r.s->permBonus;
+            const bool maxed = r.s->value >= r.s->max;
+            const float fill = std::min(1.0f, (float)r.s->value / (float)std::max<int>(1, r.s->max));
+            list_.bar(bx, y + 1, bw, rowH - 3, fill, maxed ? hudRgba(40, 120, 50) : hudRgba(36, 84, 150));
+            const int tier = w3n::skillRankTier(r.s->max);
+            static const char* kTierEn[] = {"", "Apprentice", "Journeyman", "Expert", "Artisan", "Master"};
+            static const char* kTierRu[] = {"", "Ученик", "Подмастерье", "Умелец", "Искусник", "Мастер"};
+            const bool titled = (r.cat == 11 || r.cat == 9) && tier;
+            std::string num = std::to_string(r.s->value);
+            if (bonus) num += (bonus > 0 ? " (+" : " (") + std::to_string(bonus) + ")";
+            num += " / " + std::to_string(r.s->max);
+            if (titled) list_.text(bx + 4, y + 2, tr(kTierEn[tier], kTierRu[tier]), kText, true, Font::Small);
+            list_.textRight(bx + bw - 4, y + 2, num, bonus > 0 ? kGreen : kText, true, Font::Small);
+        }
+        region(2, y, kTouchW - 4, rowH - 1, Act::SkillPick, (int)r.s->id);
+    }
+    // the selected skill: its description
+    const int dy = top + per * rowH + 2, by = kTabY - 24;
+    window(2, dy, kTouchW - 4, by - dy - 2);
+    if (sel && selLine) {
+        std::string head = selLine->name;
+        if (sel->max > 1) head += "  " + std::to_string(sel->value) + " / " + std::to_string(sel->max);
+        list_.textFit(7, dy + 3, head, kTouchW - 16, kGold, true, Font::Small);
+        int ty = dy + 15;
+        const std::string d = selLine->description.empty() ? std::string(tr("No description.", "Нет описания.")) : selLine->description;
+        for (const std::string& l : HudList::wrap(d, kTouchW - 16, Font::Small)) {
+            if (ty + 10 > by - 2) break;
+            list_.text(7, ty, l, kText, false, Font::Small);
+            ty += 11;
+        }
+    } else {
+        list_.text(7, dy + 5, tr("Tap a skill for its description. Tap a title to fold the group.", "Нажмите навык — описание. Заголовок сворачивает группу."),
+                   kGrey, false, Font::Small);
+    }
+    if (selLine && selLine->category == 11) btn(2, by, 110, 22, tr("Unlearn", "Забыть навык"), Act::SkillAbandon, 0, Style::Danger, Font::Small);
+    pager(by, page_, pages);
 }
 
 // ------------------------------------------------------------------ Quests: log, one quest, reputation
@@ -847,36 +1055,40 @@ void GameUi::drawSettings(const Input& in) {
     const PadConfig& c = *in.cfg;
     int y = kTop + 24;
     auto label = [&](const char* t) { list_.textFit(6, y + 4, t, 110, kText, false); };
-    auto opt = [&](int x, int w, const char* t, bool on, int arg) { btn(x, y, w, 19, t, Act::Setting, arg, on ? Style::ToggleOn : Style::Toggle, Font::Small); };
+    const int bh = 19;
+    auto opt = [&](int x, int w, const char* t, bool on, int arg) { btn(x, y, w, bh, t, Act::Setting, arg, on ? Style::ToggleOn : Style::Toggle, Font::Small); };
     char b[16];
     if (subSettings_ == 0) {
         label(tr("Scheme", "Схема"));
         opt(120, 96, "Forever", c.scheme == PadScheme::Forever, 0);
         opt(220, 96, "Classic", c.scheme == PadScheme::Classic, 1);
-        y += 22;
+        y += 21;
         label(tr("Run from", "Бег от"));
         opt(120, 62, "0.3", fabsf(c.runThreshold - 0.3f) < 0.05f, 10);
         opt(186, 62, "0.5", fabsf(c.runThreshold - 0.5f) < 0.05f, 11);
         opt(252, 62, "0.7", fabsf(c.runThreshold - 0.7f) < 0.05f, 12);
-        y += 22;
+        y += 21;
         label(tr("Face movement", "Лицом к ходу"));
         opt(120, 96, tr("On", "Вкл"), c.faceMovement, 20);
         opt(220, 96, tr("Off", "Выкл"), !c.faceMovement, 21);
-        y += 22;
+        y += 21;
         label("ZL / ZR");
         opt(120, 96, tr("Hold", "Удерживать"), !c.toggleModifiers, 30);
         opt(220, 96, tr("Toggle", "Переключать"), c.toggleModifiers, 31);
-        y += 22;
+        y += 21;
         label(tr("Camera", "Камера"));
         opt(120, 96, tr("Invert Y", "Инверсия Y"), c.invertY, 40);
         btn(220, y, 30, 19, "-", Act::Setting, 50, Style::Normal);
         snprintf(b, sizeof b, "%.1f", c.camSpeed);
         list_.textCentered(268, y + 4, b, kText);
         btn(286, y, 30, 19, "+", Act::Setting, 51, Style::Normal);
-        y += 22;
-        list_.textFit(6, y + 2, tr("SELECT + ◀/▶ turns the tabs, SELECT alone frees the camera.",
-                                   "SELECT + ◀/▶ листает вкладки, просто SELECT — свободная камера."), kTouchW - 12, kGrey);
+        y += 21;
+        label(tr("Ground spells", "Спеллы на землю"));   // UI stage 10
+        opt(120, 96, tr("Aim", "Прицел"), c.groundCast == 0, 190);
+        opt(220, 96, tr("At target", "В цель"), c.groundCast == 1, 191);
+        // (SELECT + ◀/▶ turns the tabs: no room for that line since the ground spells' row)
     } else if (subSettings_ == 1) {
+        y -= 4;   // 8 rows (stage 5.32)
         label(tr("Draw distance", "Дальность"));
         const char* d[4] = {tr("Near", "Близко"), tr("Normal", "Норм."), tr("Far", "Далеко"), tr("Max", "Макс.")};
         for (int i = 0; i < 4; ++i) opt(120 + i * 49, 47, d[i], c.drawDist == i, 70 + i);
@@ -887,6 +1099,11 @@ void GameUi::drawSettings(const Input& in) {
         y += 20;
         label(tr("World objects", "Объекты мира"));
         opt(120, 96, tr("On", "Вкл"), c.doodads, 90);
+        opt(220, 96, c.fadeIn ? tr("Fade in: on", "Плавно: вкл") : tr("Fade in: off", "Плавно: выкл"), c.fadeIn, 205);   // stage 6.11
+        y += 20;
+        label(tr("Particles", "Частицы"));   // stage 5.32: flames, smoke, lamp glows
+        const char* fxn[3] = {tr("Off", "Выкл"), tr("Low", "Мало"), tr("High", "Много")};
+        for (int i = 0; i < 3; ++i) opt(120 + i * 65, 62, fxn[i], c.effects == i, 170 + i);
         y += 20;
         label(tr("Top screen", "Верх. экран"));
         opt(120, 62, tr("Normal", "Обычный"), c.topMode == 0, 95);
@@ -897,77 +1114,177 @@ void GameUi::drawSettings(const Input& in) {
         const int vv[3] = {c.musicVol, c.sfxVol, c.ambVol};
         for (int i = 0; i < 3; ++i) {
             label(vn[i]);
-            btn(120, y, 30, 19, "-", Act::Setting, 140 + i * 10, Style::Normal);
+            btn(120, y, 30, bh, "-", Act::Setting, 140 + i * 10, Style::Normal);
             list_.bar(154, y + 6, 74, 7, vv[i] / 10.0f, kGold, hudRgba(0, 0, 0, 140));
             snprintf(b, sizeof b, "%d", vv[i]);
             list_.textCentered(243, y + 3, vv[i] ? b : tr("off", "выкл"), kText);
-            btn(258, y, 30, 19, "+", Act::Setting, 141 + i * 10, Style::Normal);
-            y += 20;
+            btn(258, y, 30, bh, "+", Act::Setting, 141 + i * 10, Style::Normal);
+            y += 19;
         }
     } else {
         label(tr("Language", "Язык"));
         opt(120, 96, "English", c.lang == 0, 100);
         opt(220, 96, "Русский", c.lang == 1, 101);
-        y += 22;
+        y += 20;
         label(tr("Text size", "Размер текста"));
         opt(120, 96, tr("Normal", "Обычный"), !c.bigText, 110);
         opt(220, 96, tr("Large", "Крупный"), c.bigText, 110);
-        y += 22;
+        y += 20;
         label(tr("Dim HUD at rest", "Тусклый HUD вне боя"));
         opt(120, 96, c.dimHud ? tr("On", "Вкл") : tr("Off", "Выкл"), c.dimHud, 120);
-        y += 22;
+        y += 20;
         label(tr("Auto tabs", "Автовкладки"));
         opt(120, 96, c.autoTabs ? tr("On", "Вкл") : tr("Off", "Выкл"), c.autoTabs, 130);
-        y += 22;
+        y += 20;
         label(tr("Quest on top", "Квест сверху"));
         opt(120, 96, tr("On", "Вкл"), c.questTracker, 60);
         opt(220, 96, tr("Off", "Выкл"), !c.questTracker, 61);
+        y += 20;
+        label(tr("FPS / ping", "FPS / пинг"));   // 5.35e: small, at the bottom of the top screen
+        opt(120, 96, tr("On", "Вкл"), c.showStats, 180);
+        opt(220, 96, tr("Off", "Выкл"), !c.showStats, 181);
+        y += 20;
+        label(tr("Log / GPU / VSync", "Лог / GPU / VSync"));   // stage 6: perf.csv; 6.3: the early GPU kick; 6.4: vsync (each button toggles)
+        opt(120, 64, c.perfLog ? tr("Log", "Лог") : tr("no log", "без лога"), c.perfLog, 202);
+        opt(186, 64, c.gpuKick ? tr("GPU early", "GPU рано") : tr("GPU end", "GPU конец"), c.gpuKick, 203);
+        opt(252, 64, c.vsync ? "VSync" : tr("no VSync", "без VSync"), c.vsync, 204);
     }
+    // 8 rows on Graphics/sound since the particles (stage 5.32), 7 on Interface since the perf log (stage 6): Debug / Quit
+    // stay on the Controls page and in START
+    if (subSettings_ != 0) return;
     const int by = kTabY - 24;
-    btn(2, by, 100, 22, tr("Free camera", "Своб. камера"), Act::MenuItem, 7, Style::Normal, Font::Small);
-    btn(106, by, 100, 22, tr("Debug page", "Отладка"), Act::MenuItem, 8, Style::Normal, Font::Small);
-    btn(210, by, 106, 22, tr("Quit", "Выход"), Act::MenuItem, 9, Style::Danger, Font::Small);
+    btn(2, by, 156, 22, tr("Debug page", "Отладка"), Act::MenuItem, 8, Style::Normal, Font::Small);
+    btn(162, by, 154, 22, tr("Quit", "Выход"), Act::MenuItem, 9, Style::Danger, Font::Small);
 }
 
 // ------------------------------------------------------------------ START menu, the target's menu, buffs
 void GameUi::drawMenu(w3n::GameSession& g) {
-    (void)g;
     window(4, kTop + 2, kTouchW - 8, kContentH - 4, true);
-    const char* items[10] = {tr("Chat", "Чат"), tr("Bags", "Сумки"), tr("Equipment", "Экипировка"), tr("Spells", "Книга"),
+    const char* items[11] = {tr("Chat", "Чат"), tr("Bags", "Сумки"), tr("Equipment", "Экипировка"), tr("Spells", "Книга"),
                              tr("Quests", "Задания"), tr("Buffs", "Эффекты"), tr("Settings", "Настройки"), tr("Free camera", "Своб. камера"),
-                             tr("Debug page", "Отладка"), tr("Quit", "Выход")};
-    for (int i = 0; i < 10; ++i)
-        btn(14 + (i % 2) * 148, kTop + 8 + (i / 2) * 27, 142, 24, items[i], Act::MenuItem, i, i == 9 ? Style::Danger : Style::Normal);
+                             tr("Debug page", "Отладка"), tr("Quit", "Выход"), tr("Pet", "Питомец")};
+    for (int i = 0, k = 0; i < 11; ++i) {
+        if (i == 7) continue;   // the free camera is gone (stage 5.31)
+        if (i == 10 && !g.petGuid()) continue;   // UI stage 13: only with a pet (menu action 12)
+        btn(14 + (k % 2) * 148, kTop + 8 + (k / 2) * 27, 142, 24, items[i], Act::MenuItem, i == 10 ? 12 : i, i == 9 ? Style::Danger : Style::Normal);
+        ++k;
+    }
     btn(kTouchW - 80, kTabY - 28, 70, 22, tr("Close", "Закрыть"), Act::ClosePanel, 0, Style::Normal, Font::Small);
 }
 
 void GameUi::drawContext(w3n::GameSession& g) {
+    // the original's unit menu (UnitPopup): for a player Whisper, Inspect, Invite, Trade, Follow, Duel, Add friend, Ignore ...
     window(4, kTop + 2, kTouchW - 8, kContentH - 4, true);
     const w3n::WorldObject* t = g.objects.find(g.target());
     std::vector<int> items;
     if (t) {
         const bool player = t->type == w3n::ObjType::Player && !t->self;
         const bool member = g.inParty(t->guid);
-        for (int i : {0, 1, 2}) items.push_back(i);
-        if (player) items.push_back(3);                                                   // whisper
-        if (player && !member && (!g.party.inGroup || g.isLeader())) items.push_back(5);  // invite
-        if (member && g.isLeader()) { items.push_back(6); items.push_back(7); }           // uninvite, promote
-        if (player) { items.push_back(9); items.push_back(10); }                         // trade, add friend
-        if (player && g.guildId()) items.push_back(11);                                   // guild invite
+        items.push_back(0);
+        if (!player) items.push_back(1);
+        items.push_back(2);
+        if (player) {
+            items.push_back(3);                                                        // whisper
+            items.push_back(12);                                                       // inspect
+            if (!member && (!g.party.inGroup || g.isLeader())) items.push_back(5);    // invite
+            items.push_back(9);                                                        // trade
+            items.push_back(g.following == t->guid ? 16 : 13);                         // follow / stop following
+            if (!g.duel.active()) items.push_back(14);                                 // duel
+            items.push_back(10);                                                       // add friend
+            if (g.guildId()) items.push_back(11);                                      // guild invite
+            items.push_back(15);                                                       // ignore
+        } else if (t->self) {
+            items.push_back(12);                                                       // our own gear and honour
+        } else if (t->isUnitLike()) {
+            items.push_back(g.following == t->guid ? 16 : 13);
+        }
+        if (member && g.isLeader()) { items.push_back(6); items.push_back(7); }        // uninvite, promote
         items.push_back(4);
     } else {
         list_.textCentered(kTouchW / 2, kTop + 20, tr("No target", "Нет цели"), kGrey, true, Font::Normal);
+        if (g.following) items.push_back(16);
     }
     if (g.party.inGroup) items.push_back(8);
-    const char* names[12] = {tr("Attack", "Атаковать"), tr("Interact", "Действие"), tr("Assist", "Помочь"), tr("Whisper", "Шёпот"),
+    const char* names[17] = {tr("Attack", "Атаковать"), tr("Interact", "Действие"), tr("Assist", "Помочь"), tr("Whisper", "Шёпот"),
                              tr("Clear target", "Сбросить цель"), tr("Invite", "В группу"), tr("Uninvite", "Исключить"),
                              tr("Make leader", "Сделать лидером"), tr("Leave party", "Покинуть группу"), tr("Trade", "Обмен"),
-                             tr("Add friend", "В друзья"), tr("Guild invite", "В гильдию")};
-    for (size_t k = 0; k < items.size() && k < 10; ++k) {
-        int i = items[k];
-        btn(14 + (int)(k % 2) * 148, kTop + (t ? 10 : 40) + (int)(k / 2) * 30, 142, 26, names[i], Act::ContextItem, i,
-            i == 8 || i == 6 ? Style::Danger : i == 0 ? Style::Primary : Style::Normal);
+                             tr("Add friend", "В друзья"), tr("Guild invite", "В гильдию"), tr("Inspect", "Осмотреть"),
+                             tr("Follow", "Следовать"), tr("Duel", "Дуэль"), tr("Ignore", "Игнорировать"),
+                             tr("Stop following", "Не следовать")};
+    // three columns of buttons (up to 18)
+    const int cols = 3, bw = (kTouchW - 20 - (cols - 1) * 4) / cols, bh = 24, y0 = kTop + (t ? 8 : 40);
+    for (size_t k = 0; k < items.size() && k < 18; ++k) {
+        const int i = items[k];
+        btn(10 + (int)(k % cols) * (bw + 4), y0 + (int)(k / cols) * (bh + 4), bw, bh, names[i], Act::ContextItem, i,
+            i == 8 || i == 6 || i == 15 ? Style::Danger : i == 0 || i == 14 ? Style::Primary : Style::Normal, Font::Small);
     }
+    btn(kTouchW - 80, kTabY - 28, 70, 22, tr("Close", "Закрыть"), Act::ClosePanel, 0, Style::Normal, Font::Small);
+}
+
+// UI stage 9: another player's gear (their visible items: what everybody sees of them) and honour, like the original's
+// InspectFrame; a tap on an item shows its tooltip.
+void GameUi::drawInspect(w3n::GameSession& g) {
+    window(2, kTop + 2, kTouchW - 4, kContentH - 4, true);
+    const w3n::WorldObject* o = g.objects.find(inspect_);
+    if (!o || o->type != w3n::ObjType::Player) {
+        list_.textCentered(kTouchW / 2, kTop + 60, tr("Out of range", "Слишком далеко"), kGrey, true, Font::Normal);
+        btn(kTouchW - 80, kTabY - 28, 70, 22, tr("Close", "Закрыть"), Act::ClosePanel, 0, Style::Normal, Font::Small);
+        return;
+    }
+    auto cellAt = [&](int slot, int x, int y, int size) {
+        const uint32_t entry = g.visibleItem(*o, slot);
+        if (entry) {
+            const w3n::ItemInfo* info = g.itemInfo(entry);
+            iconBox(x, y, size, itemIcon(g, entry), g.itemName(entry), qualityColor(info ? info->quality : 1));
+            Button& b = region(x - 1, y - 1, size + 2, size + 2, Act::InspectSlot, (int)entry);
+            b.infoKind = 1;
+            b.infoId = entry;
+        } else {
+            ui::Image bg = assets().namedIcon(("slot_" + std::to_string(slot)).c_str());
+            if (bg.ok()) list_.image(x, y, size, size, bg, hudRgba(150, 150, 150));
+            else {
+                list_.rect(x, y, size, size, kRowAlt);
+                list_.textCentered(x + size / 2, y + size / 2 - 5, HudList::fit(slotShortName(slot), size - 2), hudRgba(110, 104, 92), false);
+            }
+            list_.outline(x - 1, y - 1, size + 2, size + 2, kFrameDim);
+        }
+    };
+    static const int left[8] = {0, 1, 2, 14, 4, 3, 18, 8}, right[8] = {9, 5, 6, 7, 10, 11, 12, 13};
+    const int cs = 32, step = 36, y0 = kTop + 8;
+    for (int i = 0; i < 8; ++i) {
+        cellAt(left[i], 8 + (i % 2) * step, y0 + (i / 2) * step, cs);
+        cellAt(right[i], kTouchW - 8 - cs - (1 - i % 2) * step, y0 + (i / 2) * step, cs);
+    }
+    const int cx0 = 8 + 2 * step + 4, cx1 = kTouchW - 8 - 2 * step - 4, cw = cx1 - cx0, mid = cx0 + cw / 2;
+    const std::string nm = o->self ? std::string() : (o->name.empty() ? g.objects.nameOf(o->guid) : o->name);
+    list_.textCentered(mid, y0, HudList::fit(nm.empty() ? std::string(tr("You", "Вы")) : nm, cw, Font::Normal), kGold, true, Font::Normal);
+    const uint32_t b0 = o->field(w3n::UF::UNIT_BYTES_0), race = b0 & 0xFF, cls = (b0 >> 8) & 0xFF;
+    static const char* kRaceEn[9] = {"", "Human", "Orc", "Dwarf", "Night Elf", "Undead", "Tauren", "Gnome", "Troll"};
+    static const char* kRaceRu[9] = {"", "Человек", "Орк", "Дворф", "Ночной эльф", "Нежить", "Таурен", "Гном", "Тролль"};
+    char b[80];
+    snprintf(b, sizeof b, "%s %u", tr("Level", "Уровень"), (unsigned)o->level());
+    list_.textCentered(mid, y0 + 16, b, kText);
+    snprintf(b, sizeof b, "%s %s", race < 9 ? (ui::g_lang ? kRaceRu[race] : kRaceEn[race]) : "", className(cls));
+    list_.textCentered(mid, y0 + 28, HudList::fit(b, cw), classColor(cls));
+    // honour (MSG_INSPECT_HONOR_STATS)
+    const w3n::GameSession::HonorView& h = g.honor;
+    if (h.known && h.guid == o->guid) {
+        const bool horde = race == 2 || race == 5 || race == 6 || race == 8;
+        static const char* kRuA[14] = {"Рядовой", "Капрал", "Сержант", "Старший сержант", "Старшина", "Рыцарь", "Рыцарь-лейтенант",
+            "Рыцарь-капитан", "Рыцарь-защитник", "Лейтенант-командор", "Командор", "Маршал", "Фельдмаршал", "Главнокомандующий"};
+        static const char* kRuH[14] = {"Разведчик", "Рубака", "Сержант", "Старший сержант", "Старшина", "Каменный страж",
+            "Кровавый страж", "Легионер", "Центурион", "Защитник", "Генерал-лейтенант", "Генерал", "Полководец", "Верховный полководец"};
+        const char* rank = w3n::pvpRankName(h.highestRank, horde);
+        if (rank[0] && ui::g_lang) rank = (horde ? kRuH : kRuA)[h.highestRank - 5];
+        int y = y0 + 46;
+        if (rank[0]) { list_.textCentered(mid, y, HudList::fit(rank, cw), kYellow); y += 12; }
+        snprintf(b, sizeof b, "%s: %u", tr("Honorable kills", "Почётные победы"), (unsigned)h.lifetimeHK);
+        list_.textCentered(mid, y, HudList::fit(b, cw), kGrey);
+        y += 12;
+        if (h.todayKills) { snprintf(b, sizeof b, "%s: %u", tr("Today", "Сегодня"), (unsigned)h.todayKills); list_.textCentered(mid, y, b, kGrey); }
+    }
+    for (int k = 0; k < 3; ++k) cellAt(15 + k, cx0 + (cw - 3 * step) / 2 + k * step + 2, y0 + 3 * step, cs);
+    list_.text(10, kTabY - 22, tr("tap an item for its tooltip", "нажмите на предмет - описание"), kGrey);
     btn(kTouchW - 80, kTabY - 28, 70, 22, tr("Close", "Закрыть"), Act::ClosePanel, 0, Style::Normal, Font::Small);
 }
 

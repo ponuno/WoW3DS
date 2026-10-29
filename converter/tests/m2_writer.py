@@ -18,12 +18,15 @@ class Blob:
         off = len(self.b); self.b += data; return off
 
 def m2(name, verts, tris, submeshes, batches, textures, tex_lookup, render_flags, bones, seqs, global_seqs, coll=None,
-       attachments=None):
+       attachments=None, cameras=None, emitters=None):
     """verts: (pos, weights4, idx4, normal, uv); submeshes: (id, indexStart, indexCount); batches: (submesh, material,
     texCombo); textures: (type, filename); bones: (parent, pivot, tracks{t,r,s}); a track: (globalSeq,
     [(seq or None, [(time, value), ...])])  times are global-timeline ms; seqs: (id, var, start, end, speed).
     coll: optional collision mesh (bounding vertices [(x, y, z)], bounding triangle indices [i, ...]).
-    attachments: optional [(id, bone, (x, y, z))] (vanilla 48-byte records)."""
+    attachments: optional [(id, bone, (x, y, z))] (vanilla 48-byte records).
+    cameras: optional [(type, fov, far, near, (position), (target))] (vanilla 124-byte records, no animation).
+    emitters: optional particle emitters (vanilla 504-byte records), dicts with pos, texture, blend, type, rows, cols,
+    flags, rate, life, speed, gravity, ..., colors [(r, g, b, a) x3], scales [x3], mid."""
     HDR = 0x2C + 8 + 4 * 2 * 9 + 8 + 4 * 2 * 6 + 56 + 4 * 2 * 11
     B = Blob(HDR)
     name_off = B.add(name.encode() + b"\0")
@@ -82,6 +85,31 @@ def m2(name, verts, tris, submeshes, batches, textures, tex_lookup, render_flags
     at_off = 0
     if attachments:
         at_off = B.add(b"".join(struct.pack("<IHH3f", aid, bone, 0, *pos) + bytes(28) for aid, bone, pos in attachments))
+    cam_off = 0
+    if cameras:
+        empty = struct.pack("<HhIIIIII", 0, -1, 0, 0, 0, 0, 0, 0)
+        cam_off = B.add(b"".join(struct.pack("<Ifff", ct, fov, far, near) + empty + struct.pack("<3f", *pos) + empty +
+                                 struct.pack("<3f", *tgt) + empty for ct, fov, far, near, pos, tgt in cameras))
+    em_off = 0
+    if emitters:
+        def ftrack(v):   # a float track with one key in sequence 0
+            r_off = B.add(struct.pack("<II", 0, 1)); t_off = B.add(struct.pack("<I", 0)); k_off = B.add(struct.pack("<f", v))
+            return struct.pack("<HhIIIIII", 1, -1, 1, r_off, 1, t_off, 1, k_off)
+        recs = b""
+        for e in emitters:
+            r = struct.pack("<iI3fHH", -1, e.get("flags", 0), *e["pos"], e.get("bone", 0), e.get("texture", 0))
+            r += bytes(16)                                                 # model / child emitter file names
+            r += struct.pack("<BBBBhhHH", e.get("blend", 4), e.get("type", 1), 0, 0, 0, 0, e.get("rows", 1), e.get("cols", 1))
+            for k in ("speed", "speedVar", "vRange", "hRange", "gravity", "life", "rate", "areaL", "areaW", "decel"):
+                r += ftrack(e.get(k, 0.0))
+            r += struct.pack("<f", e.get("mid", 0.5))
+            for c in e.get("colors", [(255, 255, 255, 255)] * 3):
+                r += struct.pack("<I", c[2] | c[1] << 8 | c[0] << 16 | c[3] << 24)   # BGRA
+            r += struct.pack("<3f", *e.get("scales", (1.0, 1.0, 1.0)))
+            r += bytes(504 - len(r))
+            assert len(r) == 504
+            recs += r
+        em_off = B.add(recs)
     view_off = B.add(struct.pack("<11I", len(lookup), li_off, len(tris), tri_off, 0, 0, len(submeshes), sm_off,
                                  len(batches), ba_off, 0))
     h = struct.pack("<4sIIIIIIIIII", b"MD20", 256, len(name) + 1, name_off, 0, len(global_seqs), gs_off,
@@ -94,7 +122,8 @@ def m2(name, verts, tris, submeshes, batches, textures, tex_lookup, render_flags
     h += struct.pack("<14f", -1, -1, 0, 1, 1, 2, 2, -1, -1, 0, 1, 1, 2, 2)
     # nBoundingTriangles (index count), ofs, nBoundingVertices, ofs, nBoundingNormals, ofs, then 16 more zeros
     h += struct.pack("<22I", len(coll[1]) if coll else 0, ct_off, len(coll[0]) if coll else 0, cv_off, 0, 0,
-                     len(attachments) if attachments else 0, at_off, *([0] * 14))
+                     len(attachments) if attachments else 0, at_off, 0, 0, 0, 0, 0, 0,
+                     len(cameras) if cameras else 0, cam_off, 0, 0, 0, 0, len(emitters) if emitters else 0, em_off)
     assert len(h) == HDR, (len(h), HDR)
     B.b[0:HDR] = h
     return bytes(B.b)

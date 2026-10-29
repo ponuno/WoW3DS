@@ -7,6 +7,10 @@
 //                "P from to cost" per TaxiPath.dbc row (ID, from, to, cost)
 #include "conv.h"
 
+#include <algorithm>
+#include <cctype>
+#include <set>
+
 namespace w3d {
 
 namespace {
@@ -57,6 +61,31 @@ bool exportTalents(const DataDir& data, const std::string& path, bool verbose) {
     return true;
 }
 
+// skills.txt: "S id category name description" per SkillLine.dbc row (1.12: ID 0, CategoryID 1, SkillCostsID 2, DisplayName[8] 3-10,
+// flags 11, Description[8] 12-19, flags 20, SpellIcon 21). Categories: 5 attributes, 6 weapon, 7 class, 8 armor, 9 secondary
+// professions, 10 languages, 11 professions, 12 not shown (-1: also not shown).
+bool exportSkills(const DataDir& data, const std::string& path, bool verbose) {
+    DbcTable t;
+    if (!t.load(data, "SkillLine.dbc") || t.fields < 13) {
+        std::fprintf(stderr, "skills: SkillLine.dbc not found (no skills.txt)\n");
+        return false;
+    }
+    std::string out = "# wow3ds skills: S id category name description\n";
+    size_t n = 0;
+    for (uint32_t r = 0; r < t.records; ++r) {
+        if (!t.u32(r, 0)) continue;
+        std::string name = firstLocale(t, r, 3, 11);
+        if (name.empty()) continue;
+        out += "S\t" + std::to_string(t.u32(r, 0)) + "\t" + std::to_string((int32_t)t.u32(r, 1)) + "\t" + name + "\t" +
+               firstLocale(t, r, 12, 20) + "\n";
+        ++n;
+    }
+    if (!writeText(path, out)) return false;
+    std::printf("  skills: %zu skill lines written to %s\n", n, path.c_str());
+    (void)verbose;
+    return true;
+}
+
 bool exportTaxi(const DataDir& data, const std::string& path, bool verbose) {
     DbcTable nodes, paths;
     if (!nodes.load(data, "TaxiNodes.dbc") || nodes.fields < 6) {
@@ -91,24 +120,52 @@ bool exportTaxi(const DataDir& data, const std::string& path, bool verbose) {
 // for every transport model with a walkable deck (convertTransports). A run without models keeps the M lines of the
 // existing file.
 bool exportTransports(const DataDir& data, const std::string& path, bool verbose) {
-    DbcTable nodes;
-    if (!nodes.load(data, "TaxiPathNode.dbc") || nodes.fields < 9) {
+    DbcTable nodes, animProbe;
+    const bool haveNodes = nodes.load(data, "TaxiPathNode.dbc") && nodes.fields >= 9;
+    if (!haveNodes && !animProbe.load(data, "TransportAnimation.dbc")) {
         std::fprintf(stderr, "transports: TaxiPathNode.dbc not found (no transports.txt)\n");
         return false;
     }
-    std::string out = "# wow3ds transports: T path node map x y z flags delay | M display deckZ x0 y0 x1 y1\n";
+    if (!haveNodes) std::fprintf(stderr, "transports: TaxiPathNode.dbc not found (no ships; elevators only)\n");
+    std::string out = "# wow3ds transports: T path node map x y z flags delay | A entry timeMs x y z | M display deckZ x0 y0 x1 y1 | S display deckZ x0 y0 x1 y1\n";
     size_t nt = 0, nm = 0;
     char b[160];
-    for (uint32_t r = 0; r < nodes.records; ++r) {
+    for (uint32_t r = 0; haveNodes && r < nodes.records; ++r) {
         if (!nodes.u32(r, 1)) continue;
         std::snprintf(b, sizeof b, "T\t%u\t%u\t%u\t%.2f\t%.2f\t%.2f\t%u\t%u\n", nodes.u32(r, 1), nodes.u32(r, 2), nodes.u32(r, 3),
                       nodes.f32(r, 4), nodes.f32(r, 5), nodes.f32(r, 6), nodes.u32(r, 7), nodes.u32(r, 8));
         out += b;
         ++nt;
     }
-    if (!transportDecks().empty()) {
+    // Elevators and trams (GO type 11, stage 5.41): TransportAnimation.dbc (1.12: ID 0, TransportEntry 1, TimeSeg 2 ms, X/Y/Z 3-5,
+    // MovementId 6) -> "A entry timeSeg x y z"; the server moves them along these key points (vMaNGOS ElevatorTransport).
+    size_t na = 0, nae = 0;
+    {
+        DbcTable anim;
+        if (anim.load(data, "TransportAnimation.dbc") && anim.fields >= 6) {
+            std::set<uint32_t> entries;
+            for (uint32_t r = 0; r < anim.records; ++r) {
+                if (!anim.u32(r, 1)) continue;
+                std::snprintf(b, sizeof b, "A\t%u\t%u\t%.4f\t%.4f\t%.4f\n", anim.u32(r, 1), anim.u32(r, 2), anim.f32(r, 3), anim.f32(r, 4),
+                              anim.f32(r, 5));
+                out += b;
+                entries.insert(anim.u32(r, 1));
+                ++na;
+            }
+            nae = entries.size();
+        } else if (verbose) {
+            std::printf("  transports: no TransportAnimation.dbc (elevators and trams stay where the server put them)\n");
+        }
+    }
+    if (!transportDecks().empty() || !staticDecks().empty()) {
         for (auto& kv : transportDecks()) {
             std::snprintf(b, sizeof b, "M\t%u\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\n", kv.first, kv.second.z, kv.second.x0, kv.second.y0,
+                          kv.second.x1, kv.second.y1);
+            out += b;
+            ++nm;
+        }
+        for (auto& kv : staticDecks()) {   // 6.14: platforms among the ordinary objects
+            std::snprintf(b, sizeof b, "S\t%u\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\n", kv.first, kv.second.z, kv.second.x0, kv.second.y0,
                           kv.second.x1, kv.second.y1);
             out += b;
             ++nm;
@@ -123,12 +180,12 @@ bool exportTransports(const DataDir& data, const std::string& path, bool verbose
         while (at < old.size()) {
             size_t e = old.find('\n', at);
             if (e == std::string::npos) e = old.size();
-            if (old.compare(at, 2, "M\t") == 0) { out += old.substr(at, e - at) + "\n"; ++nm; }
+            if (old.compare(at, 2, "M\t") == 0 || old.compare(at, 2, "S\t") == 0) { out += old.substr(at, e - at) + "\n"; ++nm; }
             at = e + 1;
         }
     }
     if (!writeText(path, out)) return false;
-    std::printf("  transports: %zu path nodes, %zu decks written to %s\n", nt, nm, path.c_str());
+    std::printf("  transports: %zu path nodes, %zu decks, %zu elevator key points (%zu objects) written to %s\n", nt, nm, na, nae, path.c_str());
     (void)verbose;
     return true;
 }
@@ -169,7 +226,135 @@ bool exportLocks(const DataDir& data, const std::string& path, bool verbose) {
     return true;
 }
 
-// emotes.txt: "E emote anim" per Emotes.dbc row (1.12: ID, EmoteSlashCommand, AnimID, Flags, ...): SMSG_EMOTE and
+// areatriggers.txt: "A id map x y z radius length width height yaw" per AreaTrigger.dbc row (1.12: ID, ContinentID, X, Y, Z,
+// Radius, Box_length, Box_width, Box_height, Box_yaw). The server holds where each one leads (areatrigger_teleport); the
+// 3DS only has to say that we walked into it.
+bool exportAreaTriggers(const DataDir& data, const std::string& path, bool verbose) {
+    DbcTable at;
+    if (!at.load(data, "AreaTrigger.dbc") || at.fields < 10) {
+        std::fprintf(stderr, "areatriggers: AreaTrigger.dbc not found (no areatriggers.txt: dungeon doors will not work)\n");
+        return false;
+    }
+    std::string out = "# wow3ds area triggers: A id map x y z radius length width height yaw\n";
+    size_t n = 0;
+    char b[200];
+    for (uint32_t r = 0; r < at.records; ++r) {
+        if (!at.u32(r, 0)) continue;
+        std::snprintf(b, sizeof b, "A\t%u\t%u\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.5f\n", at.u32(r, 0), at.u32(r, 1), at.f32(r, 2),
+                      at.f32(r, 3), at.f32(r, 4), at.f32(r, 5), at.f32(r, 6), at.f32(r, 7), at.f32(r, 8), at.f32(r, 9));
+        out += b;
+        ++n;
+    }
+    if (!writeText(path, out)) return false;
+    std::printf("  areatriggers: %zu triggers written to %s\n", n, path.c_str());
+    (void)verbose;
+    return true;
+}
+
+// glue.txt (stage 5.29): what the login and character screens need besides pictures.
+//   T KEY<TAB>text      every string of Interface\GlueXML\GlueStrings.lua (race / class descriptions RACE_INFO_*,
+//                       CLASS_INFO_*, ...); "\n" stays as the two characters
+//   O race class sex disp inv ... (12 pairs)   CharStartOutfit.dbc: the clothes a new character is shown in
+//   Z area name parent  AreaTable.dbc: the area names (the character list, the zone banner); parent = the zone of a subzone
+bool exportGlueTexts(const DataDir& data, const std::string& path, bool verbose) {
+    std::string out = "# wow3ds glue screens: T key text | O race class sex (display invtype) x N | Z area name\n";
+    size_t nt = 0, no = 0, nz = 0;
+    // ---- GlueStrings.lua: NAME = "text";  (Lua escapes \" \\ \n)
+    std::vector<uint8_t> lua;
+    if (data.read("Interface\\GlueXML\\GlueStrings.lua", lua)) {
+        std::string src(lua.begin(), lua.end());
+        size_t i = 0;
+        while (i < src.size()) {
+            size_t e = src.find('\n', i);
+            if (e == std::string::npos) e = src.size();
+            std::string line = src.substr(i, e - i);
+            i = e + 1;
+            size_t k = 0;
+            while (k < line.size() && (line[k] == ' ' || line[k] == '\t')) ++k;
+            size_t k0 = k;
+            while (k < line.size() && (std::isalnum((unsigned char)line[k]) || line[k] == '_')) ++k;
+            if (k == k0) continue;
+            std::string key = line.substr(k0, k - k0);
+            while (k < line.size() && line[k] == ' ') ++k;
+            if (k >= line.size() || line[k] != '=') continue;
+            ++k;
+            while (k < line.size() && line[k] == ' ') ++k;
+            if (k >= line.size() || line[k] != '"') continue;
+            std::string val;
+            bool closed = false;
+            for (++k; k < line.size(); ++k) {
+                char c = line[k];
+                if (c == '\\' && k + 1 < line.size()) {
+                    char n = line[++k];
+                    if (n == 'n') val += "\\n";
+                    else if (n == 't') val += ' ';
+                    else val += n;
+                } else if (c == '"') { closed = true; break; }
+                else if (c != '\r' && c != '\t') val += c;
+            }
+            if (!closed || val.empty()) continue;
+            out += "T\t" + key + "\t" + val + "\n";
+            ++nt;
+        }
+    } else if (verbose) {
+        std::fprintf(stderr, "glue: Interface\\GlueXML\\GlueStrings.lua not found (the 3DS uses its own texts)\n");
+    }
+    // ---- CharStartOutfit.dbc: ID, race/class/sex/outfit bytes, ItemID[N], DisplayItemID[N], InventoryType[N]
+    DbcTable so;
+    if (so.load(data, "CharStartOutfit.dbc") && so.fields >= 8 && (so.fields - 2) % 3 == 0) {
+        const uint32_t n = (so.fields - 2) / 3;
+        for (uint32_t r = 0; r < so.records; ++r) {
+            const uint32_t rcs = so.u32(r, 1);
+            const uint32_t race = rcs & 0xFF, cls = (rcs >> 8) & 0xFF, sex = (rcs >> 16) & 0xFF;
+            if (!race || !cls || sex > 1) continue;
+            std::string l = "O\t" + std::to_string(race) + "\t" + std::to_string(cls) + "\t" + std::to_string(sex);
+            int any = 0;
+            for (uint32_t k = 0; k < n; ++k) {
+                const uint32_t disp = so.u32(r, 2 + n + k), inv = so.u32(r, 2 + 2 * n + k);
+                if (disp == 0 || disp == 0xFFFFFFFFu || inv == 0 || inv > 28) continue;
+                l += "\t" + std::to_string(disp) + "\t" + std::to_string(inv);
+                ++any;
+            }
+            if (!any) continue;
+            out += l + "\n";
+            ++no;
+        }
+    } else if (verbose) {
+        std::fprintf(stderr, "glue: CharStartOutfit.dbc not found (new characters are shown without clothes)\n");
+    }
+    // ---- AreaTable.dbc: ID, map, parent, ... name (the column with the most names, 8..16)
+    DbcTable at;
+    if (at.load(data, "AreaTable.dbc") && at.fields > 12) {
+        uint32_t best = 0, bestCount = 0;
+        // a name column: offsets at the start of a string (the byte before is 0), many different names (a small
+        // number column such as the exploration level would point into the table at the same few strings)
+        const size_t base = 20 + (size_t)at.records * at.recSize;
+        for (uint32_t c = 8; c < std::min<uint32_t>(at.fields, 17); ++c) {
+            std::set<std::string> names;
+            bool starts = true;
+            for (uint32_t r = 0; r < at.records && r < 400 && starts; ++r) {
+                const uint32_t off = at.u32(r, c);
+                if (off == 0) continue;
+                if (off >= at.strSize || at.b[base + off - 1] != 0) starts = false;
+                std::string v = at.str(r, c);
+                if (v.size() >= 3 && std::isupper((unsigned char)v[0])) names.insert(v);
+            }
+            if (starts && names.size() > bestCount) { bestCount = (uint32_t)names.size(); best = c; }
+        }
+        if (best)
+            for (uint32_t r = 0; r < at.records; ++r) {
+                std::string v = clean(at.str(r, best));
+                if (v.empty()) continue;
+                out += "Z\t" + std::to_string(at.u32(r, 0)) + "\t" + v + "\t" + std::to_string(at.u32(r, 2)) + "\n";   // + the parent zone (0 = a zone)
+                ++nz;
+            }
+    }
+    if (!writeText(path, out)) return false;
+    std::printf("  glue: %zu strings, %zu start outfits, %zu zone names written to %s\n", nt, no, nz, path.c_str());
+    return true;
+}
+
+// emotes.txt: "E emote anim\" per Emotes.dbc row (1.12: ID, EmoteSlashCommand, AnimID, Flags, ...): SMSG_EMOTE and
 // UNIT_NPC_EMOTESTATE carry the emote, the 3DS plays its animation.
 bool exportEmotes(const DataDir& data, const std::string& path, bool verbose) {
     DbcTable em;

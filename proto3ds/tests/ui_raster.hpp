@@ -22,3 +22,5 @@ struct Canvas {
 
 // Decodes level 0 of a TEX blob (any W3D_TEX_* format) to RGBA8, row 0 = top.
 bool decodeTexBlob(const std::vector<uint8_t>& blob, int* w, int* h, std::vector<uint8_t>& rgba);
+// UI stage 8: a stand-in for a texture made at run time on the console (ui::kTexExternal0 + n: the portraits), RGBA rows.
+void rasterSetExternal(uint16_t id, int w, int h, const std::vector<uint8_t>& rgba);

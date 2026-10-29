@@ -55,6 +55,8 @@ public:
     // Music and ambience of an area (its parent's when it has none of its own).
     ZoneSound zone(uint32_t area) const;
     std::string path(const std::string& file) const { return dir_ + "/music/" + file; }
+    // The login / character screens' music ("G" in music.txt, stage 5.31); null when the converter found none.
+    const SoundSet* glue() const { return glue_.files.empty() ? nullptr : &glue_; }
 private:
     struct Area { uint32_t parent = 0, music = 0, ambience = 0; };
     struct Zm { uint32_t silMin = 0, silMax = 0, day = 0, night = 0; };
@@ -66,6 +68,7 @@ private:
     std::unordered_map<uint32_t, SoundSet> sounds_;
     std::unordered_map<uint32_t, uint32_t> mapArea_;
     std::unordered_map<uint32_t, Grid> grids_;
+    SoundSet glue_;
 };
 
 // What should play: zone music with pauses between tracks, ambience looping.
@@ -90,6 +93,8 @@ private:
     float musicVol_ = 1, ambVol_ = 1;
     uint32_t silenceUntil_ = 0;
     bool pendingTrack_ = false;
+    uint32_t cand_ = ~0u, candMs_ = 0;   // a new area must hold for 1 s before the music follows it
+    std::string lastTrack_;               // not repeated at once when the set has another file
 };
 
 // world.w3ds: positioned sounds by SoundEntries id, IMA ADPCM, decoded on demand (only the index stays in memory).
@@ -112,6 +117,7 @@ private:
 // sounds.txt: which SoundEntries id a creature / weapon / spell / footstep makes.
 struct CreatureSounds { uint32_t aggro = 0, death = 0, wound = 0, woundCrit = 0, attack = 0, attackCrit = 0, footstep = 0; };
 struct SpellSounds { uint32_t precast = 0, cast = 0, impact = 0, missile = 0, channel = 0; };
+struct NpcVoice { uint32_t greeting = 0, farewell = 0, pissed = 0; };   // UI stage 8 (NPCSounds.dbc / the race's voices)
 class SoundTables {
 public:
     bool load(const char* path);
@@ -120,8 +126,19 @@ public:
     std::pair<uint32_t, uint32_t> weapon(uint32_t subclass) const;   // impact, crit (0 when unknown)
     uint32_t footstep(uint32_t footstepId) const;                    // footstep id 0: the generic one
     const SpellSounds* spell(uint32_t spellId) const;
+    uint32_t liquid(const char* kind) const;                         // stage 5.26: "splash", "swim", "wade", "fishbite" (0: none)
+    // UI stage 8: voices. An NPC's greeting / farewell / pissed lines by its display (nullptr: it has no voice); our
+    // character's error line by race, gender (0 male, 1 female) and token ("nomana" ...); a text emote's voice. 0: none.
+    const NpcVoice* npcVoice(uint32_t displayId) const;
+    uint32_t errorVoice(uint32_t race, uint32_t gender, const char* token) const;
+    uint32_t emoteVoice(uint32_t textEmote, uint32_t race, uint32_t gender) const;
+    size_t voiceCount() const { return npcVoice_.size() + errorVoice_.size() + emoteVoice_.size(); }
 private:
     bool loaded_ = false;
+    std::unordered_map<uint32_t, NpcVoice> npcVoice_;
+    std::unordered_map<std::string, uint32_t> errorVoice_;    // "race gender token"
+    std::unordered_map<uint64_t, uint32_t> emoteVoice_;       // textEmote << 16 | race << 8 | gender
+    std::unordered_map<std::string, uint32_t> liquid_;
     std::unordered_map<uint32_t, uint32_t> display_, footstep_, spellVisual_;
     std::unordered_map<uint32_t, CreatureSounds> csd_;
     std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> weapon_;
@@ -145,6 +162,10 @@ public:
     // Up to 'frames' frames into out (frames * channels() samples); 0 at the end of the file.
     int read(int16_t* out, int frames);
     bool rewind();
+    // How far the stream got (frames returned since open) and why read() last returned 0: 0 not yet, 1 end of file,
+    // 2 the decoder gave up (stage 5.43: used by the music log).
+    uint64_t framesRead() const { return framesRead_; }
+    int endReason() const { return endReason_; }
 private:
     bool fillMp3();
     FILE* f_ = nullptr;
@@ -159,6 +180,8 @@ private:
     std::vector<int16_t> pcm_;        // decoded, not yet returned (interleaved)
     size_t pcmPos_ = 0;
     std::string path_;
+    uint64_t framesRead_ = 0;
+    int endReason_ = 0;
 };
 
 }  // namespace snd

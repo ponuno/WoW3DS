@@ -33,6 +33,12 @@ int main() {
     auto ds = buildSteps(dg);
     CHECK(ds.size() == 1 && ds[0].args[2] == "--dungeons" && ds[0].args[ds[0].args.size() - 3] == "-o" && ds[0].args[ds[0].args.size() - 2] == "O");
     CHECK(parse(serialize(dg)).dungeons);
+    Settings ev; ev.data = "D"; ev.out = "O"; ev.everything = true; ev.sound = false; ev.items = false; ev.packWorld = false; ev.ui = false;
+    CHECK(validate(ev).empty());
+    auto es = buildSteps(ev);
+    auto hasE = [&](const char* a) { for (auto& x : es[0].args) if (x == a) return true; return false; };
+    CHECK(es.size() == 1 && es[0].args[2] == "--all" && hasE("--no-sound-step") && hasE("--no-ui") && hasE("--no-items") && !hasE("--map"));
+    CHECK(es[0].args[es[0].args.size() - 2] == "O" && parse(serialize(ev)).everything && !parse(serialize(dg)).everything);
     printf("GUI CORE: %s\n", fails ? "FAIL" : "PASS");
     return fails != 0;
 }

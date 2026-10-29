@@ -17,9 +17,14 @@ server).
   (collision from WMO and M2 data); continents and instance maps as separate packs (`map<ID>.w3dp`); dungeons are
   WDT-only maps converted from their global WMO; in-game **loading screens** and a loading gate that keeps the character
   frozen until the ground and its collision are ready.
+- **Water:** lakes, rivers, the sea, lava and slime of the terrain and of buildings (Stormwind's canals, dungeon pools)
+  with the game's own animated textures and Light.dbc colours; swimming (diving with the camera, swimming up, jumping
+  out), falling into water, water walking, the underwater view, breath / fatigue bars, drowning and lava damage, fishing.
+- **World objects:** elevators and trams (TransportAnimation.dbc, vMaNGOS formula), doors and gates (open / close animation, closed doors block), tilted objects (GAMEOBJECT_ROTATION), player corpses, rings for ground spells, a compact default set of ordinary game objects (stage 5.41; unverified on hardware).
 - **Characters and creatures:** skinned, animated creature and player models (race, skin, face, hair, armour layers,
   helmets, weapons), ships and zeppelins, ordinary game objects (event decorations, chests, ...).
-- **Gameplay client:** login, realm and character screens, chat, targeting, auto-attack, spells and action bar, loot,
+- **Gameplay client:** the original client's login, realm, character selection and creation screens (their 3D scenes, the
+  character turned with L / R, race and class descriptions on the touch screen), chat, targeting, auto-attack, spells and action bar, loot,
   vendors, trainers, quests, items and tooltips, auras, parties, reputation, talents, flight masters, mail/auction/trade
   windows (see `PLAN.md` for the exact list).
 - **Controls:** a controller scheme built for the 3DS ("Forever" layout, or "Classic"), touch-screen UI on the bottom
@@ -89,8 +94,11 @@ it starts `w3dconv.exe` once per step and shows its output. Use paths without no
 5. **Sound and music:** makes the `sound` folder.
 6. **Dungeons and raids:** one `map<ID>.w3dp` per instance map, with the same Creatures/Players/Armor options (every pack
    carries its own model copies, so this is slow and big; leave it off until the open world works).
-7. **Extra:** any more `w3dconv` options for the world pack, typed as on the command line.
-8. Press **Start**. The steps run one after another (interface, sound, world, dungeons); the progress bar and log show
+7. **EVERYTHING:** one run of `w3dconv --all` instead of the steps above: interface, sound, every map and dungeon of
+   Map.dbc with creatures, players and ships, all sharing **one asset pool** (see below). The world and dungeon choices
+   are greyed out; *Textures*, *Armor, weapons*, *All game objects*, *Interface*, *Sound* and *Extra* still apply.
+8. **Extra:** any more `w3dconv` options for the world pack, typed as on the command line.
+9. Press **Start**. The steps run one after another (interface, sound, world, dungeons); the progress bar and log show
    the current step, **Cancel** stops it. When it says "Done", press **Open the output folder** and copy everything
    to the SD card.
 
@@ -112,16 +120,34 @@ w3dconv --data <WoW>/Data --sound -o out/sound
 w3dconv --data <WoW>/Data --map Azeroth --tiles 30 46 34 50 --creatures --players --transports -o out/test.w3dp
 # every instance map -> out/map<ID>.w3dp
 w3dconv --data <WoW>/Data --dungeons --creatures --players -o out/
+# EVERYTHING in one run with a shared asset pool (all of the above, every map)
+w3dconv --data <WoW>/Data --all -o out/
 ```
 
 Run `w3dconv` without arguments for all options. Texture quality (`--tex-quality`), triangle budgets, texture sizes and
-collision options are adjustable. Each map pack carries its own creature and player models, so full runs are large and
-slow.
+collision options are adjustable. Packs made one by one each carry their own copy of every model and texture they use.
 
-Copy the output to the SD card as `sdmc:/3ds/w3dproto/` (`test.w3dp`, `map<ID>.w3dp`, `ui.w3dp`, the `sound/` folder and
-the text files the converter writes next to the packs), then start `w3dproto.3dsx` through the Homebrew Launcher.
+**Shared pool (`--all`).** `map<ID>.w3dp` then holds only the tiles of a map (terrain, water, floors and walls,
+placements); every texture, model, building, creature, player and item model is stored once in `common.w3dp` (split
+into `common1.w3dp`, `common2.w3dp`, ... below 3.9 GB for FAT32; `--pool-part-mb`). The 3DS keeps every part open and
+reads an asset straight from its file, so streaming costs the same as with a standalone pack. All files of one run
+carry the same build id: a map pack is refused with a clear message next to a pool of another run. `map0.w3dp` is the
+Eastern Kingdoms (preferred over `test.w3dp`), `map1.w3dp` Kalimdor. Developer test maps are skipped; `--maps 0,1,36`
+picks maps, `--no-ui` / `--no-sound-step` skip those steps. `w3dconv --info` and `w3dpreview` resolve the pool.
+
+Copy the output to the SD card as `sdmc:/3ds/w3dproto/` (`test.w3dp` or `map0.w3dp`, `map<ID>.w3dp`, `common*.w3dp`,
+`ui.w3dp`, the `sound/` folder and the text files the converter writes next to the packs, among them `areatriggers.txt` (without it dungeon doors and the Deeprun Tram do nothing) and `glue.txt` (texts, clothes of new characters and zone names of the character screens)), then start `w3dproto.3dsx`
+through the Homebrew Launcher.
 
 ## Tests (no console and no game data needed)
+
+Shared pool and `--all`: `converter/tests/run_pool_tests.sh <build dir>`.
+Login / character screens: `proto3ds/tests/run_glue.sh [ui.w3dp] [glue.txt]` (screenshots and input checks).
+Streaming order (a synthetic city read at SD-card speed): `proto3ds/tests/run_streaming.sh <build dir>`.
+Particles and lamp glows: `proto3ds/tests/run_fx.sh [wmo.w3dp]` (after run_wmo_tests.sh).
+Spell effects: `proto3ds/tests/run_spellfx.sh <build dir>`.
+Liquids: `converter/tests/run_water_tests.sh <build dir>`, `proto3ds/tests/run_swim.sh`, and `water_test` inside
+`net/tests/run_stage5.sh`.
 
 ```
 converter/tests/run_wmo_tests.sh <build dir>        buildings, collision, previews

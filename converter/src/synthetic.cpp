@@ -261,6 +261,38 @@ bool buildSynthetic(const Options& o, PackWriter& pack, ConvStats& st) {
         ++i;
     }
 
+    // --synthetic-variety: N models of this tile only, each with its own texture, placed twice (what a city tile asks of
+    // the streamer: hundreds of distinct reads)
+    for (int k = 0; k < o.syntheticVariety; ++k) {
+        char mname[64], tname[64];
+        std::snprintf(mname, sizeof mname, "synthetic/v%u_%d.m2", (unsigned)w3d_tile_id(o.tileX, o.tileY), k);
+        std::snprintf(tname, sizeof tname, "synthetic/v%u_%d.blp", (unsigned)w3d_tile_id(o.tileX, o.tileY), k);
+        std::vector<uint32_t> slot;
+        addTexture(pack, tname, noiseTexture(128, 60 + (k * 37) % 180, 60 + (k * 71) % 180, 60 + (k * 13) % 180, 0.5f, 10 + k),
+                   o.modelTex, o.texFormat, false, slot);
+        ModelSource m = makeRock(0);
+        for (auto& v : m.verts) for (float& c : v.p) c *= 1.0f + (k % 5);
+        m.texIds = slot;
+        size_t tris = 0;
+        pack.add(W3D_ENTRY_MODEL, w3d_fnv1a(DataDir::normalize(mname).c_str()), buildModelBlob(m, o.maxModelTris, &tris));
+        ++st.modelsOk;
+        st.texturesOk++;
+        const uint32_t nameId = (uint32_t)adt.doodadNames.size();
+        adt.doodadNames.push_back(mname);
+        for (int c = 0; c < 2; ++c) {
+            float lx = U(rng) * TS, ly = U(rng) * TS, h = H(lx, ly);
+            wowee::pipeline::ADTTerrain::DoodadPlacement pl{};
+            pl.nameId = nameId;
+            pl.uniqueId = (uint32_t)w3d_tile_id(o.tileX, o.tileY) * 4096u + 2048u + (uint32_t)(k * 2 + c);   // unique on the map
+            float rx = minX + lx, ry = minY + ly;
+            pl.position[0] = ZP - ry;
+            pl.position[1] = h;
+            pl.position[2] = ZP - rx;
+            pl.scale = 1024;
+            adt.doodadPlacements.push_back(pl);
+        }
+    }
+
     std::vector<uint16_t> mtexToSlot = {1, 2};
     return emitTile(o, adt, texIds, mtexToSlot,
                     [](const std::string& n) { return w3d_fnv1a(DataDir::normalize(n).c_str()); }, pack, st);

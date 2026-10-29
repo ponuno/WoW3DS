@@ -15,6 +15,8 @@
 #include <functional>
 #include <map>
 #include <set>
+#include <array>
+#include <tuple>
 
 #define MINIMP3_IMPLEMENTATION
 #define MINIMP3_ONLY_MP3
@@ -45,6 +47,9 @@ const std::vector<std::pair<std::string, std::vector<std::string>>> kDefaultEven
     {"questabandon", {"igQuestLogAbandonQuest"}},
     {"coin", {"LOOTWINDOWCOINSOUND"}},
     {"levelup", {"LevelUp", "LEVELUPSOUND"}},
+    // an area explored for the first time (stage 5.45): the exact names are a guess; "*word" takes the first SoundEntries name
+    // containing the word (alphabetical), so an odd spelling in this client is still found (the log says which one it took)
+    {"discover", {"DiscoverArea", "AreaDiscovered", "ZoneDiscovered", "UI_DiscoverArea", "Discovery", "*discover", "*explor"}},
     {"whisper", {"TellMessage"}},
     {"invite", {"igPlayerInvite"}},
     {"auctionopen", {"AuctionWindowOpen"}},
@@ -317,12 +322,17 @@ struct WorldCtx {
     const std::unordered_map<uint32_t, uint32_t>& byId;
     std::set<uint32_t> used;
     std::string txt;
+    // UI stage 8: voices that SoundEntries does not list (found by their file names in the archives) get ids of their own
+    // from kSyntheticSound up; their files are here. Voices keep more variants than the other world sounds.
+    std::map<uint32_t, std::vector<std::string>> extra;
+    std::map<uint32_t, int> variants;
     std::string nameOf(uint32_t id) const {
         auto it = byId.find(id);
         return it == byId.end() ? std::string() : lower(se.str(it->second, 2));
     }
-    bool valid(uint32_t id) const { return id && byId.count(id); }
+    bool valid(uint32_t id) const { return id && (byId.count(id) || extra.count(id)); }
 };
+constexpr uint32_t kSyntheticSound = 0x7F000000u;
 
 bool has(const std::string& s, const char* k) { return s.find(k) != std::string::npos; }
 
@@ -504,6 +514,219 @@ void exportWorldTables(const DataDir& data, WorldCtx& w, bool verbose) {
     }
 }
 
+// ---- voices (UI stage 8): what NPCs say when selected / talked to / left (NPCSounds.dbc: greeting, farewell, pissed - via
+// CreatureDisplayInfo; humanoids without a set of their own use the "<Race><Gender>StandardNPC" voices of their race), what
+// our character says when something cannot be done (the "<Race><Gender>_err_<token>NN.wav" files, VocalUISounds) and the
+// voices of the text emotes (EmotesTextSound.dbc). sounds.txt lines:
+//   "N display greeting farewell pissed"   "V race gender token sound"   "T textEmote race gender sound"
+struct VoiceRace { uint32_t id; const char* tok[2]; const char* folder; const char* errDir; const char* errFile; const char* npc[2]; };
+const VoiceRace kVoiceRaces[] = {
+    {1, {"human", nullptr}, "Human", "", "Human", {"Human", nullptr}},
+    {2, {"orc", nullptr}, "Orc", "Orc", "Orc", {"Orc", nullptr}},
+    {3, {"dwarf", nullptr}, "Dwarf", "Dwarf", "Dwarf", {"Dwarf", nullptr}},
+    {4, {"nightelf", nullptr}, "NightElf", "NightElf", "NightElf", {"NightElf", nullptr}},
+    {5, {"undead", "scourge"}, "Scourge", "Scourge", "Undead", {"Undead", "Scourge"}},
+    {6, {"tauren", nullptr}, "Tauren", "Tauren", "Tauren", {"Tauren", nullptr}},
+    {7, {"gnome", nullptr}, "Gnome", "Gnome", "Gnome", {"Gnome", nullptr}},
+    {8, {"troll", nullptr}, "Troll", "Troll", "Troll", {"Troll", nullptr}},
+    {9, {"goblin", nullptr}, "Goblin", nullptr, "Goblin", {"Goblin", nullptr}},
+};
+const char* const kErrTokens[] = {
+    "nomana", "norage", "noenergy", "outofrange", "genericnotarget", "invalidattacktarget", "spellcooldown",
+    "abilitycooldown", "itemcooldown", "noammo", "chestinuse", "inventoryfull", "bagfull", "itemmaxcount", "notabag",
+    "cantuseitem", "itemlocked", "notequippable", "cantequiplevel", "cantequipskill", "cantequipever",
+    "cantdropsoulbounditem", "notenoughmoney", "cantlearnspell", "loottoofar", "lootdidntkill", "cantloot",
+};
+
+std::string baseName(const std::string& path) {
+    size_t k = path.find_last_of("\\/");
+    return lower(k == std::string::npos ? path : path.substr(k + 1));
+}
+
+// "humanfemale..." -> race 1, gender 1, the rest; false when the name does not start with a race and a gender.
+bool raceGenderPrefix(const std::string& n, uint32_t* race, uint32_t* gender, std::string* rest) {
+    for (const VoiceRace& r : kVoiceRaces)
+        for (const char* t : r.tok) {
+            if (!t || n.compare(0, strlen(t), t) != 0) continue;
+            std::string m = n.substr(strlen(t));
+            for (int g = 1; g >= 0; --g) {   // "female" first: "male" is its suffix
+                const char* gw = g ? "female" : "male";
+                if (m.compare(0, strlen(gw), gw) == 0) { *race = r.id; *gender = (uint32_t)g; *rest = m.substr(strlen(gw)); return true; }
+            }
+        }
+    return false;
+}
+
+// Files that exist among base + "01" .. base + "<maxN>" + ".wav" (variant numbers may be sparse).
+std::vector<std::string> probeFiles(const DataDir& data, const std::string& base, int maxN) {
+    std::vector<std::string> out;
+    std::vector<uint8_t> tmp;
+    for (int n = 1; n <= maxN; ++n) {
+        char num[8];
+        std::snprintf(num, sizeof num, "%02d", n);
+        if (data.read(base + num + ".wav", tmp)) out.push_back(base + num + ".wav");
+    }
+    return out;
+}
+
+void exportVoices(const DataDir& data, WorldCtx& w, bool verbose) {
+    uint32_t nextId = kSyntheticSound;
+    auto synthetic = [&](std::vector<std::string> files, int variants) {
+        const uint32_t id = nextId++;
+        w.extra[id] = std::move(files);
+        w.variants[id] = variants;
+        return id;
+    };
+    // what every SoundEntries row's first file is called
+    std::vector<std::pair<uint32_t, std::string>> firstFile;   // sound id, lower-case base name
+    for (const auto& [id, r] : w.byId) {
+        SoundRow sr = soundRow(w.se, r);
+        if (!sr.files.empty()) firstFile.push_back({id, baseName(sr.files[0])});
+    }
+    std::sort(firstFile.begin(), firstFile.end());   // the same picks on every run
+
+    // ---- our character's error speech
+    std::map<std::tuple<uint32_t, uint32_t, std::string>, uint32_t> err;
+    for (const auto& [id, n] : firstFile) {
+        const size_t k = n.find("_err_");
+        if (k == std::string::npos) continue;
+        uint32_t race, gender;
+        std::string rest;
+        if (!raceGenderPrefix(n.substr(0, k), &race, &gender, &rest) || !rest.empty()) continue;
+        std::string tok = n.substr(k + 5);
+        if (tok.size() > 4 && tok.compare(tok.size() - 4, 4, ".wav") == 0) tok.resize(tok.size() - 4);
+        while (!tok.empty() && isdigit((unsigned char)tok.back())) tok.pop_back();
+        if (std::find_if(std::begin(kErrTokens), std::end(kErrTokens), [&](const char* t) { return tok == t; }) == std::end(kErrTokens)) continue;
+        err.emplace(std::make_tuple(race, gender, tok), id);
+    }
+    size_t errListed = err.size(), errProbed = 0;
+    for (const VoiceRace& r : kVoiceRaces) {   // a race / gender SoundEntries has none of: the files by their usual names
+        if (!r.errDir) continue;
+        for (uint32_t g = 0; g < 2; ++g) {
+            bool any = false;
+            for (const auto& [key, id] : err) any |= std::get<0>(key) == r.id && std::get<1>(key) == g;
+            if (any) continue;
+            const std::string gw = g ? "Female" : "Male";
+            const std::string dir = std::string("Sound\\Character\\") + r.folder + "\\" + r.errDir + gw + "ErrorMessages\\";
+            for (const char* t : kErrTokens) {
+                std::vector<std::string> files = probeFiles(data, dir + r.errFile + gw + "_err_" + t, 8);
+                if (files.empty()) continue;
+                err[std::make_tuple(r.id, g, std::string(t))] = synthetic(std::move(files), 2);
+                ++errProbed;
+            }
+        }
+    }
+    for (const auto& [key, id] : err) {
+        w.txt += "V\t" + std::to_string(std::get<0>(key)) + "\t" + std::to_string(std::get<1>(key)) + "\t" + std::get<2>(key) +
+                 "\t" + std::to_string(id) + "\n";
+        w.used.insert(id);
+        if (!w.variants.count(id)) w.variants[id] = 2;
+    }
+
+    // ---- NPC voices: NPCSounds (greeting / farewell / pissed columns found by the names of the rows they point at)
+    DbcTable npc, cdi, cdx;
+    std::map<uint32_t, std::array<uint32_t, 3>> sets;   // NPCSounds id -> greeting, farewell, pissed
+    if (npc.load(data, "NPCSounds.dbc") && npc.fields >= 2) {
+        std::set<int> taken;
+        const int cG = bestColumn(w, npc, [](const std::string& n) { return has(n, "greet") || has(n, "hello"); }, taken, 1);
+        if (cG >= 0) taken.insert(cG);
+        const int cF = bestColumn(w, npc, [](const std::string& n) { return has(n, "farewell") || has(n, "bye"); }, taken, 1);
+        if (cF >= 0) taken.insert(cF);
+        const int cP = bestColumn(w, npc, [](const std::string& n) { return has(n, "pissed") || has(n, "annoy"); }, taken, 1);
+        // without telling names: the documented order (ID, greeting, farewell, pissed, unused)
+        const int g = cG >= 0 ? cG : 1, f = cF >= 0 ? cF : (npc.fields > 2 ? 2 : -1), pz = cP >= 0 ? cP : (npc.fields > 3 ? 3 : -1);
+        for (uint32_t r = 0; r < npc.records; ++r) {
+            auto v = [&](int c) { uint32_t x = c >= 0 ? npc.u32(r, (uint32_t)c) : 0; return w.valid(x) ? x : 0u; };
+            std::array<uint32_t, 3> a{v(g), v(f), v(pz)};
+            if (a[0] || a[1] || a[2]) sets[npc.u32(r, 0)] = a;
+        }
+        if (verbose) std::printf("  NPCSounds: %zu sets (columns greeting %d farewell %d pissed %d)\n", sets.size(), g, f, pz);
+    }
+    // the generic voices of each race: "<Race><Gender>StandardNPC<Greeting(s)|Farewell|Pissed>NN.wav"
+    std::map<std::pair<uint32_t, uint32_t>, std::array<uint32_t, 3>> generic;
+    for (const auto& [id, n] : firstFile) {
+        uint32_t race, gender;
+        std::string rest;
+        if (!raceGenderPrefix(n, &race, &gender, &rest) || rest.compare(0, 11, "standardnpc") != 0) continue;
+        const int kind = has(rest, "greet") ? 0 : has(rest, "farewell") ? 1 : has(rest, "pissed") ? 2 : -1;
+        if (kind < 0) continue;
+        uint32_t& slot = generic[{race, gender}][kind];
+        if (!slot) slot = id;
+    }
+    for (const VoiceRace& r : kVoiceRaces)
+        for (uint32_t g = 0; g < 2; ++g) {
+            if (generic.count({r.id, g})) continue;
+            std::array<uint32_t, 3> a{0, 0, 0};
+            static const char* kKinds[3][2] = {{"Greetings", "Greeting"}, {"Farewell", "Farewells"}, {"Pissed", nullptr}};
+            for (const char* rn : r.npc) {
+                if (!rn) continue;
+                const std::string who = std::string(rn) + (g ? "Female" : "Male") + "StandardNPC";
+                for (int k = 0; k < 3; ++k)
+                    for (const char* kw : kKinds[k]) {
+                        if (a[k] || !kw) continue;
+                        std::vector<std::string> files = probeFiles(data, "Sound\\Creature\\" + who + "\\" + who + kw, 12);
+                        if (!files.empty()) a[k] = synthetic(std::move(files), 4);
+                    }
+            }
+            if (a[0] || a[1] || a[2]) generic[{r.id, g}] = a;
+        }
+    size_t displays = 0, displaysGeneric = 0;
+    if (cdi.load(data, "CreatureDisplayInfo.dbc") && cdi.fields > 3) {
+        // the NPCSounds column: (nearly) every non-zero value is an NPCSounds id, and the most different ones
+        int col = -1;
+        size_t bestDistinct = 0;
+        for (uint32_t c = 3; c < cdi.fields && !sets.empty(); ++c) {
+            uint32_t nz = 0, ok = 0;
+            std::set<uint32_t> distinct;
+            for (uint32_t r = 0; r < cdi.records; ++r)
+                if (uint32_t v = cdi.u32(r, c)) { ++nz; if (sets.count(v)) { ++ok; distinct.insert(v); } }
+            if (nz && ok * 10 >= nz * 9 && distinct.size() >= 3 && distinct.size() > bestDistinct) { bestDistinct = distinct.size(); col = (int)c; }
+        }
+        // humanoids: CreatureDisplayInfoExtra race (1) and gender (2) for the generic voices
+        std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> extraRace;
+        if (cdx.load(data, "CreatureDisplayInfoExtra.dbc") && cdx.fields > 3)
+            for (uint32_t r = 0; r < cdx.records; ++r) extraRace[cdx.u32(r, 0)] = {cdx.u32(r, 1), cdx.u32(r, 2)};
+        for (uint32_t r = 0; r < cdi.records; ++r) {
+            std::array<uint32_t, 3> a{0, 0, 0};
+            bool own = false;
+            if (col >= 0) {
+                auto it = sets.find(cdi.u32(r, (uint32_t)col));
+                if (it != sets.end()) { a = it->second; own = true; }
+            }
+            if (!own) {
+                auto ex = extraRace.find(cdi.u32(r, 3));
+                if (ex == extraRace.end()) continue;
+                auto ge = generic.find(ex->second);
+                if (ge == generic.end()) continue;
+                a = ge->second;
+                ++displaysGeneric;
+            }
+            if (!a[0] && !a[1] && !a[2]) continue;
+            w.txt += "N\t" + std::to_string(cdi.u32(r, 0)) + "\t" + std::to_string(a[0]) + "\t" + std::to_string(a[1]) + "\t" +
+                     std::to_string(a[2]) + "\n";
+            for (uint32_t x : a)
+                if (x) { w.used.insert(x); if (!w.variants.count(x)) w.variants[x] = 4; }
+            ++displays;
+        }
+        if (verbose) std::printf("  CreatureDisplayInfo NPC sound column %d\n", col);
+    }
+
+    // ---- text emotes: EmotesTextSound ID, EmotesText, race, gender, sound
+    DbcTable ets;
+    size_t emotes = 0;
+    if (ets.load(data, "EmotesTextSound.dbc") && ets.fields >= 5)
+        for (uint32_t r = 0; r < ets.records; ++r) {
+            const uint32_t te = ets.u32(r, 1), race = ets.u32(r, 2), gender = ets.u32(r, 3), snd = ets.u32(r, 4);
+            if (!te || !race || gender > 1 || !w.valid(snd)) continue;
+            w.txt += "T\t" + std::to_string(te) + "\t" + std::to_string(race) + "\t" + std::to_string(gender) + "\t" + std::to_string(snd) + "\n";
+            w.used.insert(snd);
+            if (!w.variants.count(snd)) w.variants[snd] = 2;
+            ++emotes;
+        }
+    std::printf("  voices: %zu error lines (%zu listed, %zu by file name), %zu NPC sets, %zu displays with a voice (%zu by race), "
+                "%zu emote voices\n", err.size(), errListed, errProbed, sets.size(), displays, displaysGeneric, emotes);
+}
+
 bool writeWorldBank(const DataDir& data, const SoundOptions& so, WorldCtx& w, const std::string& path) {
     std::vector<W3dWorldEntry> entries;
     std::vector<uint8_t> blocks;
@@ -511,20 +734,27 @@ bool writeWorldBank(const DataDir& data, const SoundOptions& so, WorldCtx& w, co
     for (uint32_t id : w.used) {
         ++done;
         progress(false, "world sounds: %zu/%zu, %.1f MB", done, w.used.size(), blocks.size() / 1048576.0);
-        SoundRow s = soundRow(w.se, w.byId.at(id));
+        SoundRow s;
         float minD = 8, cut = 40;
-        if (w.se.fields > 27) {
-            float a = w.se.f32(s.row, 26), b = w.se.f32(s.row, 27);
-            if (a > 0.5f && a < 100 && b > a && b < 500) { minD = a; cut = b; }
+        if (auto ex = w.extra.find(id); ex != w.extra.end()) {
+            s.files = ex->second;
+        } else {
+            s = soundRow(w.se, w.byId.at(id));
+            if (w.se.fields > 27) {
+                float a = w.se.f32(s.row, 26), b = w.se.f32(s.row, 27);
+                if (a > 0.5f && a < 100 && b > a && b < 500) { minD = a; cut = b; }
+            }
         }
+        const auto vv = w.variants.find(id);
+        const int keep = vv != w.variants.end() ? std::max(so.worldVariants, vv->second) : so.worldVariants;
         int kept = 0;
         for (const std::string& f : s.files) {
-            if (kept >= so.worldVariants) break;
+            if (kept >= keep) break;
             std::vector<uint8_t> bytes;
             Pcm p;
             if (!data.read(f, bytes) || !decodeSound(bytes, p)) continue;
             resample(p, so.streamRate);
-            if (p.s.size() > (size_t)p.rate * 3) p.s.resize((size_t)p.rate * 3);   // 3 s at most (precast loops)
+            if (p.s.size() > (size_t)p.rate * (size_t)so.worldMaxSec) p.s.resize((size_t)p.rate * (size_t)so.worldMaxSec);   // 12 s at most by default (--sound-max-sec)
             std::vector<uint8_t> ima;
             imaEncode(p, ima);
             W3dWorldEntry e{id, (uint32_t)blocks.size(), (uint32_t)p.s.size(), (uint16_t)p.rate,
@@ -591,6 +821,15 @@ bool convertSound(const SoundOptions& so, const DataDir& data, bool verbose) {
         bool got = false;
         for (const std::string& nm : names) {
             auto it = byName.find(lower(nm));
+            std::string used = nm;
+            if (!nm.empty() && nm[0] == '*') {   // "*word": the first name containing it
+                const std::string w = lower(nm.substr(1));
+                std::string best;
+                for (const auto& [k, r] : byName)
+                    if (k.find(w) != std::string::npos && (best.empty() || k < best)) best = k;
+                it = best.empty() ? byName.end() : byName.find(best);
+                used = best;
+            }
             if (it == byName.end()) continue;
             SoundRow s = soundRow(se, it->second);
             for (size_t k = 0; k < s.files.size() && k < 3; ++k) {
@@ -611,7 +850,7 @@ bool convertSound(const SoundOptions& so, const DataDir& data, bool verbose) {
                 got = true;
             }
             if (got) {
-                if (verbose) std::printf("  sound %-14s <- %s\n", ev.c_str(), nm.c_str());
+                if (verbose) std::printf("  sound %-14s <- %s\n", ev.c_str(), used.c_str());
                 break;
             }
         }
@@ -634,8 +873,10 @@ bool convertSound(const SoundOptions& so, const DataDir& data, bool verbose) {
     // ---- the world: creatures, weapons, spells, footsteps (sounds.txt + world.w3ds)
     if (so.world) {
         WorldCtx w{se, byId, {}, "# wow3ds world sounds: D display csd | K csd aggro death wound woundCrit attack attackCrit footstep | "
-                                 "W sub impact crit | F footstep sound | Q visual precast cast impact missile channel | P spell visual\n"};
+                                 "W sub impact crit | F footstep sound | Q visual precast cast impact missile channel | P spell visual | "
+                                 "L liquid-sound-kind sound | N display greeting farewell pissed | V race gender token sound | T textEmote race gender sound\n"};
         exportWorldTables(data, w, verbose);
+        exportVoices(data, w, verbose);
         // footsteps of any creature when FootstepTerrainLookup gave nothing: a SoundEntries name "*footstep*dirt*"
         if (w.txt.find("\nF\t") == std::string::npos)
             for (const auto& [nm, r] : byName)
@@ -645,6 +886,32 @@ bool convertSound(const SoundOptions& so, const DataDir& data, bool verbose) {
                     w.used.insert(id);
                     break;
                 }
+        // liquids (stage 5.26): "L kind sound" - splash (falling / wading into deep water), swim (a stroke), wade (a step in
+        // shallow water), fishbite (the server plays SoundEntries 3355 at the bobber when a fish bites). The names of these
+        // rows are not documented for 1.12: the first SoundEntries row whose name or first file has the keyword wins.
+        {
+            struct Want { const char* kind; std::vector<const char*> keys; uint32_t fixedId; };
+            const Want wants[] = {
+                {"splash", {"enterwatermedium", "enterwater", "watersplash", "splashlarge", "splash"}, 0},
+                {"swim", {"swimslow", "swimming", "swim"}, 0},
+                {"wade", {"footstepswater", "footstepwater", "wade", "watersplashsmall"}, 0},
+                {"fishbite", {"fishbite", "fishingbobber", "bobbersplash", "bobber"}, 3355},
+            };
+            std::string found;
+            for (const Want& wt : wants) {
+                uint32_t id = wt.fixedId && byId.count(wt.fixedId) ? wt.fixedId : 0;
+                for (const char* k : wt.keys) {
+                    if (id) break;
+                    for (uint32_t r = 0; r < se.records && !id; ++r)   // in table order: the same pick every run
+                        if (has(lower(se.str(r, 2)), k) || has(lower(se.str(r, 3)), k)) id = se.u32(r, 0);
+                }
+                if (!id) continue;
+                w.txt += std::string("L\t") + wt.kind + "\t" + std::to_string(id) + "\n";
+                w.used.insert(id);
+                found += std::string(" ") + wt.kind + "=" + w.nameOf(id);
+            }
+            std::printf("  liquid sounds:%s\n", found.empty() ? " none found" : found.c_str());
+        }
         FILE* tf = std::fopen((base + "sounds.txt").c_str(), "wb");
         if (tf) { std::fwrite(w.txt.data(), 1, w.txt.size(), tf); std::fclose(tf); }
         writeWorldBank(data, so, w, base + "world.w3ds");
@@ -729,6 +996,36 @@ bool convertSound(const SoundOptions& so, const DataDir& data, bool verbose) {
     };
     for (uint32_t id : musicSounds) emit(id, false);
     for (uint32_t id : ambSounds) emit(id, true);
+    // the login / character screens' music (stage 5.31): the SoundEntries row playing a GlueScreenMusic file (the original
+    // GlueXML plays it by name; "login" / "main theme" rows first), else the file itself. "G vol*100 files" in music.txt.
+    if (so.music) {
+        int best = -1, bestScore = -1;
+        for (uint32_t r = 0; r < se.records; ++r) {
+            SoundRow s = soundRow(se, r);
+            bool glue = false;
+            for (const std::string& f : s.files) glue |= lower(f).find("gluescreenmusic") != std::string::npos;
+            if (!glue) continue;
+            const std::string nm = lower(se.str(r, 2));
+            int score = 1 + (nm.find("login") != std::string::npos ? 4 : 0) + (nm.find("main") != std::string::npos ? 2 : 0);
+            for (const std::string& f : s.files) score += lower(f).find("main_theme") != std::string::npos ? 2 : 0;
+            if (score > bestScore) { bestScore = score; best = (int)r; }
+        }
+        SoundRow g;
+        if (best >= 0) g = soundRow(se, (uint32_t)best);
+        else g.files = {"Sound\\Music\\GlueScreenMusic\\wow_main_theme.mp3"};
+        std::string line = "G\t" + std::to_string(std::lround(g.volume * 100));
+        int k = 0;
+        for (const std::string& path : g.files) {
+            std::vector<uint8_t> f;
+            if (!data.read(path, f) || f.size() < 1024) continue;
+            const std::string name = "glue_" + std::to_string(k++) + ".mp3";
+            if (!writeFile(base + "music/" + name, f.data(), f.size())) continue;
+            bytes += f.size();
+            line += "\t" + name;
+        }
+        if (k) txt += line + "\n";
+        std::printf("  login screen music: %s\n", k ? (best >= 0 ? se.str((uint32_t)best, 2).c_str() : "wow_main_theme.mp3") : "not found");
+    }
     progressDone("music: %zu music + %zu ambience sounds, %zu files, %.0f MB", musicSounds.size(), ambSounds.size(), files,
                  bytes / 1048576.0);
 

@@ -1,0 +1,53 @@
+; Particle / glow vertex shader (stage 5.32): the CPU (fx.cpp) builds camera-facing quads in view space already.
+; v0 = float position (view space, yards), v1 = float uv, v2 = u8 colour (0..255)
+; Output: position through the projection, uv, colour / 255 with the distance fog applied the way the blend needs it:
+;   additive quads fade to nothing (rgb * visibility), alpha-blended ones fade out (alpha * visibility):
+;   colour *= fogMask * (visibility - 1) + 1, fogMask = (1,1,1,0) or (0,0,0,1).
+
+.fvec projection[4]
+.fvec fogParams         ; x = 1/(end-start), y = end/(end-start) (0, 1: no fog)
+.fvec fogMask
+
+.constf myconst(0.0, 1.0, 0.00392156862745098, -1.0)
+.alias  zeros   myconst.xxxx
+.alias  ones    myconst.yyyy
+.alias  inv255  myconst.zzzz
+.alias  minus1  myconst.wwww
+
+.out outpos position
+.out outtc0 texcoord0
+.out outclr color
+
+.alias inpos v0
+.alias intc  v1
+.alias inclr v2
+
+.proc main
+	mov r0.xyz, inpos.xyz
+	mov r0.w, ones
+
+	dp4 outpos.x, projection[0], r0
+	dp4 outpos.y, projection[1], r0
+	dp4 outpos.z, projection[2], r0
+	dp4 outpos.w, projection[3], r0
+
+	mov outtc0, intc
+
+	; visibility = clamp(fogParams.y - fogParams.x * distance, 0, 1)
+	dp3 r5.x, r0, r0
+	rsq r5.y, r5.x
+	mul r5.x, r5.x, r5.y
+	mul r5.x, fogParams.xxxx, r5.x
+	add r5.x, fogParams.yyyy, -r5.x
+	max r5.x, zeros, r5.x
+	min r5.x, ones, r5.x
+
+	; m = fogMask * (visibility - 1) + 1
+	add r6, minus1, r5.xxxx
+	mul r6, fogMask, r6
+	add r6, ones, r6
+
+	mul r7, inv255, inclr
+	mul outclr, r7, r6
+	end
+.end
