@@ -132,7 +132,7 @@ bool emitTile(const Options& o, const wowee::pipeline::ADTTerrain& adt, const st
     constexpr float kSkirtDepth = 4.0f;                // yards below the edge
     std::vector<TVert> verts;
     using LodLists = std::array<std::vector<uint32_t>, W3D_TERRAIN_LODS>;
-    std::map<std::tuple<int, uint16_t, uint16_t>, LodLists> lists;  // (region, t0, t1)
+    std::map<std::tuple<int, uint16_t, uint16_t, uint16_t>, LodLists> lists;  // (region, t0, t1, t2)
     std::vector<uint8_t> alpha;
 
     auto pushTri = [&](std::vector<uint32_t>& lst, std::array<uint32_t, 3> tri) {
@@ -148,24 +148,29 @@ bool emitTile(const Options& o, const wowee::pipeline::ADTTerrain& adt, const st
             const auto& ch = adt.getChunk(cx, cy);
             if (!ch.hasHeightMap()) continue;
 
-            uint16_t t0 = 0, t1 = 0;
-            int blendLayer = -1;
+            uint16_t t0 = 0, t1 = 0, t2 = 0;
             if (!ch.layers.empty() && ch.layers[0].textureId < mtexToSlot.size()) t0 = mtexToSlot[ch.layers[0].textureId];
-            t1 = t0;
-            // Keep the strongest overlay layer (the plan's 2-layers-per-chunk limit).
-            float best = 0;
-            std::vector<uint8_t> bestAlpha;
+            // 5.36: base + the two strongest overlays (WoW splats up to four layers; with one overlay only a third layer
+            // vanished and the neighbours showed a hard grass/road seam). Overlays keep their layer order.
+            struct Ov { size_t li; float sum; std::vector<uint8_t> a; };
+            std::vector<Ov> cand;
             for (size_t li = 1; li < ch.layers.size(); ++li) {
+                if (ch.layers[li].textureId >= mtexToSlot.size()) continue;
                 if (!wowee::pipeline::decodeLayerAlpha(ch, li, alpha)) continue;
                 float sum = 0;
                 for (uint8_t a : alpha) sum += a;
-                if (sum > best && ch.layers[li].textureId < mtexToSlot.size()) {
-                    best = sum;
-                    blendLayer = (int)li;
-                    bestAlpha = alpha;
-                    t1 = mtexToSlot[ch.layers[li].textureId];
-                }
+                if (sum > 0) cand.push_back({li, sum, alpha});
             }
+            std::stable_sort(cand.begin(), cand.end(), [](const Ov& x, const Ov& y) { return x.sum > y.sum; });
+            if (cand.size() > 2) cand.resize(2);
+            std::sort(cand.begin(), cand.end(), [](const Ov& x, const Ov& y) { return x.li < y.li; });
+            const std::vector<uint8_t>* ovA[2] = {nullptr, nullptr};
+            t1 = t2 = t0;
+            for (size_t k = 0; k < cand.size(); ++k) {
+                ovA[k] = &cand[k].a;
+                (k == 0 ? t1 : t2) = mtexToSlot[ch.layers[cand[k].li].textureId];
+            }
+            if (cand.size() == 1) t2 = t1;
 
             const uint32_t base = (uint32_t)verts.size();
             for (int j = 0; j < g; ++j)
@@ -184,12 +189,16 @@ bool emitTile(const Options& o, const wowee::pipeline::ADTTerrain& adt, const st
                           nz = ch.normals[index * 3 + 2] / 127.0f;
                     float nl = std::sqrt(nx * nx + ny * ny + nz * nz);
                     if (nl < 1e-4f) { nx = ny = 0; nz = 1; nl = 1; }
-                    v.c[0] = v.c[1] = v.c[2] = bakeLight(nx / nl, ny / nl, nz / nl);
-                    v.c[3] = 0;
-                    if (blendLayer > 0) {
+                    const uint8_t light = bakeLight(nx / nl, ny / nl, nz / nl);
+                    v.c[0] = v.c[2] = light;
+                    v.c[1] = v.c[3] = 0;                           // g = second overlay weight, a = first overlay weight
+                    {
                         float au = ((float)col * (63.0f / 8.0f) + 0.5f) / 64.0f;
                         float av = ((float)row * (63.0f / 8.0f) + 0.5f) / 64.0f;
-                        v.c[3] = (uint8_t)std::lround(std::clamp(wowee::pipeline::sampleAlpha(bestAlpha, au, av), 0.0f, 1.0f) * 255.0f);
+                        for (int k = 0; k < 2; ++k)
+                            if (ovA[k])
+                                v.c[k == 0 ? 3 : 1] = (uint8_t)std::lround(
+                                    std::clamp(wowee::pipeline::sampleAlpha(*ovA[k], au, av), 0.0f, 1.0f) * 255.0f);
                     }
                     const float k = kTexRepeatPerChunk / CHUNK;
                     v.uv[0] = (TS - v.p[1]) * k;
@@ -216,7 +225,7 @@ bool emitTile(const Options& o, const wowee::pipeline::ADTTerrain& adt, const st
                 }
             }
 
-            LodLists& L = lists[{(cy / 4) * 4 + cx / 4, t0, t1}];
+            LodLists& L = lists[{(cy / 4) * 4 + cx / 4, t0, t1, t2}];
             for (int lod = 0; lod < W3D_TERRAIN_LODS; ++lod) {
                 const int s = lodStep[lod];
                 for (int j = 0; j + s < g; j += s)
@@ -271,11 +280,13 @@ bool emitTile(const Options& o, const wowee::pipeline::ADTTerrain& adt, const st
 
     std::vector<uint16_t> indices;
     std::vector<W3dTerrainBatch> batches;
+    std::vector<uint16_t> tex2;
     for (auto& [key, L] : lists) {
         if (L[0].empty()) continue;
         W3dTerrainBatch b{};
         b.tex0 = std::get<1>(key);
         b.tex1 = std::get<2>(key);
+        tex2.push_back(std::get<3>(key));
         for (int c = 0; c < 3; ++c) { b.bmin[c] = 1e30f; b.bmax[c] = -1e30f; }
         for (int lod = 0; lod < W3D_TERRAIN_LODS; ++lod) {
             b.firstIndex[lod] = (uint32_t)indices.size();
@@ -298,6 +309,8 @@ bool emitTile(const Options& o, const wowee::pipeline::ADTTerrain& adt, const st
     size_t offTex = blob.putArray(texIds);
     blob.align(4);
     size_t offB = blob.putArray(batches);
+    blob.align(4);
+    size_t offT2 = blob.putArray(tex2);
     blob.align(16);
     size_t offV = blob.putArray(qv);
     blob.align(4);
@@ -305,7 +318,7 @@ bool emitTile(const Options& o, const wowee::pipeline::ADTTerrain& adt, const st
     blob.align(4);
     auto* hp = blob.at<W3dTerrainHeader>(0);
     hp->offTexIds = (uint32_t)offTex; hp->offBatches = (uint32_t)offB;
-    hp->offVertices = (uint32_t)offV; hp->offIndices = (uint32_t)offI;
+    hp->offVertices = (uint32_t)offV; hp->offIndices = (uint32_t)offI; hp->offTex2 = (uint32_t)offT2;
     pack.add(W3D_ENTRY_TERRAIN, w3d_tile_id(o.tileX, o.tileY), std::move(blob.data));
     for (auto& b : batches) st.terrainTris += b.indexCount[0] / 3;
     st.terrainVerts += qv.size();

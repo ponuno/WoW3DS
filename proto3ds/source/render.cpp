@@ -288,22 +288,38 @@ void drawTerrain(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, cons
     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_terrainSh.uProj, &g_proj);
     C3D_FVUnifSet(GPU_VERTEX_SHADER, g_terrainSh.uUV, 0, 0, 0, 0);
 
-    // stage 0: rgb = lerp(tex0, tex1, vertex.a); stage 1: rgb *= vertex.rgb (baked light)
-    C3D_TexEnv* env = C3D_GetTexEnv(0);
-    C3D_TexEnvInit(env);
-    C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE1, GPU_TEXTURE0, GPU_PRIMARY_COLOR);
-    C3D_TexEnvOpRgb(env, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_ALPHA);
-    C3D_TexEnvFunc(env, C3D_RGB, GPU_INTERPOLATE);
-    C3D_TexEnvSrc(env, C3D_Alpha, GPU_CONSTANT, GPU_CONSTANT, GPU_CONSTANT);
-    C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
-    C3D_TexEnvColor(env, 0xFFFFFFFF);
-    env = C3D_GetTexEnv(1);   // rgb *= baked light (vertex colour red)
-    C3D_TexEnvInit(env);
-    C3D_TexEnvSrc(env, C3D_RGB, GPU_PREVIOUS, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
-    C3D_TexEnvOpRgb(env, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_R, GPU_TEVOP_RGB_SRC_COLOR);
-    C3D_TexEnvFunc(env, C3D_RGB, GPU_MODULATE);
-    fogStage(2);
-    resetStages(3);
+    // 2 layers: stage 0 rgb = lerp(tex0, tex1, vertex.a); stage 1 *= baked light (vertex red); stage 2 fog.
+    // 3 layers (5.36): stage 1 rgb = lerp(prev, tex2, vertex.b = second overlay weight), light and fog move up one.
+    int envLayers = 0;   // 0 = not set yet this frame
+    auto setTerrainEnv = [&](int layers) {
+        if (envLayers == layers) return;
+        envLayers = layers;
+        C3D_TexEnv* env = C3D_GetTexEnv(0);
+        C3D_TexEnvInit(env);
+        C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE1, GPU_TEXTURE0, GPU_PRIMARY_COLOR);
+        C3D_TexEnvOpRgb(env, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_ALPHA);
+        C3D_TexEnvFunc(env, C3D_RGB, GPU_INTERPOLATE);
+        C3D_TexEnvSrc(env, C3D_Alpha, GPU_CONSTANT, GPU_CONSTANT, GPU_CONSTANT);
+        C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
+        C3D_TexEnvColor(env, 0xFFFFFFFF);
+        int next = 1;
+        if (layers == 3) {
+            env = C3D_GetTexEnv(next++);
+            C3D_TexEnvInit(env);
+            C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE2, GPU_PREVIOUS, GPU_PRIMARY_COLOR);
+            C3D_TexEnvOpRgb(env, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_B);
+            C3D_TexEnvFunc(env, C3D_RGB, GPU_INTERPOLATE);
+            C3D_TexEnvSrc(env, C3D_Alpha, GPU_PREVIOUS, GPU_PREVIOUS, GPU_PREVIOUS);
+            C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
+        }
+        env = C3D_GetTexEnv(next++);   // rgb *= baked light (vertex colour red)
+        C3D_TexEnvInit(env);
+        C3D_TexEnvSrc(env, C3D_RGB, GPU_PREVIOUS, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+        C3D_TexEnvOpRgb(env, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_R, GPU_TEVOP_RGB_SRC_COLOR);
+        C3D_TexEnvFunc(env, C3D_RGB, GPU_MODULATE);
+        fogStage(next++);
+        resetStages(next);
+    };
     setFogUniform(g_terrainSh, rs.fog, true);
     C3D_AlphaTest(false, GPU_ALWAYS, 0);
     C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
@@ -313,6 +329,8 @@ void drawTerrain(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, cons
     BindCache bc;
     for (Tile* t : streamerReadyTiles()) {
         const W3dTerrainHeader* h = t->th;
+        const uint16_t* tex2 = w3d_terrain_tex2(h, t->terr);
+        setTerrainEnv(tex2 ? 3 : 2);
         C3D_BufInfo* buf = C3D_GetBufInfo();
         BufInfo_Init(buf);
         BufInfo_Add(buf, t->terr + h->offVertices, sizeof(W3dTerrainVertex), 3, 0x210);
@@ -339,6 +357,7 @@ void drawTerrain(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, cons
             if (rs.forceLod >= 0) lod = rs.forceLod;
             bc.bind(0, t->ttex[b.tex0], fc);
             bc.bind(1, t->ttex[b.tex1], fc);
+            if (tex2) bc.bind(2, t->ttex[tex2[i]], fc);
             C3D_DrawElements(GPU_TRIANGLES, b.indexCount[lod], C3D_UNSIGNED_SHORT, idx + b.firstIndex[lod]);
             ++fc.drawCalls;
             ++fc.visibleBatches;

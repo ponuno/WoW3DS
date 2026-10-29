@@ -107,7 +107,7 @@ typedef struct {
 // and drawn with few texture switches.
 typedef struct {
     int16_t x, y, z, w;   // w unused (keeps 8-byte alignment)
-    uint8_t r, g, b, a;   // rgb = baked lighting, a = layer-1 blend weight
+    uint8_t r, g, b, a;   // r = baked lighting, g = tex2 weight (5.36), a = tex1 blend weight
     int16_t u, v;         // tiling UV * W3D_TERRAIN_UV_SCALE
 } W3dTerrainVertex;       // 16 bytes
 #define W3D_TERRAIN_UV_SCALE (1.0f / 256.0f)
@@ -135,7 +135,15 @@ typedef struct {
     uint32_t offBatches;          // W3dTerrainBatch[batchCount]
     uint32_t offVertices;         // W3dTerrainVertex[vertexCount]
     uint32_t offIndices;          // uint16_t[indexCount] (triangle list)
+    // 5.36: a third ground texture per batch (base + two overlays, as WoW splats up to four layers). The vertex's
+    // green channel is the second overlay's weight (a = the first one's). Older packs end the header at offIndices:
+    // there offTexIds < sizeof(W3dTerrainHeader), and w3d_terrain_tex2() answers "none".
+    uint32_t offTex2;             // uint16_t[batchCount]: index into the texture table; 0 = no third layer
 } W3dTerrainHeader;
+
+static inline const uint16_t* w3d_terrain_tex2(const W3dTerrainHeader* h, const uint8_t* base) {
+    return (h->offTexIds >= sizeof(W3dTerrainHeader) && h->offTex2) ? (const uint16_t*)(base + h->offTex2) : 0;
+}
 
 // ---------------------------------------------------------------- models
 typedef struct {

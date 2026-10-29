@@ -408,6 +408,7 @@ int printPackInfo(const std::string& path) {
                     sum += bt[k].indexCount[l];
                 }
                 if (bt[k].tex0 >= t.texCount || bt[k].tex1 >= t.texCount) return fail("batch tex index");
+                if (const uint16_t* t2 = w3d_terrain_tex2(&t, p)) if (t2[k] >= t.texCount) return fail("batch tex2 index");
                 lod0 += bt[k].indexCount[0]; lod1 += bt[k].indexCount[1]; lod2 += bt[k].indexCount[2];
             }
             const uint32_t* ids = reinterpret_cast<const uint32_t*>(p + t.offTexIds);
