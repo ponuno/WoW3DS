@@ -65,7 +65,6 @@ Unpack the converter pack (`w3dconv-win64.7z`) with 7-Zip into a folder **withou
 | `ui.bat`, `sound.bat` | only the interface and texts / only the sound |
 | `convert.bat` | a small test region (Elwynn Forest and Northshire) |
 | `ui_skin.txt` | the interface skin description (keep it next to `w3dconv.exe`) |
-| `README_RU.txt` | notes per converter version (Russian) |
 | `w3dlogin.exe`, `*_test.bat` | developer tools (login and movement tests on the PC) |
 
 **Optional, ConsolePort look:** put your own copy of the ConsolePort addon (the `ConsolePort` folder with
