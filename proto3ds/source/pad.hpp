@@ -37,17 +37,29 @@ struct PadConfig {
     float camSpeed = 1.8f;            // radians per second at full C-Stick
     bool questTracker = false;        // stage 5.14: quest objectives on the top screen (UI stage 2: off, the Map tab has them)
     // UI stages 3/6 (the Settings tab)
-    int lang = 1;                     // interface language: 0 English, 1 Russian
+    int lang = 0;                     // interface language: 0 English (default), 1 Russian
     int drawDist = 1;                 // index into the draw distances (main.cpp kDrawDists)
     int crowd = 2;                    // creatures drawn at most: 0 = 10, 1 = 20, 2 = 40, 3 = all
     int topMode = 0;                  // top screen: 0 normal 400x240, 1 wide 800x240, 2 stereoscopic 3D (the slider)
     bool doodads = true;              // small world objects (trees, rocks, furniture)
+    bool showStats = false;          // 5.35e: FPS and ping, small, at the bottom centre of the top screen
+    int effects = 2;                  // stage 5.32: particles and lamp glows: 0 off, 1 low, 2 high
     bool bigText = false;             // chat and lists on the touch screen in the bigger font
     bool dimHud = true;               // the top HUD fades out of combat
     bool autoTabs = true;             // combat -> the Combat tab, after it -> the Map tab (unless a tab is pinned)
     int musicVol = 5, sfxVol = 8, ambVol = 5;   // sound volumes 0..10 (Settings, Graphics & sound page)
+    // UI stage 10: ground spells (Blizzard, Flamestrike, bombs): 0 aim a ring with the C-Stick and press again to cast,
+    // 1 straight at the target when there is one in range (like a [@target] macro), else aim
+    int groundCast = 0;
+    bool perfLog = true;             // stage 6: perf.csv / perf_events.txt (a row a second)
+    bool gpuKick = true;             // stage 6.3: the GPU starts on the ground / opaque models before the frame is built
+                                     // (with VSync off: Stormwind 44.5 -> 57 FPS). 6f/6g froze with it - the lists' last words were
+                                     // not flushed (fixed in 6.8): on by default again (6.9). pad.txt key 'gpuearly'.
+    bool fadeIn = true;              // stage 6.11: new objects fade in, far doodads dissolve (pad.txt 'fadein')
+    bool vsync = false;              // stage 6.4: wait for a vertical blank before every frame (frames snap to 16.7 / 33.3 ms)
     bool load(const char* path);
     bool save(const char* path) const;
+    std::string text() const;        // what save() writes (stage 6.5: written by a background thread)
 };
 
 // Hotbar addressing: slot = set * 8 + button; button 0..3 = D-pad up, right, down, left; 4..7 = face X (top),
@@ -77,6 +89,7 @@ struct PadOut {
     bool centerCamera = false;
     // fixed actions
     bool jump = false, cancel = false, interact = false, context = false, menu = false, freeCamera = false;
+    bool ascend = false;              // the jump button held: swims up (stage 5.26)
     // classic extras
     bool nextTarget = false, toggleAttack = false, chat = false, nextSet = false;
     // hotbar

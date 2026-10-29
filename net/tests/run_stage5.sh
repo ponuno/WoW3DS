@@ -7,7 +7,7 @@ set -e
 N=$(cd "$(dirname "$0")/.." && pwd)
 OUT=${OUT:-/tmp/w3d_stage5}
 mkdir -p "$OUT"
-SRC="$N/client.cpp $N/crypto.cpp $N/socket.cpp $N/inflate.cpp $N/movement.cpp $N/objects.cpp $N/transport.cpp $N/game.cpp $N/game_social.cpp $N/game_spells.cpp $N/game_items.cpp $N/game_life.cpp $N/result_text.cpp $N/factions.cpp $N/game_factions.cpp $N/game_vendor.cpp $N/game_quests.cpp $N/game_group.cpp $N/game_friends.cpp $N/game_services.cpp $N/game_mail.cpp $N/game_auction.cpp $N/game_trade.cpp $N/tables.cpp"
+SRC="$N/client.cpp $N/crypto.cpp $N/socket.cpp $N/inflate.cpp $N/movement.cpp $N/objects.cpp $N/transport.cpp $N/game.cpp $N/game_social.cpp $N/game_spells.cpp $N/game_items.cpp $N/game_life.cpp $N/result_text.cpp $N/factions.cpp $N/game_factions.cpp $N/game_vendor.cpp $N/game_quests.cpp $N/game_group.cpp $N/game_pet.cpp $N/game_friends.cpp $N/game_services.cpp $N/game_mail.cpp $N/game_auction.cpp $N/game_trade.cpp $N/game_water.cpp $N/tables.cpp"
 SAN="-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined"
 g++ -std=c++20 $SAN -Wall -Wextra "$N/tools/w3dlogin.cpp" $SRC -o "$OUT/w3dlogin"
 g++ -std=c++20 $SAN -Wall "$N/tests/objects_test.cpp" $SRC -o "$OUT/objects_test"
@@ -59,9 +59,9 @@ python3 - "$OUT/fight.json" "$OUT/fight_client.log" "$OUT/fight_replay.log" <<'P
 import json, sys
 r = json.load(open(sys.argv[1])); log = open(sys.argv[2]).read(); rep = open(sys.argv[3]).read()
 want_client = ["FIGHT: Diseased Timber Wolf killed", "chat [npc say] [Marshal McBride] says: Stay alert, recruit.",
-               "chat [system] Welcome to the fake realm.", "chat [client] Joined channel 1. General",
+               "chat [system] Welcome to the fake realm.", "chat [channel notice] Joined Channel: [1. General]",
                "chat [say] [You] says: hello there", "chat [to] To [Otherguy]: ping",
-               "chat [whisper] [Otherguy] whispers: hi ping", "chat [channel] [General] [You]: general hi",
+               "chat [whisper] [Otherguy] whispers: hi ping", "chat [channel] [1. General] [You]: general hi",
                "chat [client] No player named 'Nobody' is currently playing.", "chat [client] Unknown command /bogus",
                "chat [client] Out of range", "chat [client] You are facing the wrong way", "You miss Diseased Timber Wolf.",
                "You hit Diseased Timber Wolf for 17.", "Diseased Timber Wolf hits you for 3.",
@@ -242,3 +242,27 @@ grep -q "spells: 40 in the book, 1 casts of ours, action bar: Attack(6603) Heroi
 # stack counts) and the look fields at PLAYER_BYTES 193 / _2 194 (not WoWee's 191/192, which are the guild fields).
 grep -q "inventory: 7 items, 0c money: 255/3=38 255/6=39 255/7=40 255/15=25 255/16=2362 255/23=117x4 255/24=6948" "$OUT/real.log" && \
 grep -q "look: skin 1 face 6 hair 8 colour 3 facial 2 | life alive" "$OUT/real.log" && echo "REAL INVENTORY + LOOK FIELDS: PASS"
+# Stage 5.26: liquids - breath / fatigue bars, environmental damage, fishing (build_water_log.py -> water_test)
+python3 "$N/tests/build_water_log.py" "$OUT/water.w3dl" "$OUT/water.expect"
+g++ -std=c++20 $SAN -Wall "$N/tests/water_test.cpp" $SRC -o "$OUT/water_test"
+"$OUT/water_test" "$OUT/water.w3dl" "$OUT/water.expect"
+# Stage 5.28: area triggers (dungeon doors, the tram): geometry, once per walk-in, CMSG_AREATRIGGER, the refusal text
+g++ -std=c++20 $SAN -Wall "$N/tests/areatrigger_test.cpp" $SRC -o "$OUT/areatrigger_test"
+# Stage 5.40: cooldowns computed by the client (spells.txt @cd, item numbers, categories, COOLDOWN_EVENT)
+g++ -std=c++20 $SAN -Wall "$N/tests/cooldown_test.cpp" $SRC -o "$OUT/cooldown_test"
+"$OUT/cooldown_test"
+"$OUT/areatrigger_test"
+# Stage 5.29: the character list's looks and equipment, creating and deleting characters (w3dlogin = the 3DS net code)
+PORT6=$((PORT + 50))
+(cd "$N/tests" && timeout 30 python3 -u fake_server.py --port $PORT6 > "$OUT/glue_server.log" 2>&1 &)
+sleep 1
+"$OUT/w3dlogin" 127.0.0.1:$PORT6 TEST PASSWORD --create Newone:3:2:1:2:3:4:5:1 > "$OUT/glue1.log" 2>&1
+"$OUT/w3dlogin" 127.0.0.1:$PORT6 TEST PASSWORD --create Taken:1:1:0 --delete Testtwo > "$OUT/glue2.log" 2>&1
+grep -q "eq4=7101/5 eq7=7002/8" "$OUT/glue1.log"
+grep -q "Testtwo      level 60 Night Elf Druid.* look 1 2 3 4 5 1" "$OUT/glue1.log"
+grep -q "create Newone: Character created (0x2E)" "$OUT/glue1.log"
+grep -q "\[2\] Newone       level  1 Dwarf Paladin.* look 1 2 3 4 5 1" "$OUT/glue1.log"
+grep -q "create Taken: That name is unavailable (0x31)" "$OUT/glue2.log"
+grep -q "delete Testtwo: Character deleted (0x39)" "$OUT/glue2.log"
+! grep -q "\[1\] Testtwo" <(sed -n '/delete Testtwo/,$p' "$OUT/glue2.log")
+echo "CHARACTER LIST + CREATE + DELETE: PASS"

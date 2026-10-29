@@ -19,7 +19,11 @@ struct Tex { int w = 0, h = 0; std::vector<uint8_t> rgba; bool ok = false; };
 std::map<uint16_t, Tex> g_cache;
 std::string g_cachePath;
 
+std::map<uint16_t, Tex> g_external;   // UI stage 8: run-time textures (the portraits) the tests stand in for
+
 const Tex& texture(uint16_t id) {
+    auto ex = g_external.find(id);
+    if (ex != g_external.end()) return ex->second;
     const ui::Assets& a = ui::assets();
     if (g_cachePath != a.path()) { g_cache.clear(); g_cachePath = a.path(); }
     auto it = g_cache.find(id);
@@ -41,6 +45,11 @@ const Tex& texture(uint16_t id) {
     return t;
 }
 }  // namespace
+
+void rasterSetExternal(uint16_t id, int w, int h, const std::vector<uint8_t>& rgba) {
+    Tex& t = g_external[id];
+    t.w = w; t.h = h; t.rgba = rgba; t.ok = true;
+}
 
 bool decodeTexBlob(const std::vector<uint8_t>& blob, int* pw, int* ph, std::vector<uint8_t>& rgba) {
     if (blob.size() < W3D_TEX_DATA_OFFSET) return false;

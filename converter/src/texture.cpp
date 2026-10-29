@@ -16,11 +16,17 @@
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <set>
+#include <thread>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <thread>
 #include <cstdio>
+#include <exception>
 
 namespace w3d {
 
@@ -99,6 +105,7 @@ static void encode16(const Image& im, uint8_t fmt, std::vector<uint8_t>& out) {
 // default; --tex-quality medium for the old behaviour. Big levels are split over threads by rows of
 // 8x8 tiles; each thread writes its own rows, so the output is identical to a single-threaded run.
 static int g_etcQuality = 0;
+static thread_local bool t_inTexWorker = false;   // 5.35h: inside the texture pool
 static TexTiming g_timing;
 void setEtcQuality(int q) { g_etcQuality = q; }
 TexTiming& textureTiming() { return g_timing; }
@@ -141,7 +148,7 @@ static void encodeEtc1(const Image& im, bool alpha, std::vector<uint8_t>& out) {
         return std::max(1u, std::min(16u, n));
     }();
     unsigned nt = threads;
-    if ((size_t)im.w * im.h < 128 * 128 || nt == 1) {
+    if ((size_t)im.w * im.h < 128 * 128 || nt == 1 || t_inTexWorker) {   // (5.35h: a worker of the pool encodes alone)
         encodeEtc1Rows(im, alpha, 0, im.h, out.data() + base);
         return;
     }
@@ -241,10 +248,133 @@ std::vector<uint8_t> encodeTextureLevel(const Image& im, uint8_t fmt) {
     return blob;
 }
 
+static uint32_t addTextureFromGameImpl(PackWriter& pack, const DataDir& data, const std::string& gamePath, int maxSize,
+                                       uint8_t fmt, bool alphaCapable, bool verbose);
+
 uint32_t addTextureFromGame(PackWriter& pack, const DataDir& data, const std::string& gamePath,
                             int maxSize, uint8_t fmt, bool alphaCapable, bool verbose) {
-    uint32_t id = w3d_fnv1a(DataDir::normalize(gamePath).c_str());
+    try {
+        return addTextureFromGameImpl(pack, data, gamePath, maxSize, fmt, alphaCapable, verbose);
+    } catch (const std::exception& e) {   // a texture that throws is drawn untextured instead of ending the run
+        std::fprintf(stderr, "  texture FAILED, skipped: %s (%s)\n", gamePath.c_str(), e.what());
+        return 0;
+    }
+}
+
+// ---- 5.35h: textures are encoded on a pool of threads while the main thread goes on with models, buildings and tiles.
+// The BLP is read and decoded here (the MPQ reader is not thread-safe, and a missing texture must be known at once); the
+// ETC1 / 16-bit encoding with its mips - most of a conversion's time - is a job. Its id is known before it is done (the
+// name's hash), so callers carry on; finished blobs are added to their pack by the main thread (drainTextures), and every
+// write of a pack first waits for all of them (textureFlush). W3D_THREADS=1: the old way, encoded on the spot.
+namespace {
+struct TexJob { PackWriter* pack; uint32_t id; Image img; int maxSize; uint8_t fmt; bool alpha; std::string name; };
+struct TexDone { PackWriter* pack; uint32_t id; std::vector<uint8_t> blob; std::string name; };
+struct TexPool {
+    std::mutex m;
+    std::condition_variable cvJob, cvDone;
+    std::deque<TexJob> jobs;
+    std::vector<TexDone> done;
+    std::set<std::pair<PackWriter*, uint32_t>> pending;
+    std::vector<std::thread> workers;
+    size_t busy = 0;
+    bool stop = false;
+    unsigned threads() const {
+        const char* e = std::getenv("W3D_THREADS");
+        unsigned n = e ? (unsigned)std::atoi(e) : std::thread::hardware_concurrency();
+        return std::max(1u, std::min(16u, n));
+    }
+    void start() {
+        if (!workers.empty()) return;
+        const unsigned n = std::max(1u, threads() - (threads() > 2 ? 1u : 0u));   // one core stays with the main thread
+        for (unsigned k = 0; k < n; ++k) workers.emplace_back([this] { run(); });
+    }
+    void run() {
+        t_inTexWorker = true;
+        std::unique_lock<std::mutex> l(m);
+        for (;;) {
+            cvJob.wait(l, [&] { return stop || !jobs.empty(); });
+            if (jobs.empty()) return;   // stop
+            TexJob j = std::move(jobs.front());
+            jobs.pop_front();
+            ++busy;
+            l.unlock();
+            const auto t0 = std::chrono::steady_clock::now();
+            std::vector<uint8_t> blob;
+            try {
+                blob = encodeTexture(j.img, j.maxSize, j.fmt, j.alpha);
+            } catch (const std::exception& e) {
+                std::fprintf(stderr, "  texture FAILED, skipped: %s (%s)\n", j.name.c_str(), e.what());
+            }
+            const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            l.lock();
+            g_timing.encodeSec += sec;
+            --busy;
+            done.push_back({j.pack, j.id, std::move(blob), std::move(j.name)});
+            cvDone.notify_all();
+        }
+    }
+    ~TexPool() {
+        {
+            std::lock_guard<std::mutex> l(m);
+            stop = true;
+        }
+        cvJob.notify_all();
+        for (auto& t : workers) if (t.joinable()) t.join();
+    }
+};
+TexPool& texPool() {
+    static TexPool p;
+    return p;
+}
+// Finished blobs into their packs (main thread only).
+void drainTextures() {
+    TexPool& p = texPool();
+    std::vector<TexDone> d;
+    {
+        std::lock_guard<std::mutex> l(p.m);
+        d.swap(p.done);
+    }
+    for (TexDone& t : d) {
+        if (!t.blob.empty()) t.pack->add(W3D_ENTRY_TEXTURE, t.id, std::move(t.blob));
+        std::lock_guard<std::mutex> l(p.m);
+        p.pending.erase({t.pack, t.id});
+    }
+}
+}  // namespace
+
+bool textureInPack(PackWriter& pack, uint32_t id) {
+    if (pack.has(W3D_ENTRY_TEXTURE, id)) return true;
+    TexPool& p = texPool();
+    PackWriter* owner = pack.pool() ? pack.pool() : &pack;
+    std::lock_guard<std::mutex> l(p.m);
+    return p.pending.count({owner, id}) != 0;
+}
+
+void textureFlush() {
+    TexPool& p = texPool();
+    if (p.workers.empty()) return;
+    {
+        std::unique_lock<std::mutex> l(p.m);
+        p.cvDone.wait(l, [&] { return p.jobs.empty() && p.busy == 0; });
+    }
+    drainTextures();
+}
+
+static uint32_t addTextureFromGameImpl(PackWriter& pack, const DataDir& data, const std::string& gamePath, int maxSize,
+                                       uint8_t fmt, bool alphaCapable, bool verbose) {
+    // one entry per BLP for the whole pack (and the whole pool of --all): the first conversion of it is the one kept,
+    // so the id is the plain path hash (keyId only salts it if two paths collide)
+    uint32_t id = pack.keyId(W3D_ENTRY_TEXTURE, DataDir::normalize(gamePath));
     if (pack.has(W3D_ENTRY_TEXTURE, id)) return id;
+    TexPool& tp = texPool();
+    PackWriter* owner = pack.pool() ? pack.pool() : &pack;   // textures are not tile entries: the pool keeps them
+    const bool async = tp.threads() > 1;
+    if (async) {
+        drainTextures();
+        std::lock_guard<std::mutex> l(tp.m);
+        if (tp.pending.count({owner, id})) return id;   // already being encoded
+    }
+    trace("texture %s", gamePath.c_str());
     std::vector<uint8_t> bytes;
     Image img;
     auto t0 = std::chrono::steady_clock::now();
@@ -261,9 +391,27 @@ uint32_t addTextureFromGame(PackWriter& pack, const DataDir& data, const std::st
         for (size_t i = 0; i < n; ++i) { r += img.rgba[i * 4]; g += img.rgba[i * 4 + 1]; b += img.rgba[i * 4 + 2]; aa += img.rgba[i * 4 + 3]; }
         if (n) std::printf("  terrain texture %s %dx%d mean rgb %.0f %.0f %.0f alpha %.0f\n", gamePath.c_str(), img.w, img.h, r / n, g / n, b / n, aa / n);
     }
-    pack.add(W3D_ENTRY_TEXTURE, id, encodeTexture(img, maxSize, fmt, alphaCapable));
-    g_timing.encodeSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count();
     ++g_timing.count;
+    if (!async) {
+        pack.add(W3D_ENTRY_TEXTURE, id, encodeTexture(img, maxSize, fmt, alphaCapable));
+        g_timing.encodeSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count();
+        return id;
+    }
+    tp.start();
+    {
+        std::unique_lock<std::mutex> l(tp.m);
+        // a bounded queue: decoded images are big (a 512x512 BLP is 1 MB of RGBA)
+        while (tp.jobs.size() >= tp.workers.size() * 4) {
+            l.unlock();
+            drainTextures();
+            l.lock();
+            if (tp.jobs.size() < tp.workers.size() * 4) break;
+            tp.cvDone.wait_for(l, std::chrono::milliseconds(20));
+        }
+        tp.pending.insert({owner, id});
+        tp.jobs.push_back({owner, id, std::move(img), maxSize, fmt, alphaCapable, gamePath});
+    }
+    tp.cvJob.notify_one();
     return id;
 }
 

@@ -3,9 +3,11 @@
 ; Positions are tile-local after posScale/posOffset; modelView already contains the
 ; camera-relative tile translation (computed on the CPU in float32).
 ;
+; Terrain vertices: r = baked light, g = weight of ground texture 2, a = weight of ground texture 1 (5.47).
+;
 ; Fog is computed here, per vertex, from the true view distance (the PICA fog LUT
 ; is indexed by depth and misbehaved on hardware). Output colour for world geometry:
-;   x = baked light, y = fog visibility (1 = clear), z = 0, w = vertex alpha
+;   x = baked light, y = fog visibility (1 = clear), z = vertex green (texture-2 weight), w = vertex alpha
 ; and the fragment stages do light * texture, then lerp(fogColour, colour, y).
 ; For the sky (fogParams.z = 0) the vertex colour is passed through unchanged.
 
@@ -23,6 +25,7 @@
 .out outpos position
 .out outtc0 texcoord0
 .out outtc1 texcoord1
+.out outtc2 texcoord2
 .out outclr color
 
 .alias inpos v0
@@ -50,6 +53,7 @@
 	add r2.xy, uvOffset.xy, r2.xy
 	mov outtc0, r2
 	mov outtc1, r2
+	mov outtc2, r2          ; ground texture 2 (unit 2 reads texcoord2)
 
 	; fog visibility = clamp(y - dist * x, 0, 1), dist = |r1.xyz|
 	dp3 r3.x, r1, r1
@@ -65,6 +69,7 @@
 	mov r4, zeros
 	mov r4.x, r5.x
 	mov r4.y, r3.x
+	mov r4.z, r5.y          ; second overlay weight (vertex green); the sky/water pass raw colour
 	mov r4.w, r5.w
 	; outclr = r5 + (r4 - r5) * fogParams.z
 	add r4, r4, -r5

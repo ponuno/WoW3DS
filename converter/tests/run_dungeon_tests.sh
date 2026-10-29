@@ -19,6 +19,13 @@ grep -qE "TERR" "$OUT/info.log" && grep -qE "PLCM" "$OUT/info.log" && grep -qE "
 "$B/w3dconv" --data "$OUT/Data" --map Crypt -o "$OUT/single.w3dp" > "$OUT/single.log"
 grep -q "is an instance map" "$OUT/single.log"
 diff <("$B/w3dconv" --info "$OUT/single.w3dp" | grep -E "^  (tile|TERR|PLCM|COLL)") <(grep -E "^  (tile|TERR|PLCM|COLL)" "$OUT/info.log")   # same tiles through --map
+# a building at (0,0,0) (the real WDTs): the same tiles around the middle of the map, nothing in the corner tile 0_0
+mkdir -p "$OUT/zero" && cp -r "$OUT/Data" "$OUT/zero/Data" && DUNGEON_ZERO=1 python3 "$T/gen_dungeon_data.py" "$OUT/zero/Data"
+"$B/w3dconv" --data "$OUT/zero/Data" --map Crypt -o "$OUT/zero.w3dp" > "$OUT/zero.log"
+"$B/w3dconv" --info "$OUT/zero.w3dp" > "$OUT/zero_info.log"
+! grep -q "tile 0_0" "$OUT/zero_info.log"
+diff <(grep -E "^  tile" "$OUT/zero_info.log") <(grep -E "^  tile" "$OUT/info.log")
+echo "zero-position building: same tiles"
 # in-game loading screens: ui.w3dp must carry one picture per map (the column of Map.dbc is found by itself)
 "$B/w3dconv" --data "$OUT/Data" --ui -o "$OUT/ui.w3dp" > "$OUT/ui.log" 2>&1 || { tail -20 "$OUT/ui.log"; exit 1; }
 grep "loading screens" "$OUT/ui.log"

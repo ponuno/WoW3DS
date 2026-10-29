@@ -5,13 +5,20 @@
 #include "conv.h"
 
 #include "pipeline/m2_loader.hpp"
+#include "rendering/m2_track_sampler.hpp"
 #include "meshoptimizer.h"
+#include "w3d_fx.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <initializer_list>
 #include <cstdio>
+#include <exception>
+#include <functional>
 #include <map>
 #include <tuple>
+#include <unordered_map>
 
 namespace w3d {
 
@@ -39,29 +46,134 @@ bool orientByNormals(const ModelSource& m, std::vector<uint32_t>& idx) {
     return true;
 }
 
-std::vector<uint8_t> buildModelBlob(ModelSource& m, int maxTris, size_t* trisOut, int* flippedOut) {
+LodStats g_lodStats;
+
+std::vector<std::vector<uint32_t>> simplifyLods(const uint32_t* idx, size_t n, const float* pos, size_t vcount, size_t posStride,
+                                                const float* uv, size_t uvStride, const unsigned char* lock, bool lockBorder) {
+    std::vector<std::vector<uint32_t>> out(W3D_MODEL_LODS);
+    ++g_lodStats.subs;
+    g_lodStats.tris0 += n / 3;
+    if (n < 3 * 24) return out;   // a few triangles: nothing to gain, one draw call either way
+    static const float kRatio[W3D_MODEL_LODS] = {0.5f, 0.25f};
+    static const float kErr[W3D_MODEL_LODS] = {0.03f, 0.08f};   // of the mesh's extent
+    static const float attrW[2] = {0.3f, 0.3f};
+    // 6.15: the error is a share of the mesh's extent - and a street lamp is tall: 8% of 4 yards is 0.3, three times the radius
+    // of its post, which the simplifier then simply removed (a lantern hanging in the air). A thin part must survive: the error is
+    // also bounded by a share of the model's smallest real dimension (a lamp: its width, a fence: its thickness).
+    float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+    for (size_t i = 0; i < n; ++i) {
+        const float* p = (const float*)((const char*)pos + (size_t)idx[i] * posStride);
+        for (int c = 0; c < 3; ++c) { lo[c] = std::min(lo[c], p[c]); hi[c] = std::max(hi[c], p[c]); }
+    }
+    float ext = 0, thin = 1e30f;
+    for (int c = 0; c < 3; ++c) {
+        const float d = hi[c] - lo[c];
+        ext = std::max(ext, d);
+        if (d > 0.1f) thin = std::min(thin, d);
+    }
+    if (thin > 1e29f) thin = ext;
+    static const float kThin[W3D_MODEL_LODS] = {0.08f, 0.15f};   // of the smallest dimension
+    std::vector<uint32_t> prev(idx, idx + n);
+    for (int k = 0; k < W3D_MODEL_LODS; ++k) {
+        const size_t target = std::max<size_t>(3, (size_t)((float)n * kRatio[k]) / 3 * 3);
+        std::vector<uint32_t> r(prev.size());
+        float err = 0;
+        const float errRel = ext > 1e-6f ? std::min(kErr[k], kThin[k] * thin / ext) : kErr[k];
+        size_t got = meshopt_simplifyWithAttributes(r.data(), prev.data(), prev.size(), pos, vcount, posStride, uv, uvStride, attrW,
+                                                    uv ? 2 : 0, lock, target, errRel, lockBorder ? meshopt_SimplifyLockBorder : 0, &err);
+        // not much lighter than the level below: not worth an extra index range
+        if (got < 3 || (float)got > 0.8f * (float)prev.size()) break;
+        {   // 6.15: a part that vanished (a lamp's post: the bounding box got shorter by more than a quarter of the model's smallest
+            // dimension) makes this level - and the lighter ones - unusable: the model keeps the level below
+            float nlo[3] = {1e30f, 1e30f, 1e30f}, nhi[3] = {-1e30f, -1e30f, -1e30f};
+            for (size_t i = 0; i < got; ++i) {
+                const float* p = (const float*)((const char*)pos + (size_t)r[i] * posStride);
+                for (int c = 0; c < 3; ++c) { nlo[c] = std::min(nlo[c], p[c]); nhi[c] = std::max(nhi[c], p[c]); }
+            }
+            const float tol = std::max(0.05f, 0.25f * thin);
+            bool lost = false;
+            for (int c = 0; c < 3; ++c) lost = lost || (nlo[c] - lo[c]) + (hi[c] - nhi[c]) > tol;
+            if (lost) { ++g_lodStats.rejected; break; }
+        }
+        r.resize(got);
+        meshopt_optimizeVertexCache(r.data(), r.data(), r.size(), vcount);
+        out[k] = r;
+        prev.swap(r);
+        (k == 0 ? g_lodStats.lod1 : g_lodStats.lod2)++;
+        (k == 0 ? g_lodStats.tris1 : g_lodStats.tris2) += got / 3;
+    }
+    return out;
+}
+
+size_t g_errorBoundModels = 0;
+
+std::vector<uint8_t> buildModelBlob(ModelSource& m, int maxTris, size_t* trisOut, int* flippedOut, float maxErrYd) {
+    // ---- 0a. sanitise the input. meshoptimizer is compiled without asserts in Release, so an index list that is not a
+    // whole number of triangles (a WMO batch with an odd index count, a group with no batch table, ...) or an index past the
+    // vertex array made it read and write beyond the buffer: heap corruption / access violation, no message
+    // (this killed a --all run inside Ahn'Qiraj). Whole triangles with valid corners only.
+    if (m.verts.empty()) return {};
+    m.dropped = 0;
+    m.outTags.clear();
+    {
+        const size_t nv = m.verts.size();
+        for (auto& s : m.subs) {
+            const size_t before = s.idx.size();
+            size_t w = 0;
+            for (size_t t = 0; t + 2 < before; t += 3) {
+                if (s.idx[t] >= nv || s.idx[t + 1] >= nv || s.idx[t + 2] >= nv) continue;
+                s.idx[w++] = s.idx[t]; s.idx[w++] = s.idx[t + 1]; s.idx[w++] = s.idx[t + 2];
+            }
+            s.idx.resize(w);
+            m.dropped += before - w;
+        }
+    }
+
     // ---- 0. consistent winding (CCW = front, by the vertex normals)
     int flipped = 0;
     for (auto& s : m.subs) flipped += orientByNormals(m, s.idx);
     if (flippedOut) *flippedOut = flipped;
 
     // ---- 1. merge submeshes sharing material
-    std::map<std::tuple<uint32_t, uint8_t, uint8_t>, ModelSource::Sub> merged;
+    std::map<std::tuple<uint32_t, uint8_t, uint8_t, uint16_t>, ModelSource::Sub> merged;
     for (auto& s : m.subs) {
-        auto& d = merged[{s.texId, s.blend, s.flags}];
-        d.texId = s.texId; d.blend = s.blend; d.flags = s.flags;
+        auto& d = merged[{s.texId, s.blend, s.flags, s.tag}];
+        d.texId = s.texId; d.blend = s.blend; d.flags = s.flags; d.tag = s.tag;
         d.idx.insert(d.idx.end(), s.idx.begin(), s.idx.end());
     }
     std::vector<ModelSource::Sub> subs;
     for (auto& [k, s] : merged) if (!s.idx.empty()) subs.push_back(std::move(s));
+    if (subs.empty()) return {};
 
     // ---- 2. simplify each submesh proportionally to hit the budget
     size_t total = 0;
     for (auto& s : subs) total += s.idx.size() / 3;
+    if (maxTris > 0 && total > (size_t)maxTris) {
+        // Weld before simplifying (stage 5.31): WMO panels each carry their own vertices whose positions differ from the
+        // neighbour's by float noise; seen as open borders, they were collapsed one panel at a time and cracks opened
+        // between panels (Stormwind's walls: holes that never closed). Positions within 2 mm become identical (seams the
+        // simplifier keeps together), and what is still a border is locked (meshopt_SimplifyLockBorder below).
+        std::unordered_map<uint64_t, uint32_t> cell;
+        auto q = [](float v) { return (uint64_t)(uint32_t)(int32_t)std::lround(v * 500.0f) & 0x1FFFFF; };
+        for (uint32_t i = 0; i < m.verts.size(); ++i) {
+            auto& v = m.verts[i];
+            const uint64_t k = q(v.p[0]) | q(v.p[1]) << 21 | q(v.p[2]) << 42;
+            auto [it, fresh] = cell.emplace(k, i);
+            if (!fresh) { const auto& w = m.verts[it->second]; v.p[0] = w.p[0]; v.p[1] = w.p[1]; v.p[2] = w.p[2]; }
+        }
+    }
     const float* pos = &m.verts[0].p[0];
     const size_t stride = sizeof(ModelSource::V);
     if (maxTris > 0 && total > (size_t)maxTris) {
         float ratio = (float)maxTris / (float)total;
+        // 6.19b: the error is relative to the mesh size, so 2% of Orgrimmar's ground group (hundreds of yards) let the drawn
+        // ground drift yards away from the exact floor in COLL: the character stood on the true floor buried to the waist.
+        float errRel = 0.02f;
+        if (maxErrYd > 0) {
+            const float scale = meshopt_simplifyScale(&m.verts[0].p[0], m.verts.size(), sizeof(ModelSource::V));
+            if (scale > 0) errRel = std::min(errRel, maxErrYd / scale);
+        }
+        size_t after = 0;
         for (auto& s : subs) {
             size_t target = std::max<size_t>(3, (size_t)(s.idx.size() * ratio) / 3 * 3);
             std::vector<uint32_t> out(s.idx.size());
@@ -71,10 +183,13 @@ std::vector<uint8_t> buildModelBlob(ModelSource& m, int maxTris, size_t* trisOut
             // within the error keeps more triangles.
             static const float attrW[2] = {0.5f, 0.5f};
             size_t n = meshopt_simplifyWithAttributes(out.data(), s.idx.data(), s.idx.size(), pos, m.verts.size(), stride,
-                                                      &m.verts[0].uv[0], stride, attrW, 2, nullptr, target, 0.02f, 0, &err);
+                                                      &m.verts[0].uv[0], stride, attrW, 2, nullptr, target, errRel,
+                                                      meshopt_SimplifyLockBorder, &err);
             out.resize(n);
             if (n >= 3) s.idx.swap(out);
+            after += s.idx.size() / 3;
         }
+        if (after > (size_t)maxTris * 11 / 10) ++g_errorBoundModels;
     }
 
     // ---- 3. single index buffer, vertex cache + fetch optimisation
@@ -91,12 +206,32 @@ std::vector<uint8_t> buildModelBlob(ModelSource& m, int maxTris, size_t* trisOut
         d.indexCount = (uint32_t)s.idx.size();
         all.insert(all.end(), s.idx.begin(), s.idx.end());
         outSubs.push_back(d);
+        m.outTags.push_back(s.tag);
     }
     std::vector<ModelSource::V> verts(m.verts.size());
     size_t vcount = meshopt_optimizeVertexFetch(verts.data(), all.data(), all.size(), m.verts.data(),
                                                 m.verts.size(), sizeof(ModelSource::V));
     verts.resize(vcount);
     if (vcount > 65535 || all.empty()) return {};
+
+    // ---- 3b. stage 6.12: lighter versions of each submesh, appended to the index buffer
+    const size_t full0 = all.size();
+    std::vector<W3dSubLod> lods(outSubs.size());
+    {
+        const size_t full = all.size();
+        for (size_t i = 0; i < outSubs.size(); ++i) {
+            const W3dSubmesh& d = outSubs[i];
+            if (d.firstIndex + d.indexCount > full) continue;
+            auto lv = simplifyLods(all.data() + d.firstIndex, d.indexCount, &verts[0].p[0], verts.size(), sizeof(ModelSource::V),
+                                   &verts[0].uv[0], sizeof(ModelSource::V), nullptr, (d.flags & W3D_SUBF_BUILDING) != 0);
+            for (int k = 0; k < W3D_MODEL_LODS; ++k) {
+                if (lv[k].empty()) continue;
+                lods[i].firstIndex[k] = (uint32_t)all.size();
+                lods[i].indexCount[k] = (uint32_t)lv[k].size();
+                all.insert(all.end(), lv[k].begin(), lv[k].end());
+            }
+        }
+    }
 
     // ---- 4. quantise
     float bmin[3] = {1e30f, 1e30f, 1e30f}, bmax[3] = {-1e30f, -1e30f, -1e30f}, r2 = 0;
@@ -122,6 +257,7 @@ std::vector<uint8_t> buildModelBlob(ModelSource& m, int maxTris, size_t* trisOut
     h.indexCount = (uint32_t)all.size();
     h.submeshCount = (uint32_t)outSubs.size();
     h.texCount = (uint32_t)m.texIds.size();
+    h.lodCount = W3D_MODEL_LODS;
 
     Blob b;
     b.put(h);
@@ -149,13 +285,16 @@ std::vector<uint8_t> buildModelBlob(ModelSource& m, int maxTris, size_t* trisOut
     size_t offI = b.data.size();
     for (uint32_t i : all) b.put((uint16_t)i);
     b.align(4);
+    size_t offL = b.putArray(lods);
+    b.align(4);
 
     auto* hp = b.at<W3dModelHeader>(0);
     hp->offTexIds = (uint32_t)offTex;
     hp->offSubmeshes = (uint32_t)offSub;
     hp->offVertices = (uint32_t)offV;
     hp->offIndices = (uint32_t)offI;
-    if (trisOut) *trisOut = all.size() / 3;
+    hp->offLods = (uint32_t)offL;
+    if (trisOut) *trisOut = full0 / 3;
     return b.data;
 }
 
@@ -163,17 +302,291 @@ static uint8_t mapBlend(uint16_t m2Blend) {
     switch (m2Blend) {
         case 0: return W3D_BLEND_OPAQUE;
         case 1: return W3D_BLEND_ALPHAKEY;
-        case 3: case 6: case 7: return W3D_BLEND_ADD;
-        default: return W3D_BLEND_ALPHA;   // 2 alpha, 4/5 modulate approximated
+        // 5.35j: 4 is "Add" (additive with the texture's alpha), the blend of nearly every spell effect and glow: it was
+        // drawn alpha-blended - black cards and cones over the scene (a level-up flash as huge black spikes)
+        case 3: case 4: case 6: case 7: return W3D_BLEND_ADD;
+        default: return W3D_BLEND_ALPHA;   // 2 alpha, 5 modulate approximated
     }
 }
 
-// Adds MODL (and its textures). Returns model id or 0.
+
+// ------------------------------------------------------------------ effects (stage 5.32)
+namespace {
+std::string lowerStr(std::string s) {
+    for (char& c : s) c = (char)std::tolower((unsigned char)c);
+    return s;
+}
+bool hasAnyOf(const std::string& s, std::initializer_list<const char*> toks) {
+    for (const char* t : toks) if (s.find(t) != std::string::npos) return true;
+    return false;
+}
+// One value for an animated track of a doodad (it stands in its bind pose): the mean of the first sequence's keys.
+float trackMean(const wowee::pipeline::M2AnimationTrack& t, float def) {
+    for (const auto& sq : t.sequences) {
+        if (sq.floatValues.empty()) continue;
+        double sum = 0;
+        for (float v : sq.floatValues) sum += v;
+        const float m = (float)(sum / sq.floatValues.size());
+        return std::isfinite(m) ? m : def;
+    }
+    return def;
+}
+// 5.35f: emission rate / life: the first sequence that says something positive (a spell's hand glow keys its rate to 0
+// in some sequences: the mean of the first one could be 0 and the emitter was dropped)
+float trackPositive(const wowee::pipeline::M2AnimationTrack& t, float def) {
+    for (const auto& sq : t.sequences) {
+        if (sq.floatValues.empty()) continue;
+        double sum = 0;
+        for (float v : sq.floatValues) sum += v;
+        const float m = (float)(sum / sq.floatValues.size());
+        if (std::isfinite(m) && m > 0.01f) return m;
+    }
+    return def;
+}
+uint32_t rgba8(const glm::vec3& c, float a) {
+    auto b = [](float v) { return (uint32_t)std::clamp((int)std::lround(v * 255.0f), 0, 255); };
+    return b(c.r) | b(c.g) << 8 | b(c.b) << 16 | b(a) << 24;
+}
+}  // namespace
+
+// Fire-like doodads (their particles are flames: dense, small, bright, never dimmed by the day light).
+static bool fireLike(const std::string& lowerPath) {
+    return hasAnyOf(lowerPath, {"torch", "fire", "flame", "candle", "brazier", "lamp", "lantern", "chandelier", "candelabra",
+                                "sconce", "forge", "stove", "oven", "fireplace", "campfire", "bonfire", "lightpost"});
+}
+
+// Appends the W3dFx section (and its footer) to a finished model blob. glows: from the glow cards taken out of the mesh.
+static void appendFx(std::vector<uint8_t>& blob, std::vector<W3dFxEmitter>& em, std::vector<W3dFxGlow>& glows,
+                     const std::vector<uint32_t>& texIds, const std::vector<uint8_t>& anim = {}) {
+    while (blob.size() % 4) blob.push_back(0);
+    W3dFxHeader h{};
+    auto put = [&](const void* p, size_t n) { const uint8_t* b = (const uint8_t*)p; blob.insert(blob.end(), b, b + n); };
+    h.texCount = (uint16_t)texIds.size();
+    h.offTexIds = (uint32_t)blob.size();
+    if (!texIds.empty()) put(texIds.data(), texIds.size() * 4);
+    h.emitterCount = (uint16_t)em.size();
+    h.offEmitters = (uint32_t)blob.size();
+    if (!em.empty()) put(em.data(), em.size() * sizeof(W3dFxEmitter));
+    h.glowCount = (uint16_t)glows.size();
+    h.offGlows = (uint32_t)blob.size();
+    if (!glows.empty()) put(glows.data(), glows.size() * sizeof(W3dFxGlow));
+    if (!anim.empty() && blob.size() / 4 < 65535 - anim.size() / 4) {   // stage 5.35 (the offset is in words, 16 bits)
+        h.animOff4 = (uint16_t)(blob.size() / 4);
+        put(anim.data(), anim.size());
+    }
+    const uint32_t off = (uint32_t)blob.size();
+    put(&h, sizeof h);
+    const uint32_t footer[2] = {off, W3D_FX_MAGIC};
+    put(footer, sizeof footer);
+}
+
+// Stage 5.32 (shared since 6.13 with the creature / game object models): the M2's particle emitters as W3dFxEmitter, their
+// textures added to the pack (fxTex: the fx texture table), bones: each emitter's M2 bone (may be null).
+size_t m2Emitters(const wowee::pipeline::M2Model& mdl, PackWriter& pack, const DataDir& data, const Options& o, ConvStats& st,
+                  bool fire, size_t maxN, std::vector<W3dFxEmitter>& emitters, std::vector<uint32_t>& fxTex,
+                  std::vector<uint32_t>* bones) {
+    if (!o.noFx) {
+        for (const auto& pe : mdl.particleEmitters) {
+            if (emitters.size() >= maxN) break;   // a doodad with more is a showpiece: the first eight
+            W3dFxEmitter e{};
+            e.pos[0] = pe.position.x; e.pos[1] = pe.position.y; e.pos[2] = pe.position.z;
+            // (bind pose: the bone matrix is the identity, the position is in model space - as WoWee emitParticles)
+            e.rate = trackPositive(pe.emissionRate, 0);
+            e.life = trackPositive(pe.lifespan, 0);
+            if (!(e.rate > 0.01f) || !(e.life > 0.01f)) { ++st.fxEmittersDropped; continue; }
+            e.rate = std::min(e.rate, 60.0f);
+            e.life = std::min(e.life, 8.0f);
+            e.speed = trackMean(pe.emissionSpeed, 0);
+            e.speedVar = std::clamp(trackMean(pe.speedVariation, 0), 0.0f, 1.0f);
+            e.spreadV = std::clamp(trackMean(pe.verticalRange, 0), 0.0f, 3.2f);
+            e.spreadH = std::clamp(trackMean(pe.horizontalRange, 0), 0.0f, 6.3f);
+            e.gravity = std::clamp(trackMean(pe.gravity, 0), -30.0f, 30.0f);
+            e.areaL = std::clamp(trackMean(pe.emissionAreaLength, 0), 0.0f, 20.0f);
+            e.areaW = std::clamp(trackMean(pe.emissionAreaWidth, 0), 0.0f, 20.0f);
+            e.drag = std::clamp(trackMean(pe.deceleration, 0), 0.0f, 10.0f);
+            const auto& sc = pe.particleScale.floatValues;
+            const auto& co = pe.particleColor.vec3Values;
+            const auto& al = pe.particleAlpha.floatValues;
+            for (int k = 0; k < 3; ++k) {
+                e.scale[k] = std::clamp(k < (int)sc.size() ? sc[k] : 1.0f, 0.0f, 10.0f);
+                e.color[k] = rgba8(k < (int)co.size() ? co[k] : glm::vec3(1.0f), k < (int)al.size() ? al[k] : 1.0f);
+            }
+            e.mid = pe.particleScale.timestamps.size() == 3 ? std::clamp(pe.particleScale.timestamps[1], 0.05f, 0.95f) : 0.5f;
+            e.blend = (pe.blendingType == 1 || pe.blendingType == 2 || pe.blendingType == 0) ? W3D_BLEND_ALPHA : W3D_BLEND_ADD;
+            e.type = pe.emitterType == 2 ? W3D_FX_SPHERE : W3D_FX_PLANE;
+            e.rows = (uint8_t)std::clamp<int>(pe.textureRows, 1, 16);
+            e.cols = (uint8_t)std::clamp<int>(pe.textureCols, 1, 16);
+            e.flags = (uint16_t)(((pe.flags & 0x40) ? W3D_FXF_RANDOM_TILE : 0) | (fire ? W3D_FXF_FIRE : 0) |
+                                 (o.fxSpell ? W3D_FXF_SPELL : 0) |
+                                 ((pe.flags & 0x1) && !fire ? W3D_FXF_LIT : 0));
+            e.tex = 0xFFFF;
+            if (pe.texture < mdl.textures.size() && mdl.textures[pe.texture].type == 0 && !mdl.textures[pe.texture].filename.empty()) {
+                // small: a particle is a few pixels to a few dozen on the 400x240 screen
+                const uint32_t tid = addTextureFromGame(pack, data, mdl.textures[pe.texture].filename, std::min(o.modelTex, 64),
+                                                        o.texFormat, true, o.verbose);
+                if (tid) {
+                    auto it = std::find(fxTex.begin(), fxTex.end(), tid);
+                    e.tex = (uint16_t)(it - fxTex.begin());
+                    if (it == fxTex.end()) fxTex.push_back(tid);
+                    ++st.texturesOk;
+                }
+            }
+            emitters.push_back(e);
+            if (bones) bones->push_back(pe.bone < mdl.bones.size() ? pe.bone : 0);
+        }
+    }
+    return emitters.size();
+}
+
+void appendFxBlock(std::vector<uint8_t>& blob, std::vector<W3dFxEmitter>& em, std::vector<W3dFxGlow>& glows,
+                   const std::vector<uint32_t>& texIds) {
+    appendFx(blob, em, glows, texIds);
+}
+bool fireLikePath(const std::string& lowerPath) { return fireLike(lowerPath); }
+
+
+
+// Stage 5.35: the loop of an effect model: the first Stand sequence (else the first), or the longest global sequence
+// when the tracks run on those. False: no loop (nothing to animate).
+static bool fxLoop(const wowee::pipeline::M2Model& m, int* seqOut, uint32_t* loopOut) {
+    if (m.sequences.empty()) return false;
+    int seq = 0;
+    for (size_t i = 0; i < m.sequences.size(); ++i)
+        if (m.sequences[i].id == 0 && (m.sequences[seq].id != 0 || m.sequences[i].variationIndex < m.sequences[seq].variationIndex))
+            seq = (int)i;
+    uint32_t loop = m.sequences[seq].duration;
+    if (loop < 100)
+        for (uint32_t g : m.globalSequenceDurations) loop = std::max(loop, g);
+    if (loop < 100) return false;
+    *seqOut = seq;
+    *loopOut = std::min<uint32_t>(loop, 8000);
+    return true;
+}
+
+// 5.35j: how a mesh part of an effect fades and is tinted: its transparency track (batch -> textureWeightLookup ->
+// textureWeightTracks) times its colour's alpha, coloured by the colour's RGB (at rest: WoWee reads only that).
+struct FxFade { int weight = -1; int color = -1; };
+static void fxFadeAt(const wowee::pipeline::M2Model& m, const FxFade& f, int seq, float tms, float rgba[4]) {
+    rgba[0] = rgba[1] = rgba[2] = rgba[3] = 1.0f;
+    if (f.weight >= 0 && (size_t)f.weight < m.textureWeightTracks.size()) {
+        using namespace wowee::rendering::m2_track;
+        const float fallback = (size_t)f.weight < m.textureWeights.size() ? m.textureWeights[(size_t)f.weight] : 1.0f;
+        rgba[3] = std::clamp(sampleFloat(m.textureWeightTracks[(size_t)f.weight], seq, tms, tms, m.globalSequenceDurations, fallback), 0.0f, 1.0f);
+    }
+    if (f.color >= 0) {
+        if ((size_t)f.color < m.colorAlphas.size()) rgba[3] *= std::clamp(m.colorAlphas[(size_t)f.color], 0.0f, 1.0f);
+        if ((size_t)f.color < m.colorRGB.size()) {
+            const glm::vec3 c = m.colorRGB[(size_t)f.color];
+            if (c.r + c.g + c.b > 0.02f)
+                for (int k = 0; k < 3; ++k) rgba[k] = std::clamp(c[k], 0.0f, 1.0f);
+        }
+    }
+}
+
+// Stage 5.35: the animation of an effect model, baked per bone (see common/w3d_fx.h, W3dFxAnim). used = the M2 bones
+// that something hangs on (index = the tag the parts got; -1 = a part that stays). subTag: per submesh of the blob,
+// bone tag | fade index << 8 (fades[0] = none). Empty: nothing moves and nothing fades.
+static std::vector<uint8_t> bakeFxAnim(const wowee::pipeline::M2Model& m, const std::vector<int>& used,
+                                       const std::vector<uint16_t>& subTag, const std::vector<uint8_t>& emBone,
+                                       const std::vector<uint8_t>& glBone, const std::vector<FxFade>& fades) {
+    if (used.size() > W3D_FXA_MAX_BONES) return {};
+    int seq = 0;
+    uint32_t loop = 0;
+    if (!fxLoop(m, &seq, &loop)) return {};
+    const uint32_t frames = std::clamp<uint32_t>((uint32_t)std::ceil(loop / 1000.0f * 16.0f), 2, W3D_FXA_MAX_FRAMES);
+    const size_t nb = m.bones.size();
+    const size_t nbones = std::max<size_t>(used.size(), 1);
+    std::vector<float> mats((size_t)frames * nbones * 12);
+    std::vector<uint32_t> tints((size_t)frames * subTag.size(), 0xFFFFFFFFu);
+    bool moves = false, tinted = false;
+    for (uint32_t f = 0; f < frames; ++f) {
+        const float tms = loop * (float)f / (float)frames;
+        std::vector<glm::mat4> world(nb);
+        std::vector<char> done(nb, 0), busy(nb, 0);
+        std::function<const glm::mat4&(size_t)> get = [&](size_t b) -> const glm::mat4& {
+            if (done[b]) return world[b];
+            const auto& sb = m.bones[b];
+            using namespace wowee::rendering::m2_track;
+            const glm::vec3 tr = sampleVec3(sb.translation, seq, tms, tms, m.globalSequenceDurations, glm::vec3(0.0f));
+            const glm::quat rq = sampleQuat(sb.rotation, seq, tms, tms, m.globalSequenceDurations);
+            const glm::vec3 sc = sampleVec3(sb.scale, seq, tms, tms, m.globalSequenceDurations, glm::vec3(1.0f));
+            glm::mat4 local = glm::translate(glm::mat4(1.0f), sb.pivot) * glm::translate(glm::mat4(1.0f), tr) *
+                              glm::mat4_cast(rq) * glm::scale(glm::mat4(1.0f), sc) * glm::translate(glm::mat4(1.0f), -sb.pivot);
+            busy[b] = 1;
+            if (sb.parentBone >= 0 && (size_t)sb.parentBone < nb && !busy[(size_t)sb.parentBone])
+                local = get((size_t)sb.parentBone) * local;
+            busy[b] = 0;
+            done[b] = 1;
+            return world[b] = local;
+        };
+        for (size_t u = 0; u < nbones; ++u) {
+            glm::mat4 M(1.0f);
+            if (u < used.size() && used[u] >= 0 && (size_t)used[u] < nb) M = get((size_t)used[u]);
+            float* o = &mats[((size_t)f * nbones + u) * 12];
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 4; ++c) {
+                    o[r * 4 + c] = M[c][r];
+                    const float id = r == c ? 1.0f : 0.0f;
+                    if (std::fabs(M[c][r] - id) > 1e-3f) moves = true;
+                }
+        }
+        for (size_t k = 0; k < subTag.size(); ++k) {   // 5.35j: the fade / tint of each part
+            const size_t fi = subTag[k] >> 8;
+            if (!fi || fi >= fades.size()) continue;
+            float c[4];
+            fxFadeAt(m, fades[fi], seq, tms, c);
+            uint32_t v = 0;
+            for (int q = 0; q < 4; ++q) v |= (uint32_t)std::lround(c[q] * 255.0f) << (8 * q);
+            tints[(size_t)f * subTag.size() + k] = v;
+            if (v != 0xFFFFFFFFu) tinted = true;
+        }
+    }
+    if (!moves && !tinted) return {};
+    std::vector<uint8_t> subBone(subTag.size());
+    for (size_t k = 0; k < subTag.size(); ++k) subBone[k] = (uint8_t)std::min<size_t>(subTag[k] & 0xFF, nbones - 1);
+    std::vector<uint8_t> out;
+    auto put = [&](const void* p, size_t n) { const uint8_t* b = (const uint8_t*)p; out.insert(out.end(), b, b + n); };
+    W3dFxAnim a{};
+    a.magic = W3D_FXA_MAGIC;
+    a.boneCount = (uint16_t)nbones;
+    a.frames = (uint16_t)frames;
+    a.durationMs = loop;
+    a.subCount = (uint16_t)subBone.size();
+    a.emitterCount = (uint16_t)emBone.size();
+    a.glowCount = (uint16_t)glBone.size();
+    a.flags = tinted ? W3D_FXA_TINT : 0;
+    put(&a, sizeof a);
+    const std::vector<uint8_t>* lists[3] = {&subBone, &emBone, &glBone};
+    for (const std::vector<uint8_t>* v : lists) {
+        if (!v->empty()) put(v->data(), v->size());
+        while (out.size() % 4) out.push_back(0);
+    }
+    put(mats.data(), mats.size() * 4);
+    if (tinted) put(tints.data(), tints.size() * 4);
+    return out;
+}
+
+static uint32_t addModelFromGameImpl(PackWriter& pack, const DataDir& data, const std::string& m2PathIn, const Options& o,
+                                     ConvStats& st);
+
+// Adds MODL (and its textures). Returns model id or 0. A model that throws (out of memory, broken tables) is skipped.
 uint32_t addModelFromGame(PackWriter& pack, const DataDir& data, const std::string& m2PathIn,
                           const Options& o, ConvStats& st) {
+    try {
+        return addModelFromGameImpl(pack, data, m2PathIn, o, st);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "  model FAILED, skipped: %s (%s)\n", m2PathIn.c_str(), e.what());
+        ++st.modelsFailed;
+        return 0;
+    }
+}
+
+static uint32_t addModelFromGameImpl(PackWriter& pack, const DataDir& data, const std::string& m2PathIn,
+                                     const Options& o, ConvStats& st) {
     std::string m2Path = wowee::pipeline::modelPathToM2(m2PathIn);
-    uint32_t id = w3d_fnv1a(DataDir::normalize(m2Path).c_str());
+    uint32_t id = pack.keyId(W3D_ENTRY_MODEL, DataDir::normalize(m2Path));
     if (pack.has(W3D_ENTRY_MODEL, id)) return id;
+    trace("model %s", m2Path.c_str());
 
     progress(false, "tile %d_%d: models %zu, buildings %zu, textures %zu", o.tileX, o.tileY, st.modelsOk, st.wmoOk,
              st.texturesOk);
@@ -184,16 +597,33 @@ uint32_t addModelFromGame(PackWriter& pack, const DataDir& data, const std::stri
         return 0;
     }
     wowee::pipeline::M2Model mdl = wowee::pipeline::M2Loader::load(bytes);
-    if (mdl.vertices.empty()) {
+    // 5.35f: most spell effects are particles only - no vertex at all (Fire_Precast_Hand, MoltenBlast_Impact_Chest,
+    // LesserHeal_Base ...): they were refused as broken models, so Fireball and Heal showed nothing. With effects on, such a
+    // model becomes one degenerate triangle carrying its emitters.
+    const bool particlesOnly = !o.noFx && mdl.vertices.empty() && !mdl.particleEmitters.empty();
+    // 6.14: an invisible wall / floor (a model with a collision mesh and nothing to draw) is still solid in the game: it
+    // gets a one-triangle stand-in so that its placements exist and carry the collision.
+    const bool collWanted = !o.noFloors && !o.noDoodadColl;
+    const bool hasCollMesh = collWanted && !mdl.collisionIndices.empty() && !mdl.collisionVertices.empty();
+    if (mdl.vertices.empty() && !particlesOnly && !hasCollMesh) {
         ++st.modelsFailed;
         return 0;
     }
-    if (mdl.batches.empty() || mdl.indices.empty()) {
+    if (!particlesOnly && !mdl.vertices.empty() && (mdl.batches.empty() || mdl.indices.empty())) {
         // Post-vanilla layout keeps LOD 0 in an external .skin.
         std::vector<uint8_t> skin;
         if (data.read(wowee::pipeline::skinPathForM2(m2Path), skin)) wowee::pipeline::M2Loader::loadSkin(skin, mdl);
     }
-    if (!mdl.isValid() || mdl.batches.empty()) {
+    const bool collisionOnly = !particlesOnly && hasCollMesh && (mdl.vertices.empty() || mdl.batches.empty() || mdl.indices.empty());
+    if (particlesOnly || collisionOnly) {
+        mdl.vertices.resize(1);
+        mdl.vertices[0] = {};
+        mdl.vertices[0].boneWeights[0] = 255;
+        mdl.vertices[0].normal = glm::vec3(0, 0, 1);
+        mdl.batches.clear();
+        mdl.indices.clear();
+        if (collisionOnly) ++st.m2CollOnly; else ++st.fxParticleOnly;
+    } else if (!mdl.isValid() || mdl.batches.empty()) {
         if (o.verbose) std::fprintf(stderr, "  model invalid: %s\n", m2Path.c_str());
         ++st.modelsFailed;
         return 0;
@@ -210,9 +640,103 @@ uint32_t addModelFromGame(PackWriter& pack, const DataDir& data, const std::stri
     }
 
     std::map<uint32_t, uint32_t> texSlot;  // TEX entry id -> slot
+    const std::string lowerPath = lowerStr(m2Path);
+    const bool fire = !o.fxSpell && fireLike(lowerPath);   // "Spells\\Fireball..." is not a torch
+    std::vector<W3dFxGlow> glows;
+    // stage 5.35: effect models animate their bones; parts, glows and emitters ride the bone they mostly belong to
+    bool animOk = o.fxSpell && !o.noFx && !mdl.bones.empty() && !mdl.sequences.empty();
+    std::vector<int> animBones;            // M2 bones something hangs on; the tag of a part is its index here
+    std::vector<uint8_t> glowBone, emitterBone;
+    auto tagFor = [&](int bone) -> uint8_t {
+        for (size_t i = 0; i < animBones.size(); ++i) if (animBones[i] == bone) return (uint8_t)i;
+        if (animBones.size() >= W3D_FXA_MAX_BONES) { animOk = false; return 0; }
+        animBones.push_back(bone);
+        return (uint8_t)(animBones.size() - 1);
+    };
+    auto dominantBone = [&](const wowee::pipeline::M2Batch& b) -> int {
+        std::map<int, float> w;
+        for (uint32_t k = b.indexStart; k < b.indexStart + b.indexCount && k < mdl.indices.size(); ++k) {
+            const uint16_t vi = mdl.indices[k];
+            if (vi >= mdl.vertices.size()) continue;
+            const auto& v = mdl.vertices[vi];
+            for (int j = 0; j < 4; ++j)
+                if (v.boneWeights[j]) w[v.boneIndices[j]] += v.boneWeights[j];
+        }
+        int best = 0;
+        float bw = -1, sum = 0;
+        for (auto& [bone, ww] : w) { sum += ww; if (ww > bw) { bw = ww; best = bone; } }
+        // 5.35j: a part spread over several bones (a ray from a still root to a growing tip) cannot ride one of them
+        // rigidly - it was stretched across the scene; it stays still instead
+        if (sum > 0 && bw < 0.7f * sum) return -1;
+        return best < (int)mdl.bones.size() ? best : 0;
+    };
+    // 5.35j: fades of the parts (index 0 = none), and whether a part is ever visible in the loop
+    std::vector<FxFade> fades(1);
+    int fxSeq = 0;
+    uint32_t fxLoopMs = 0;
+    const bool haveLoop = o.fxSpell && fxLoop(mdl, &fxSeq, &fxLoopMs);
+    auto fadeFor = [&](const wowee::pipeline::M2Batch& b, bool* invisible) -> uint8_t {
+        *invisible = false;
+        if (!o.fxSpell) return 0;
+        FxFade f;
+        if (b.transparencyIndex < mdl.textureWeightLookup.size()) f.weight = mdl.textureWeightLookup[b.transparencyIndex];
+        if (b.colorIndex < mdl.colorAlphas.size()) f.color = b.colorIndex;
+        if (f.weight < 0 && f.color < 0) return 0;
+        float peak = 0;
+        for (int k = 0; k <= 16; ++k) {
+            float c[4];
+            fxFadeAt(mdl, f, fxSeq, haveLoop ? fxLoopMs * k / 16.0f : 0.0f, c);
+            peak = std::max(peak, c[3]);
+        }
+        if (peak < 0.02f) { *invisible = true; return 0; }
+        for (size_t i = 1; i < fades.size(); ++i)
+            if (fades[i].weight == f.weight && fades[i].color == f.color) return (uint8_t)i;
+        if (fades.size() >= 255) return 0;
+        fades.push_back(f);
+        return (uint8_t)(fades.size() - 1);
+    };
     for (const auto& b : mdl.batches) {
         if (b.submeshLevel != 0) continue;
         if (b.indexStart + b.indexCount > mdl.indices.size() || b.indexCount < 3) continue;
+        if (!o.noFx && glows.size() < 16) {   // a glow card: drawn by the client as a camera-facing glow instead
+            uint16_t bm = b.materialIndex < mdl.materials.size() ? mdl.materials[b.materialIndex].blendMode : 0;
+            std::string tn;
+            if (b.textureIndex < mdl.textureLookup.size() && mdl.textureLookup[b.textureIndex] < mdl.textures.size())
+                tn = lowerStr(mdl.textures[mdl.textureLookup[b.textureIndex]].filename);
+            // additive in either reading of the M2 blend table (3 add, 4 add-with-alpha / modulate, 6 blend-add)
+            const bool additive = bm == 3 || bm == 4 || bm == 6 || mapBlend(bm) == W3D_BLEND_ADD;
+            if (additive && b.indexCount <= 36 && hasAnyOf(tn, {"glow", "halo", "flare", "lensflare", "lightbeam", "t_vfx"})) {
+                glm::vec3 lo(1e30f), hi(-1e30f);
+                for (uint32_t k = b.indexStart; k < b.indexStart + b.indexCount; ++k) {
+                    const uint16_t vi = mdl.indices[k];
+                    if (vi >= mdl.vertices.size()) continue;
+                    lo = glm::min(lo, mdl.vertices[vi].position);
+                    hi = glm::max(hi, mdl.vertices[vi].position);
+                }
+                if (lo.x <= hi.x) {
+                    const glm::vec3 e = hi - lo;
+                    W3dFxGlow g{};
+                    const glm::vec3 c = 0.5f * (lo + hi);
+                    g.pos[0] = c.x; g.pos[1] = c.y; g.pos[2] = c.z;
+                    g.size = std::clamp(0.5f * std::max({e.x, e.y, e.z}), 0.15f, 4.0f);
+                    // the batch's colour track (Orgrimmar's bonfire glow is authored white and coloured there, see WoWee
+                    // m2_loader.hpp colorRGB), else a tint by the texture's name like WoWee's classifyBatchTexture
+                    glm::vec3 col(1.0f, 0.82f, 0.46f);
+                    float a = 0.9f;
+                    if (hasAnyOf(tn, {"blue", "arcane", "nightelf"})) col = glm::vec3(0.48f, 0.72f, 1.0f);
+                    else if (hasAnyOf(tn, {"red", "ruby", "scarlet"})) col = glm::vec3(1.0f, 0.28f, 0.22f);
+                    if (b.colorIndex < mdl.colorRGB.size()) {
+                        const glm::vec3 cr = mdl.colorRGB[b.colorIndex];
+                        if (cr.r + cr.g + cr.b > 0.05f && !(cr.r > 0.99f && cr.g > 0.99f && cr.b > 0.99f)) col = cr;
+                        if (b.colorIndex < mdl.colorAlphas.size()) a = std::clamp(mdl.colorAlphas[b.colorIndex], 0.2f, 1.0f);
+                    }
+                    g.color = rgba8(col, a);
+                    glows.push_back(g);
+                    glowBone.push_back(animOk ? tagFor(dominantBone(b)) : 0);
+                    continue;   // not in the mesh: a flat card seen from the side was a bright line
+                }
+            }
+        }
         ModelSource::Sub s;
         s.texId = UINT32_MAX;
         uint16_t blendMode = 0, mflags = 0;
@@ -239,15 +763,58 @@ uint32_t addModelFromGame(PackWriter& pack, const DataDir& data, const std::stri
             // type != 0 = replaceable (creature skin, hair...) -> untextured in the prototype
         }
         s.idx.assign(mdl.indices.begin() + b.indexStart, mdl.indices.begin() + b.indexStart + b.indexCount);
+        if (animOk) s.tag = tagFor(dominantBone(b));
+        {
+            bool invisible = false;
+            const uint8_t fi = fadeFor(b, &invisible);
+            if (invisible) continue;   // never seen in its loop (a part faded in by another animation): not drawn
+            s.tag = (uint16_t)(s.tag | fi << 8);
+        }
+        src.subs.push_back(std::move(s));
+    }
+    if (src.subs.empty() && (!glows.empty() || particlesOnly || collisionOnly)) {   // nothing but glow cards / particles: one empty triangle carries them
+        ModelSource::Sub s;
+        s.texId = UINT32_MAX;
+        s.blend = W3D_BLEND_ADD;
+        s.flags = 0;
+        s.idx = {0, 0, 0};
         src.subs.push_back(std::move(s));
     }
     if (src.subs.empty()) { ++st.modelsFailed; return 0; }
 
     size_t tris = 0;
     int flipped = 0;
-    auto blob = buildModelBlob(src, o.maxModelTris, &tris, &flipped);
+    auto blob = buildModelBlob(src, o.maxModelTris, &tris, &flipped, o.drawMaxError);
     st.m2SubsFlipped += flipped;
     if (blob.empty()) { ++st.modelsFailed; return 0; }
+    // ---- particle emitters (stage 5.32)
+    std::vector<W3dFxEmitter> emitters;
+    std::vector<uint32_t> fxTex;
+    {
+        std::vector<uint32_t> eb;
+        m2Emitters(mdl, pack, data, o, st, fire, o.fxSpell ? 12u : 8u, emitters, fxTex, &eb);
+        for (uint32_t b : eb) emitterBone.push_back(animOk ? tagFor(b) : 0);
+    }
+    std::vector<uint8_t> anim;
+    if (o.fxSpell && !o.noFx && (animOk || fades.size() > 1) && (!emitters.empty() || !glows.empty() || !src.outTags.empty())) {
+        if (!animOk) {   // too many bones to animate: nothing moves, the fades still do
+            animBones.clear();
+            for (auto& t : src.outTags) t &= 0xFF00;
+            std::fill(emitterBone.begin(), emitterBone.end(), 0);
+            std::fill(glowBone.begin(), glowBone.end(), 0);
+        }
+        anim = bakeFxAnim(mdl, animBones, src.outTags, emitterBone, glowBone, fades);
+        if (!anim.empty()) ++st.fxAnimated;
+    }
+    if (!emitters.empty() || !glows.empty() || !anim.empty()) {
+        appendFx(blob, emitters, glows, fxTex, anim);
+        ++st.fxModels;
+        st.fxEmitters += emitters.size();
+        st.fxGlows += glows.size();
+        if (o.verbose)
+            std::printf("    fx %s: %zu emitters, %zu glows%s%s\n", m2Path.c_str(), emitters.size(), glows.size(), fire ? " (fire)" : "",
+                        anim.empty() ? "" : " (animated)");
+    }
     pack.add(W3D_ENTRY_MODEL, id, std::move(blob));
     // Bounding (collision) triangles for walls/floors of every placement of this model.
     if (!o.noFloors && !o.noDoodadColl && !mdl.collisionIndices.empty() && !mdl.collisionVertices.empty()) {
@@ -264,9 +831,16 @@ uint32_t addModelFromGame(PackWriter& pack, const DataDir& data, const std::stri
         if (o.doodadCollTris > 0 && srcTris > (size_t)o.doodadCollTris) {
             std::vector<uint32_t> out(ci.size());
             float err = 0;
+            // 6.14: the shape error is bounded in yards (a bridge or a platform must not sag by 2% of its length): the budget
+            // is met only as far as 0.15 yd allows; a model that needs more than 4x the budget for that falls back to the
+            // old relative error (the heap is the limit).
             size_t n = meshopt_simplify(out.data(), ci.data(), ci.size(), &mdl.collisionVertices[0].x,
                                         mdl.collisionVertices.size(), sizeof(mdl.collisionVertices[0]),
-                                        (size_t)o.doodadCollTris * 3, 0.02f, 0, &err);
+                                        (size_t)o.doodadCollTris * 3, 0.15f, meshopt_SimplifyErrorAbsolute, &err);
+            if (n / 3 > (size_t)o.doodadCollTris * 4)
+                n = meshopt_simplify(out.data(), ci.data(), ci.size(), &mdl.collisionVertices[0].x,
+                                     mdl.collisionVertices.size(), sizeof(mdl.collisionVertices[0]),
+                                     (size_t)o.doodadCollTris * 3, 0.02f, 0, &err);
             if (n >= 3) {
                 out.resize(n);
                 ci.swap(out);
@@ -297,7 +871,7 @@ uint32_t addItemModel(PackWriter& pack, const DataDir& data, const std::string& 
     using wowee::pipeline::M2Model;
     std::string m2Path = wowee::pipeline::modelPathToM2(m2PathIn);
     const std::string key = DataDir::normalize(m2Path) + "|" + DataDir::normalize(texPath);
-    uint32_t id = w3d_fnv1a(key.c_str());
+    uint32_t id = pack.keyId(W3D_ENTRY_MODEL, key);
     if (pack.has(W3D_ENTRY_MODEL, id)) return id;
     std::vector<uint8_t> bytes;
     if (!data.read(m2Path, bytes)) {

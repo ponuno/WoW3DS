@@ -14,6 +14,7 @@
 // and the CPU adds a camera-relative translation, because PICA200 floats are
 // 24-bit (16-bit mantissa) and absolute world coords (~17000 yd) would jitter.
 #pragma once
+#include <stddef.h>
 #include <stdint.h>
 
 #define W3D_FOURCC(a, b, c, d) \
@@ -31,12 +32,40 @@ enum W3dEntryType {
     W3D_ENTRY_PLACEMENT = W3D_FOURCC('P', 'L', 'C', 'M'),
     W3D_ENTRY_WATER     = W3D_FOURCC('W', 'A', 'T', 'R'),
     W3D_ENTRY_COLLISION = W3D_FOURCC('C', 'O', 'L', 'L'),   // optional (stage 5.0b): walkable building floors
+    W3D_ENTRY_GROUND    = W3D_FOURCC('G', 'R', 'N', 'D'),   // optional (stage 6.18a): the ADT's 145 heights + holes per chunk (w3d_ground.h)
     W3D_ENTRY_CREATURE  = W3D_FOURCC('C', 'M', 'D', 'L'),   // stage 5.3: skinned, animated model (id = path hash)
     W3D_ENTRY_DISPLAY   = W3D_FOURCC('C', 'D', 'S', 'P'),   // stage 5.3: creature display (id = display id)
     W3D_ENTRY_CHARACTER = W3D_FOURCC('C', 'H', 'R', 'S'),   // stage 5.5: player race/sex (id = w3d_char_id)
     W3D_ENTRY_CHARIMG   = W3D_FOURCC('C', 'I', 'M', 'G'),   // stage 5.5: body texture layer (id = path hash)
     W3D_ENTRY_ITEM      = W3D_FOURCC('I', 'T', 'E', 'M'),   // stage 5.19: worn item look (id = ItemDisplayInfo id)
+    W3D_ENTRY_LIQUID    = W3D_FOURCC('L', 'I', 'Q', 'D'),   // stage 5.26: where the liquids of a tile are (swimming, id = tile)
+    W3D_ENTRY_PACKINFO  = W3D_FOURCC('P', 'I', 'N', 'F'),   // stage 5.27: what this file is in a set of packs (id 0)
+    W3D_ENTRY_GLUE      = W3D_FOURCC('G', 'L', 'U', 'E'),   // stage 5.29: a login / character screen scene (W3dGlueScene)
+    W3D_ENTRY_SPELLFX   = W3D_FOURCC('S', 'V', 'F', 'X'),   // stage 5.33: spell visuals -> effect models (w3d_fx.h, id 0)
 };
+
+// ---------------------------------------------------------------- pack sets (stage 5.27)
+// One conversion of everything (w3dconv --all) writes a shared asset pool and a small pack per map:
+//   common.w3dp, common1.w3dp, ...  every entry that is not a tile (textures, models, buildings, creatures, players,
+//                                   items); several parts because FAT32 holds no file of 4 GB or more
+//   map<ID>.w3dp                    the map's tiles only: TERR, PLCM, WATR, LIQD, COLL
+// Each file carries a PINF entry; the client opening a map pack opens the pool parts next to it and checks that every
+// file comes from the same conversion (buildId). A pack without PINF (older converters) stands alone.
+enum W3dPackKind { W3D_PACK_STANDALONE = 0, W3D_PACK_POOL = 1, W3D_PACK_MAP = 2 };
+typedef struct {
+    uint32_t buildId;             // the same in every file of one conversion
+    uint16_t kind;                // W3dPackKind
+    uint16_t part;                // pool: this part's number (0 = common.w3dp, k = common<k>.w3dp)
+    uint16_t partCount;           // pool: parts in the set (a map pack: 0, the pool says)
+    uint16_t pad;
+    uint32_t mapId;               // map: Map.dbc id
+    uint32_t reserved[3];
+} W3dPackInfo;                    // 28 bytes
+// Entry types that belong to a map (by tile id); everything else goes to the pool.
+static inline int w3d_is_tile_entry(uint32_t type) {
+    return type == W3D_ENTRY_TERRAIN || type == W3D_ENTRY_PLACEMENT || type == W3D_ENTRY_WATER || type == W3D_ENTRY_LIQUID ||
+           type == W3D_ENTRY_COLLISION || type == W3D_ENTRY_GROUND;
+}
 
 typedef struct {
     uint32_t magic;        // W3DP_MAGIC
@@ -80,7 +109,7 @@ typedef struct {
 // and drawn with few texture switches.
 typedef struct {
     int16_t x, y, z, w;   // w unused (keeps 8-byte alignment)
-    uint8_t r, g, b, a;   // rgb = baked lighting, a = layer-1 blend weight
+    uint8_t r, g, b, a;   // r = baked lighting, g = tex2 weight (5.47), a = tex1 blend weight
     int16_t u, v;         // tiling UV * W3D_TERRAIN_UV_SCALE
 } W3dTerrainVertex;       // 16 bytes
 #define W3D_TERRAIN_UV_SCALE (1.0f / 256.0f)
@@ -108,7 +137,15 @@ typedef struct {
     uint32_t offBatches;          // W3dTerrainBatch[batchCount]
     uint32_t offVertices;         // W3dTerrainVertex[vertexCount]
     uint32_t offIndices;          // uint16_t[indexCount] (triangle list)
+    // 5.47: a third ground texture per batch (base + two overlays, as WoW splats up to four layers). The vertex's
+    // green channel is the second overlay's weight (a = the first one's). Older packs end the header at offIndices:
+    // there offTexIds < sizeof(W3dTerrainHeader), and w3d_terrain_tex2() answers "none".
+    uint32_t offTex2;             // uint16_t[batchCount]: index into the texture table; 0 = no third layer
 } W3dTerrainHeader;
+
+static inline const uint16_t* w3d_terrain_tex2(const W3dTerrainHeader* h, const uint8_t* base) {
+    return (h->offTexIds >= sizeof(W3dTerrainHeader) && h->offTex2) ? (const uint16_t*)(base + h->offTex2) : 0;
+}
 
 // ---------------------------------------------------------------- models
 typedef struct {
@@ -141,10 +178,43 @@ typedef struct {
     uint32_t vertexCount, indexCount, submeshCount, texCount;
     uint32_t offTexIds, offSubmeshes, offVertices, offIndices;
     float    uvScale;             // vertex u/v * uvScale (long WMO streets tile far past +-8); absent in older packs
+    // stage 6.12: lighter versions of every submesh (W3dSubLod[submeshCount] at offLods, indices into the same vertices,
+    // after the full ones in the index buffer); absent in older packs
+    uint32_t lodCount;            // W3D_MODEL_LODS, or 0
+    uint32_t offLods;
 } W3dModelHeader;
-// Older blobs end their header 4 bytes earlier (the texture ids start at offTexIds < sizeof the header).
+
+// Stage 6.12: level k (1..W3D_MODEL_LODS) of a submesh: firstIndex[k-1] / indexCount[k-1]; a count of 0 = no lighter version
+// at that level (use the level below). Same layout for models (W3dSubmesh) and creatures (W3dSkinSubmesh).
+#define W3D_MODEL_LODS 2
+typedef struct {
+    uint32_t firstIndex[W3D_MODEL_LODS];
+    uint32_t indexCount[W3D_MODEL_LODS];
+} W3dSubLod;                      // 16 bytes
+
+// Older blobs end their header earlier (the texture ids start right after the header the converter knew): 4 bytes without
+// uvScale, 8 more without the LOD table.
+#define W3D_MODEL_HDR_UV_END  ((uint32_t)(offsetof(W3dModelHeader, uvScale) + sizeof(float)))
+#define W3D_MODEL_HDR_LOD_END ((uint32_t)sizeof(W3dModelHeader))
 static inline float w3d_model_uv_scale(const W3dModelHeader* h) {
-    return (h->offTexIds >= sizeof(W3dModelHeader) && h->uvScale > 0) ? h->uvScale : W3D_MODEL_UV_SCALE;
+    return (h->offTexIds >= W3D_MODEL_HDR_UV_END && h->uvScale > 0) ? h->uvScale : W3D_MODEL_UV_SCALE;
+}
+// The LOD table, checked against the blob (null: none / broken).
+static inline const W3dSubLod* w3d_lods_check(const uint8_t* blob, uint32_t size, uint32_t lodCount, uint32_t offLods,
+                                               uint32_t subCount, uint32_t indexCount) {
+    if (lodCount != W3D_MODEL_LODS || !offLods || (offLods & 3) || !subCount) return 0;
+    if ((uint64_t)offLods + (uint64_t)subCount * sizeof(W3dSubLod) > size) return 0;
+    const W3dSubLod* l = (const W3dSubLod*)(blob + offLods);
+    for (uint32_t i = 0; i < subCount; ++i)
+        for (int k = 0; k < W3D_MODEL_LODS; ++k)
+            if ((uint64_t)l[i].firstIndex[k] + l[i].indexCount[k] > indexCount || l[i].indexCount[k] % 3) return 0;
+    return l;
+}
+static inline const W3dSubLod* w3d_model_lods(const uint8_t* blob, uint32_t size) {
+    const W3dModelHeader* h = (const W3dModelHeader*)blob;
+    if (size < sizeof(W3dModelHeader) || h->offTexIds < W3D_MODEL_HDR_LOD_END || h->offSubmeshes < W3D_MODEL_HDR_LOD_END)
+        return 0;
+    return w3d_lods_check(blob, size, h->lodCount, h->offLods, h->submeshCount, h->indexCount);
 }
 
 // ---------------------------------------------------------------- placements
@@ -162,14 +232,19 @@ typedef struct {
 } W3dPlacementHeader;
 
 // ---------------------------------------------------------------- water
-// Flat-shaded liquid surfaces of one tile (from MCLQ). Vertices use the
-// terrain vertex layout: rgb = 255, a = opacity, uv = world-aligned tiling.
-// Same id as the tile's TERR entry.
+// Liquid surfaces of one tile: the terrain's (MCLQ) and the buildings' (WMO MLIQ) that the tile owns.
+// Vertices use the terrain vertex layout: rgb = the liquid's colour (Light.dbc river / ocean colour,
+// shallow -> deep), a = opacity (by depth), uv = world-aligned tiling. Same id as the tile's TERR entry.
+// Since stage 5.26 the textures are the game's own animated ones (XTextures\river\lake_a.N.blp, ocean_h, lava,
+// slime): the batch's frames are 'frames' consecutive entries of the texture id table starting at 'tex',
+// shown W3D_WATER_FRAME_MS each (frames == 0 in older packs: one procedural texture).
 enum W3dLiquid { W3D_LIQUID_WATER = 0, W3D_LIQUID_OCEAN = 1, W3D_LIQUID_MAGMA = 2, W3D_LIQUID_SLIME = 3 };
+#define W3D_WATER_FRAME_MS 60u        // 30 frames: the 1.8 s cycle of the original
 
 typedef struct {
-    uint16_t liquid;              // W3dLiquid
-    uint16_t tex;                 // index into the water texture id table
+    uint8_t  liquid;              // W3dLiquid
+    uint8_t  frames;              // animation frames (0 or 1 = a still texture)
+    uint16_t tex;                 // index into the water texture id table (first frame)
     uint32_t firstIndex;
     uint32_t indexCount;
     float    bmin[3], bmax[3];    // tile-local
@@ -183,6 +258,44 @@ typedef struct {
     uint32_t vertexCount, indexCount, batchCount, texCount;
     uint32_t offTexIds, offBatches, offVertices, offIndices;
 } W3dWaterHeader;
+
+// ---------------------------------------------------------------- liquid query (stage 5.26)
+// Where the liquids of one tile are and how high, for movement (swimming, water walking, falling into water) and the
+// underwater view; CPU data (heap). The tile is the 128 x 128 grid of liquid cells (4.17 yd, the MCLQ / MLIQ cell):
+//   gx = (maxX - x) / W3D_LIQ_CELL (rows, render -x), gy = (maxY - y) / W3D_LIQ_CELL (columns, render -y),
+//   chunk = (gx / 8) * 16 + gy / 8 (the ADT's MCNK order), cell = (gx % 8) * 8 + gy % 8,
+// corner heights [row 0..8][col 0..8] of a chunk, bilinear inside a cell; a chunk where two surfaces meet (a river
+// beside lava, a pool of a building over a lake) keeps four corners per cell instead (W3D_LIQ_PERCELL). Building
+// liquids are rasterised into the same grid (a cell is wet when its centre is over a wet MLIQ cell, flat at the
+// height there); a cell covered twice takes the higher surface.
+#define W3D_LIQ_CELL  (533.33333f / 128.0f)
+#define W3D_LIQ_DRY   0xFFu
+#define W3D_LIQ_KIND  0x03u       // W3dLiquid
+#define W3D_LIQ_DEEP  0x04u       // deep water: fatigue (MCLQ "dark water" 0x80)
+#define W3D_LIQ_WMO   0x08u       // from a building: no cave test against the terrain
+#define W3D_LIQ_FLAT  0xFFFFFFFFu // W3dLiquidChunk.offHeights: every corner at 'base'
+#define W3D_LIQ_PERCELL 0x80000000u   // offHeights bit: int16_t[64][4] (corners (r,k) (r,k+1) (r+1,k) (r+1,k+1)) instead of [81]
+typedef struct {
+    uint8_t  cell[64];            // W3D_LIQ_* per cell, W3D_LIQ_DRY = no liquid
+    float    base;                // corner height = base + h / 32
+    uint32_t offHeights;          // int16_t[81] (| W3D_LIQ_PERCELL: [64][4]) from the start of the blob, or W3D_LIQ_FLAT
+} W3dLiquidChunk;                 // 72 bytes
+
+typedef struct {
+    uint8_t  close[4], far_[4];   // surface colour, shallow / deep (rgb, a unused)
+    uint8_t  fog[4];              // under the surface
+    float    fogEnd;              // yards of sight under the surface
+} W3dLiquidLook;                  // 16 bytes
+
+typedef struct {
+    uint32_t tileX, tileY;
+    float    maxX, maxY;          // render-space corner of the tile where gx = gy = 0
+    uint32_t chunkCount;
+    uint32_t offChunkIndex;       // uint16_t[256]: chunk record or 0xFFFF (dry)
+    uint32_t offChunks;           // W3dLiquidChunk[chunkCount]
+    uint32_t pad;
+    W3dLiquidLook look[4];        // by W3dLiquid (Light.dbc of the tile at noon; magma / slime: fixed)
+} W3dLiquidHeader;
 
 // ---------------------------------------------------------------- collision (floors + walls)
 // Collision triangles of buildings (WMO collision faces) and doodads (M2 bounding
@@ -257,6 +370,7 @@ enum W3dAnimId {
     W3D_ANIM_KNEEL_START = 114, W3D_ANIM_KNEEL_LOOP = 115, W3D_ANIM_KNEEL_END = 116,
     W3D_ANIM_STEALTH_WALK = 119, W3D_ANIM_STEALTH_STAND = 120,
     W3D_ANIM_CHANNEL_CAST_DIRECTED = 124, W3D_ANIM_CHANNEL_CAST_OMNI = 125,
+    W3D_ANIM_SPAWN = 145, W3D_ANIM_CLOSE = 146, W3D_ANIM_CLOSED = 147, W3D_ANIM_OPEN = 148, W3D_ANIM_OPENED = 149,   // doors, chests (5.41)
 };
 
 typedef struct {
@@ -319,7 +433,14 @@ typedef struct {
     float    seat[3];             // offset from that bone's pivot, model space (bind pose)
     uint32_t attachCount;         // v5: attachment points worn items hang on (W3dAttach)
     uint32_t offAttach;
+    uint32_t lodCount, offLods;   // stage 6.12: W3dSubLod[submeshCount] (absent in older blobs: offTex < sizeof)
 } W3dCreatureHeader;
+static inline const W3dSubLod* w3d_creature_lods(const uint8_t* blob, uint32_t size) {
+    const W3dCreatureHeader* h = (const W3dCreatureHeader*)blob;
+    if (size < sizeof(W3dCreatureHeader) || h->offTex < sizeof(W3dCreatureHeader) || h->offSubmeshes < sizeof(W3dCreatureHeader))
+        return 0;
+    return w3d_lods_check(blob, size, h->lodCount, h->offLods, h->submeshCount, h->indexCount);
+}
 
 // Attachment points of a character / creature model (M2 attachments the client uses): where an item model is
 // hung. Position is in bind-pose model space; the item rides the bone: bone matrix * T(pos).
@@ -344,6 +465,24 @@ typedef struct {
     uint16_t geosets[W3D_DISPLAY_GEOSETS];
     uint16_t pad;
 } W3dDisplay;                     // 96 bytes
+
+// ---------------------------------------------------------------- glue screens (stage 5.29)
+// The 3D scenes behind the login screen and the character screens: Interface\Glues\Models\UI_*.m2 converted as one static
+// MODL, with the camera and the character's mark the artist put into the model (M2 camera 0, attachment 0). The entry id
+// says which screen: W3D_GLUE_MAINMENU, else the race id (1..8) of the character screens (Gnome and Troll share the Dwarf and
+// Orc scenes, as in the game). Coordinates are the model's own (drawn at the origin, unrotated).
+enum { W3D_GLUE_MAINMENU = 0 };
+enum { W3D_GLUE_HAS_STAND = 1, W3D_GLUE_HAS_CAMERA = 2 };
+typedef struct {
+    uint32_t modelId;             // MODL id, 0 = none
+    float    camPos[3], camTarget[3];
+    float    fov;                 // the M2 camera's diagonal field of view (radians), 0 = unknown
+    float    nearClip, farClip;
+    float    stand[3];            // where the character stands
+    uint32_t flags;               // W3D_GLUE_HAS_*
+    float    radius;              // of the scene's vertices around the origin
+    uint32_t reserved[3];
+} W3dGlueScene;                   // 76 bytes
 
 // ---------------------------------------------------------------- player characters (stage 5.5)
 // A player is drawn with its race model (CMDL) and a body texture composited on the 3DS
@@ -423,7 +562,7 @@ typedef struct {
 
 static inline int w3d_item_valid(const uint8_t* blob, uint32_t size) { (void)blob; return size >= sizeof(W3dItemDisplay); }
 
-// Entry id of a tile's TERR / PLCM / WATR / COLL entries.
+// Entry id of a tile's TERR / PLCM / WATR / COLL / LIQD entries.
 static inline uint32_t w3d_tile_id(uint32_t tileX, uint32_t tileY) { return tileX * 64u + tileY; }
 
 // ---------------------------------------------------------------- helpers

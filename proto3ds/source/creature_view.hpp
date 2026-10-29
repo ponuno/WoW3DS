@@ -45,11 +45,19 @@ struct CreatureSeen {
     CastLook castGoLook = CastLook::Spell;
     uint32_t mountDisplay = 0;   // UNIT_FIELD_MOUNTDISPLAYID: riding (the mount is drawn under the unit)
     bool flying = false;         // on a taxi flight (UNIT_FLAG_TAXI_FLIGHT): the mount flies
+    float farFade = 1.0f;        // stage 6.12: < 1 at the far edge of the distance units are drawn to (main.cpp)
     // Worn items (stage 5.19): ItemDisplayInfo id and inventory type per W3dEquipSlot (0 = empty / not known yet).
     // Players: PLAYER_VISIBLE_ITEM + the item query (hidden helmet / cloak left out); creatures: the three
     // UNIT_VIRTUAL_ITEM slots (main hand, off hand, ranged).
     uint32_t equip[W3D_EQ_SLOTS] = {};
     uint8_t equipInv[W3D_EQ_SLOTS] = {};
+    // Game objects (stage 5.41): doors, chests, levers play Open / Close when GAMEOBJECT_STATE changes, and rest in the pose of
+    // the state; objects placed at an angle (GAMEOBJECT_ROTATION with x / y) are drawn with the full rotation.
+    bool isGo = false;
+    uint8_t goState = 1;         // 0 active (open, pressed), 1 ready (closed), 2 alternative
+    uint32_t goStateMs = 0;      // when the state changed in front of us (0 = it was like that when first seen)
+    bool tilted = false;
+    float rot[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};   // model -> render rotation when tilted (row-major)
 };
 
 // Sequence for a simple state (kept for the old callers and tests): death, attack, run / walk / swim, stand.
@@ -64,6 +72,8 @@ public:
     AnimChoice update(const uint8_t* blob, const CreatureSeen& c, bool riding, uint32_t nowMs);
     float timeMs() const { return timeMs_; }
     void reset() { *this = UnitAnimator(); }
+    // A game object: the sequence for its state (Closed / Opened, or the end of Close / Open), the transition while one plays.
+    AnimChoice updateGo(const uint8_t* blob, const CreatureSeen& c, uint32_t nowMs);
 private:
     void startOneShot(const uint8_t* blob, int seq, uint8_t prio, uint32_t nowMs);
     int oneSeq_ = -1;            // one-shot playing (-1 none)
@@ -93,6 +103,11 @@ public:
     void update(const std::vector<CreatureSeen>& seen, uint32_t nowMs, std::vector<CreatureInstance>& out);
     // True if the unit was drawn as a model this frame (no marker needed).
     bool drawn(uint64_t guid) const;
+    // Stage 6.12: the unit is tracked and its display is not in the pack (the only case a marker stands in for it).
+    bool missing(uint64_t guid) const;
+    bool fadeIn = true;          // stage 6.12: a unit appears over kFadeMs (the "Fade in" setting)
+    // Bind-pose bounds of the model a unit is drawn with, already multiplied by the display scale (not the object scale).
+    bool bounds(uint64_t guid, float bmin[3], float bmax[3]) const;
     void clear();
     int tracked() const { return (int)units_.size(); }
     int ready() const { return ready_; }
@@ -111,6 +126,7 @@ private:
         uint32_t displayId = 0, mountDisplay = 0;
         uint64_t look = 0;
         bool missing = false;    // not in the pack: marker (until the display changes)
+        uint32_t shownMs = 0;    // stage 6.12: first drawn (with this display) - the fade-in starts there; 0 = not yet
         uint32_t frame = 0;
         bool drawn = false;
         UnitAnimator anim, mountAnim;

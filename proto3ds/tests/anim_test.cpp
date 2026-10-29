@@ -301,7 +301,102 @@ static void sessionSide(const char* log) {
     std::printf("  session: emote, cast at us / around, release, parry, off hand\n");
 }
 
+// Game objects (stage 5.41): doors and chests play Open / Close when their state changes, rest in the pose of the state; corpses and
+// tilted objects get their data from the update fields.
+static void gameObjects() {
+    using namespace w3n;
+    // a door with all four door animations (1000 ms each) + stand
+    std::vector<uint8_t> door = makeModel({W3D_ANIM_STAND, W3D_ANIM_CLOSE, W3D_ANIM_CLOSED, W3D_ANIM_OPEN, W3D_ANIM_OPENED});
+    {
+        Clock k{UnitAnimator(), door.data()};
+        CreatureSeen c;
+        c.isGo = true;
+        c.goState = 1;      // created closed
+        CHECK(k.id(c) == W3D_ANIM_CLOSED, "closed door rests in Closed");
+        CHECK(k.id(c, 500) == W3D_ANIM_CLOSED, "still closed");
+        c.goState = 0;
+        c.goStateMs = k.now + 10;   // it just opened
+        k.now += 20;
+        AnimChoice a = k.a.update(door.data(), c, false, k.now);
+        CHECK(idOf(door.data(), a.seq) == W3D_ANIM_OPEN && !a.loop, "opening plays Open once");
+        CHECK(k.a.timeMs() < 50, "Open starts at 0, is %.0f", k.a.timeMs());
+        a = k.a.update(door.data(), c, false, k.now + 400);
+        CHECK(idOf(door.data(), a.seq) == W3D_ANIM_OPEN && std::fabs(k.a.timeMs() - 410) < 5, "Open runs on (%.0f)", k.a.timeMs());
+        a = k.a.update(door.data(), c, false, k.now + 1200);
+        CHECK(idOf(door.data(), a.seq) == W3D_ANIM_OPENED && a.loop, "then rests in Opened");
+        // closes again
+        c.goState = 1;
+        c.goStateMs = k.now + 2000;
+        a = k.a.update(door.data(), c, false, k.now + 2100);
+        CHECK(idOf(door.data(), a.seq) == W3D_ANIM_CLOSE && !a.loop, "closing plays Close");
+        a = k.a.update(door.data(), c, false, k.now + 3300);
+        CHECK(idOf(door.data(), a.seq) == W3D_ANIM_CLOSED, "and rests closed");
+        // first seen open: no animation, straight to Opened
+        UnitAnimator fresh;
+        CreatureSeen o2;
+        o2.isGo = true; o2.goState = 0; o2.goStateMs = 0;
+        a = fresh.update(door.data(), o2, false, 5000);
+        CHECK(idOf(door.data(), a.seq) == W3D_ANIM_OPENED, "a door first seen open is open");
+    }
+    {   // a model with only Open / Close (no Opened / Closed): rests at the end of the transition, closed + never changed = Stand
+        std::vector<uint8_t> m = makeModel({W3D_ANIM_STAND, W3D_ANIM_CLOSE, W3D_ANIM_OPEN});
+        UnitAnimator an;
+        CreatureSeen c;
+        c.isGo = true; c.goState = 1;
+        AnimChoice a = an.update(m.data(), c, false, 1000);
+        CHECK(idOf(m.data(), a.seq) == W3D_ANIM_STAND, "closed, never changed: stand");
+        c.goState = 0; c.goStateMs = 0;
+        a = an.update(m.data(), c, false, 1100);
+        CHECK(idOf(m.data(), a.seq) == W3D_ANIM_OPEN && !a.loop && an.timeMs() > 1e8f, "open without Opened: end of Open");
+    }
+    {   // a static model (stand only) keeps standing in both states
+        std::vector<uint8_t> m = makeModel({W3D_ANIM_STAND});
+        UnitAnimator an;
+        CreatureSeen c;
+        c.isGo = true; c.goState = 0;
+        CHECK(idOf(m.data(), an.update(m.data(), c, false, 1000).seq) == W3D_ANIM_STAND, "static object stands");
+    }
+    {   // fields -> CreatureSeen
+        WorldObject o;
+        o.type = ObjType::GameObject;
+        o.fields.assign(32, 0);
+        o.fields[UF::GAMEOBJECT_STATE] = 0;
+        o.stateChangeMs = 777;
+        const float qx = std::sin(0.3f), qw = std::cos(0.3f);
+        std::memcpy(&o.fields[UF::GAMEOBJECT_ROTATION], &qx, 4);
+        std::memcpy(&o.fields[UF::GAMEOBJECT_ROTATION + 3], &qw, 4);
+        CreatureSeen c;
+        fillGameObjectState(o, c);
+        CHECK(c.isGo && c.goState == 0 && c.goStateMs == 777 && c.tilted, "go state and tilt");
+        CHECK(std::fabs(c.rot[8] - std::cos(0.6f)) < 1e-4f && std::fabs(c.rot[7] - std::sin(0.6f)) < 1e-4f, "tilt matrix");
+    }
+    {   // a corpse: race 2 (orc) female, skin 1, face 3, hair 4/5, facial 2; chest 1234 (invtype 5), helm 55 (invtype 1); hide helm
+        WorldObject o;
+        o.type = ObjType::Corpse;
+        o.hasPos = true;
+        o.fields.assign(64, 0);
+        o.fields[UF::CORPSE_FIELD_BYTES_1] = (2u << 8) | (1u << 16) | (1u << 24);
+        o.fields[UF::CORPSE_FIELD_BYTES_2] = 3u | (4u << 8) | (5u << 16) | (2u << 24);
+        o.fields[UF::CORPSE_FIELD_DISPLAY_ID] = 1478;
+        o.fields[(size_t)UF::CORPSE_FIELD_ITEM + (size_t)W3D_EQ_CHEST] = 1234u | (5u << 24);
+        o.fields[(size_t)UF::CORPSE_FIELD_ITEM + (size_t)W3D_EQ_HEAD] = 55u | (1u << 24);
+        o.fields[UF::CORPSE_FIELD_FLAGS] = 0x04 | 0x08;
+        CreatureSeen c;
+        CHECK(fillCorpse(o, c), "corpse accepted");
+        CHECK(c.dead && c.look != 0 && c.lookParts.race == 2 && c.lookParts.sex == 1 && c.lookParts.skin == 1 && c.lookParts.face == 3 &&
+              c.lookParts.hairStyle == 4 && c.lookParts.hairColor == 5 && c.lookParts.facialHair == 2, "corpse look");
+        CHECK(c.displayId == 1478 && c.equip[W3D_EQ_CHEST] == 1234 && c.equipInv[W3D_EQ_CHEST] == 5, "corpse gear");
+        CHECK(c.equip[W3D_EQ_HEAD] == 0, "helm hidden by the flag");
+        o.fields[UF::CORPSE_FIELD_FLAGS] = 0x01;   // bones: no model
+        CHECK(!fillCorpse(o, c), "bones are not drawn");
+        o.fields[UF::CORPSE_FIELD_FLAGS] = 0;
+        o.fields[UF::CORPSE_FIELD_BYTES_1] = 0;     // race missing
+        CHECK(!fillCorpse(o, c), "unknown race refused");
+    }
+}
+
 int main(int argc, char** argv) {
+    gameObjects();
     stateMachine();
     sessionSide(argc > 1 ? argv[1] : "/tmp/w3d_stage5/fight.w3dl");
     std::printf("ANIM: %d checks, %d failed -> %s\n", g_ok + g_fail, g_fail, g_fail ? "FAIL" : "PASS");

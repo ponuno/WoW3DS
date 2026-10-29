@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <algorithm>
+
 #include "movement.hpp"
 
 namespace {
@@ -38,33 +40,48 @@ bool PadConfig::load(const char* path) {
         else if (!strcmp(key, "invert")) invertY = v != 0;
         else if (!strcmp(key, "camspeed") && v >= 0.3f && v <= 6.0f) camSpeed = v;
         else if (!strcmp(key, "tracker")) questTracker = v != 0;
-        else if (!strcmp(key, "lang")) lang = v >= 0.5f ? 1 : 0;
+        else if (!strcmp(key, "language")) lang = v >= 0.5f ? 1 : 0;   // (6.20: the key "lang" of older files, where Russian was the default, is ignored)
         else if (!strcmp(key, "dist") && v >= 0 && v <= 3) drawDist = (int)v;
         else if (!strcmp(key, "crowd") && v >= 0 && v <= 3) crowd = (int)v;
         else if (!strcmp(key, "topmode") && v >= 0 && v <= 2) topMode = (int)v;
         else if (!strcmp(key, "doodads")) doodads = v != 0;
+        else if (!strcmp(key, "stats")) showStats = v != 0;
+        else if (!strcmp(key, "effects")) effects = v < 0 ? 0 : v > 2 ? 2 : v;
         else if (!strcmp(key, "bigtext")) bigText = v != 0;
         else if (!strcmp(key, "dimhud")) dimHud = v != 0;
         else if (!strcmp(key, "autotabs")) autoTabs = v != 0;
         else if (!strcmp(key, "music") && v >= 0 && v <= 10) musicVol = (int)v;
         else if (!strcmp(key, "sfx") && v >= 0 && v <= 10) sfxVol = (int)v;
         else if (!strcmp(key, "ambience") && v >= 0 && v <= 10) ambVol = (int)v;
+        else if (!strcmp(key, "ground")) groundCast = v >= 0.5f ? 1 : 0;
+        else if (!strcmp(key, "perflog")) perfLog = v != 0;
+        else if (!strcmp(key, "gpuearly")) gpuKick = v != 0;   // (6.7: a new key - 'gpukick' files start with it off)
+        else if (!strcmp(key, "vsync")) vsync = v != 0;
+        else if (!strcmp(key, "fadein")) fadeIn = v != 0;
     }
     fclose(f);
     return true;
 }
 
+std::string PadConfig::text() const {
+    char b[640];
+    int n = snprintf(b, sizeof b, "scheme %d\ndead %.2f\nrun %.2f\nback %.2f\nface %d\ntoggle %d\ninvert %d\ncamspeed %.2f\ntracker %d\n",
+            scheme == PadScheme::Classic ? 1 : 0, stickDead, runThreshold, backThreshold, faceMovement ? 1 : 0,
+            toggleModifiers ? 1 : 0, invertY ? 1 : 0, camSpeed, questTracker ? 1 : 0);
+    n += snprintf(b + n, sizeof b - (size_t)n, "language %d\ndist %d\ncrowd %d\ndoodads %d\nbigtext %d\ndimhud %d\nautotabs %d\n", lang, drawDist, crowd, doodads ? 1 : 0,
+            bigText ? 1 : 0, dimHud ? 1 : 0, autoTabs ? 1 : 0);
+    n += snprintf(b + n, sizeof b - (size_t)n, "music %d\nsfx %d\nambience %d\ntopmode %d\neffects %d\nstats %d\nground %d\nperflog %d\ngpuearly %d\nvsync %d\nfadein %d\n", musicVol, sfxVol,
+            ambVol, topMode, effects, showStats ? 1 : 0, groundCast, perfLog ? 1 : 0, gpuKick ? 1 : 0, vsync ? 1 : 0, fadeIn ? 1 : 0);
+    return std::string(b, (size_t)std::max(0, std::min(n, (int)sizeof b - 1)));
+}
+
 bool PadConfig::save(const char* path) const {
     FILE* f = fopen(path, "w");
     if (!f) return false;
-    fprintf(f, "scheme %d\ndead %.2f\nrun %.2f\nback %.2f\nface %d\ntoggle %d\ninvert %d\ncamspeed %.2f\ntracker %d\n",
-            scheme == PadScheme::Classic ? 1 : 0, stickDead, runThreshold, backThreshold, faceMovement ? 1 : 0,
-            toggleModifiers ? 1 : 0, invertY ? 1 : 0, camSpeed, questTracker ? 1 : 0);
-    fprintf(f, "lang %d\ndist %d\ncrowd %d\ndoodads %d\nbigtext %d\ndimhud %d\nautotabs %d\n", lang, drawDist, crowd, doodads ? 1 : 0,
-            bigText ? 1 : 0, dimHud ? 1 : 0, autoTabs ? 1 : 0);
-    fprintf(f, "music %d\nsfx %d\nambience %d\ntopmode %d\n", musicVol, sfxVol, ambVol, topMode);
+    const std::string t = text();
+    const bool ok = fwrite(t.data(), 1, t.size(), f) == t.size();
     fclose(f);
-    return true;
+    return ok;
 }
 
 // ------------------------------------------------------------------ schemes
@@ -76,7 +93,8 @@ void Pad::selectKeys(const PadInput& in, PadOut& o) {
         if (in.down & KEY_DLEFT) { o.tabDelta = -1; selectCombo_ = true; }
         if (in.down & KEY_DRIGHT) { o.tabDelta = 1; selectCombo_ = true; }
     }
-    o.freeCamera = (in.up & KEY_SELECT) && !selectCombo_;
+    // Stage 5.31: a tap no longer switches to the free camera (it went on by accident, the user asked for it gone).
+    o.freeCamera = false;
 }
 
 PadOut Pad::update(const PadInput& in, const PadConfig& cfg, bool inCombat, float camYaw, float dt) {
@@ -132,6 +150,7 @@ PadOut Pad::forever(const PadInput& in, const PadConfig& cfg, bool inCombat, flo
             if (pressed(kDpad[b])) o.slot = o.set * kPadButtons + b;
         if (o.set == 0) {
             o.jump = pressed(KEY_B);
+            o.ascend = (in.held & KEY_B) != 0;
             o.cancel = pressed(KEY_A);
             o.interact = pressed(KEY_Y);
             o.context = pressed(KEY_X);
@@ -180,6 +199,7 @@ PadOut Pad::classic(const PadInput& in, const PadConfig& cfg, float dt) {
     PadOut o;
     const u32 d = in.down, h = in.held;
     o.jump = d & KEY_B;
+    o.ascend = (h & KEY_B) != 0;
     o.nextTarget = d & KEY_L;
     o.toggleAttack = d & KEY_R;
     o.chat = d & KEY_Y;

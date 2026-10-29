@@ -46,6 +46,7 @@ int main(int argc, char** argv) {
     clipCheck(bank, "tab", 800, 0.25);        // IMA ADPCM
     clipCheck(bank, "coin", 1500, 0.25);      // MS ADPCM stereo
     clipCheck(bank, "levelup", 600, 0.6);     // MP3 (decoder delay / padding: a few ms)
+    clipCheck(bank, "discover", 1200, 0.3);   // stage 5.45: an area explored - found by the "*discover" search
     CHECK(bank.pick("open")->volume < 0.6f, "open: SoundEntries volume 0.5 kept");
     CHECK(bank.pick("bagsopen") == bank.pick("open") || bank.pick("bagsopen") != nullptr, "bagsopen falls back to open");
     CHECK(bank.pick("nosuchevent") == nullptr, "unknown event");
@@ -79,11 +80,15 @@ int main(int argc, char** argv) {
     CHECK(d.music().find("/music/m101_0.mp3") != std::string::npos, "night music: %s", d.music().c_str());
     d.musicEnded(5000);
     CHECK(d.music().empty(), "silence after a track");
-    d.update(mt, 87, true, 5500);
-    CHECK(d.music().empty(), "still silent before silMin");
-    d.update(mt, 87, true, 7100);
+    d.update(mt, 87, true, 7500);    // an eighth of silMin, at least 3 s (stage 5.43)
+    CHECK(d.music().empty(), "still silent before the pause ends");
+    d.update(mt, 87, true, 10100);   // pause 3..? s from 5000: over by 8000 at the latest (silMax 2000 -> 3 s)
     CHECK(!d.music().empty(), "next track after the pause");
-    d.update(mt, 1519, false, 8000);
+    CHECK(mt.glue() && mt.glue()->files.size() == 1 && mt.path(mt.glue()->files[0]).find("/music/glue_0.mp3") != std::string::npos,
+          "login screen music");
+    d.update(mt, 1519, false, 11000);   // a new area is followed after it held for 1 s
+    CHECK(d.area() == 87, "an area border is not followed at once");
+    d.update(mt, 1519, false, 12100);
     CHECK(d.ambience().empty() && !d.music().empty(), "Stormwind: own music, no ambience");
 
     // streams
@@ -140,7 +145,7 @@ int main(int argc, char** argv) {
         const double want = 2000 + k * 100, p = pitch(pcm.data(), c->samples, c->rate);
         CHECK(std::fabs(p - want) < want * 0.02, "world %d pitch %.1f want %.0f", kPitch[k], p, want);
         CHECK(std::fabs(c->volume - 0.8f) < 0.01f && c->minDist == 8 && c->cutoff == 40, "world %d volume / distances", kPitch[k]);
-        if (kPitch[k] == 320) CHECK(c->samples == 22050 * 3, "precast loop cut to 3 s (%u)", c->samples);
+        if (kPitch[k] == 320) CHECK(c->samples == 22050 * 5, "precast loop kept whole under the 12 s cap, was cut to 3 s (%u)", c->samples);
     }
     {   // 3D: facing +X, a source to the left (+Y) is louder on the left; beyond the cutoff silent
         float l, r;

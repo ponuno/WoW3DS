@@ -10,10 +10,16 @@
 #include "game.hpp"
 #include "pad.hpp"
 
+enum PetCmdId : uint32_t { kPetCmdAttack = 1, kPetCmdFollow = 2, kPetCmdStay = 3, kPetCmdPassive = 4, kPetCmdDefensive = 5, kPetCmdAggressive = 6 };
+const char* petCmdName(uint32_t id);       // "Attack", "Follow", "Stay", "Passive", "Defensive", "Aggressive"
+const char* petCmdIcon(uint32_t id);       // the named icon of the skin ("pet_attack" ...)
+bool petCmdActive(const w3n::GameSession& g, uint32_t id);   // the pet's current order / stance (lit on the bars)
+
 struct ActionSlot {
-    enum Type : uint8_t { Empty = 0, Spell = 1, Item = 2 };
+    // UI stage 13: PetCmd (id = PetCmdId) and PetSpell (id = the spell of the pet's book) run the pet's bar
+    enum Type : uint8_t { Empty = 0, Spell = 1, Item = 2, PetCmd = 3, PetSpell = 4 };
     uint8_t type = Empty;
-    uint32_t id = 0;                  // spell id or item entry
+    uint32_t id = 0;                  // spell id or item entry (PetCmd: PetCmdId)
 };
 
 class ActionLayout {
@@ -31,6 +37,7 @@ public:
     int page = 0;
     void turnPage(int delta) { page = ((page + delta) % kPages + kPages) % kPages; }
     const ActionSlot& at(int slot) const { return slots_[page][slot]; }
+    const ActionSlot& atPage(int pg, int slot) const { return slots_[pg][slot]; }   // UI stage 12 (the cooldown strip)
     void bind(int slot, ActionSlot s);  // also removes the same action from other slots of this page
 
     // Short name for bars ("Heroic Strike", "Tough Hunk of Bread x3", "" when empty) and the cooldown left.

@@ -20,6 +20,7 @@
 #include <3ds.h>
 #include <stdint.h>
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -44,6 +45,10 @@ public:
         bool touchHeld = false;       // the finger is on the screen (touchX/Y = where it is now)
         bool touchUp = false;         // the finger left the screen this frame (touchX/Y unused)
         uint32_t mapId = 0;           // the map we are on (Map tab)
+        // UI stage 10, ground spells: the C-Stick (dead zone applied, -1..1), the camera's yaw (the stick moves the ring
+        // the way the camera looks) and the height of the ground / floor under a point (nullptr: keep the height)
+        float stickX = 0, stickY = 0, camYaw = 0;
+        bool (*groundAt)(float x, float y, float zRef, float* z) = nullptr;
     };
     struct Output {
         bool faceYaw = false;         // turn the character (and the camera) to 'yaw'
@@ -56,6 +61,11 @@ public:
         bool graphicsChanged = false; // draw distance / crowd / doodads changed in Settings
         bool soundChanged = false;    // a volume changed in Settings
         std::vector<const char*> sounds;   // events to play this frame (audio.cpp names)
+        // UI stage 10: a ground spell is being placed - the ring (where, how big) and the C-Stick is ours, not the camera's
+        bool placing = false;
+        float placePos[3] = {0, 0, 0};
+        float placeRadius = 0;
+        std::string placeName;
     };
 
     // Call every frame while online.
@@ -70,6 +80,9 @@ public:
     enum class Panel : uint8_t {
         Tabs, Death, Loot, Gossip, Menu, Context, Settings, Vendor, Quest, Trainer, Binder, ItemInfo, Buffs, Invite,
         SpellInfo, Confirm, Bank, Taxi, Mail, Auction, Trade, Keyboard,
+        Inspect,   // UI stage 9: another player's gear and honour
+        Pet,       // UI stage 13: the pet's bar, mood, auto-cast, rename, feeding
+        Stable,    // UI stage 13: the stable master (hunters)
     };
     Panel panel(const w3n::GameSession& g) const;   // what the centre area shows now
     Tab tab() const { return tab_; }
@@ -93,6 +106,7 @@ public:
         Pin, SubView, TargetUnit, CancelCast, ConfirmYes, ConfirmNo, TrackQuest, SpellPick,
         MapMode, MapZoom, ChatChannel, ChatWrite, ChatScroll, ChatPhrases, PhrasePick,
         TalentTree, TalentPick, TalentLearn,
+        SkillPick, SkillHeader, SkillAbandon,   // 6.19: the skills page
         SocialPick, FriendAdd, FriendRemove, IgnoreAdd, IgnoreRemove, Whisper, GroupInvite, GroupLeave, GroupKick,
         GroupPromote, GuildRefresh, GuildAccept, GuildDecline,
         BankPick, BankDeposit, BankWithdraw, BankBuySlot, BankClose, BankMode,
@@ -102,7 +116,17 @@ public:
         AuctionPrice, AuctionClose, AuctionCancel,
         TradeOffer, TradePick, TradeGold, TradeAccept, TradeCancel, TradeAnswer, TradeClear,
         KeyboardKey,
+        ChatDest, ChannelSay, ChannelList, ChannelLeave, ChannelJoin,   // stage 5.46: chat destinations and channels
         EmotePick,   // the animation stage: text emotes, sit / stand (arg 1000)
+        InspectSlot, // UI stage 9: an item of the inspected player (arg = entry): its tooltip
+        // UI stage 13: pets
+        PetOpen,     // the pet window (Combat strip, menu)
+        PetCommand,  // arg = PetCmdId: attack / follow / stay / passive / defensive / aggressive
+        PetCast,     // arg = spell of the pet's book
+        PetAuto,     // arg = spell: auto-cast on / off
+        PetBind,     // arg = PetCmdId (< 100) or 100000 + spell: arm the hotbar binding
+        PetRename, PetDismiss, PetFeed, PetFeedPick,
+        StablePick, StableStable, StableUnstable, StableBuy, StableClose,
     };
     // A tap region of the last draw (pixels). Long press shows info (kind 1 item entry / inventory index, 2 spell,
     // 3 aura spell); drag carries a spell (dragKind 1) or an item entry (2) to a hotbar slot.
@@ -119,6 +143,13 @@ public:
     const std::vector<Button>& buttons() const { return buttons_; }   // tap regions of the last draw (PC test)
     // Runs a hotbar slot (pad addressing): spell with soft targeting, item from the bags, fixed set-0 action.
     void useSlot(w3n::GameSession& g, const Input& in, int slot, Output& out);
+    bool placing() const { return place_.on; }
+    enum : int { kKbBack = 1001, kKbShift = 1002, kKbSymbols = 1003, kKbOk = 1004, kKbCancel = 1005 };   // Act::KeyboardKey args
+    using TextDone = std::function<void(w3n::GameSession&, uint32_t, const std::string&)>;
+    // Opens the on-screen keyboard (stage 5.46, game_ui_keyboard.cpp): 'done' runs on OK, Cancel / B drop the text.
+    void askText(const Input& in, const std::string& hint, const std::string& initial, bool numbers, TextDone done, size_t maxLen = 255);
+    bool keyboardOpen() const { return kb_.on; }      // the on-screen keyboard (stage 5.46) is up: the character stands still
+    std::string keyboardText() const { return kb_.text; }
 
 private:
     // ---- drawing helpers (game_ui_widgets.cpp)
@@ -149,10 +180,40 @@ private:
     uint64_t soundTarget_ = 0;
     uint32_t soundLevel_ = 0;
     void pressSpell(w3n::GameSession& g, uint32_t spell, const Input& in, Output& out);
+    // UI stage 10: ground spells and items - a ring on the ground moved with the C-Stick; the same button again (or the
+    // interact button) casts at it, cancel drops it. With the "At target" setting a target in range is used at once.
+    struct Place {
+        bool on = false;
+        uint32_t spell = 0, item = 0;  // the spell, and the item entry when it is an item's (0: a spell of ours)
+        float pos[3] = {0, 0, 0};
+        float range = 30, radius = 5;
+        uint32_t lastMs = 0;
+    } place_;
+    void beginPlace(w3n::GameSession& g, const Input& in, uint32_t spell, uint32_t item, Output& out);
+    void updatePlace(w3n::GameSession& g, const Input& in, Output& out);
+    void confirmPlace(w3n::GameSession& g, const Input& in, Output& out);
     void interactAction(w3n::GameSession& g, const Input& in, Output& out);
     void cancelAction(w3n::GameSession& g, const Input& in);
     void openChat(w3n::GameSession& g, const Input& in, Output& out, const std::string& prefix = "");
-    bool keyboard(w3n::GameSession& g, const Input& in, Output& out, const char* hint, std::string& text, bool numbers = false);
+    // The on-screen English keyboard (stage 5.46, game_ui_keyboard.cpp): replaces the system applet, which blocked the
+    // game for seconds. askText() opens it; 'done' runs on OK (Cancel / B drop the text). Key codes (Act::KeyboardKey
+    // arg): 32..126 a character (lower case; Shift / Caps make it upper), kKbBack .. kKbCancel the function keys.
+    void drawKeyboard(w3n::GameSession& g, const Input& in);
+    void keyboardKey(w3n::GameSession& g, const Input& in, int code);
+    void closeKeyboard();
+    struct Kb {
+        bool on = false, numbers = false, shift = false, caps = false, symbols = false;
+        std::string text, hint;
+        size_t maxLen = 255;
+        TextDone done;
+    } kb_;
+    Panel kbReturn_ = Panel::Tabs;
+    // chat destination of the Write button: "s" say, "y" yell, "p" party, "r" raid, "g" guild, "w" whisper, "c1".."c9" channel
+    std::string chatDest_ = "s";
+    std::vector<std::string> chatDests(const w3n::GameSession& g) const;
+    std::string chatDestLabel(const w3n::GameSession& g, const std::string& d) const;
+    std::string chatDestPrefix(const w3n::GameSession& g, const std::string& d) const;
+    std::string whisperTarget(const w3n::GameSession& g) const;
     void touch(w3n::GameSession& g, const Input& in, Output& out);
     void setTab(Tab t);
     void autoTabs(w3n::GameSession& g, const Input& in);
@@ -180,6 +241,8 @@ private:
     void drawPaperDoll(w3n::GameSession& g, const Input& in);
     void drawSpells(w3n::GameSession& g, const Input& in);
     void drawTalents(w3n::GameSession& g, const Input& in);
+    void drawSkills(w3n::GameSession& g, const Input& in);   // 6.19
+    void spellTabs(int active);                               // the Book / Talents / Skills buttons
     void drawQuestLog(w3n::GameSession& g, const Input& in);
     void drawSocial(w3n::GameSession& g, const Input& in);
     void drawSettings(const Input& in);
@@ -194,6 +257,7 @@ private:
     void drawQuest(w3n::GameSession& g);
     void drawMenu(w3n::GameSession& g);
     void drawContext(w3n::GameSession& g);
+    void drawInspect(w3n::GameSession& g);
     void drawConfirm();
     void drawBank(w3n::GameSession& g, const Input& in);
     void drawTaxi(w3n::GameSession& g, const Input& in);
@@ -201,6 +265,11 @@ private:
     void drawAuction(w3n::GameSession& g, const Input& in);
     void drawTrade(w3n::GameSession& g, const Input& in);
     void drawBars(w3n::GameSession& g, const Input& in);
+    void drawPet(w3n::GameSession& g, const Input& in);          // UI stage 13
+    void drawStable(w3n::GameSession& g, const Input& in);
+    int petStrip(w3n::GameSession& g, const Input& in);          // the pet's buttons at the bottom of the Combat tab: its height (0 = no pet)
+    ui::Image actionIcon(w3n::GameSession& g, const ActionSlot& a);
+    std::string actionName(w3n::GameSession& g, const ActionSlot& a) const;
     std::string panelTitle(w3n::GameSession& g, Panel p) const;
 
     HudList list_;                    // the touch screen
@@ -245,6 +314,8 @@ private:
     bool phrases_ = false;
     int mapMode_ = 0, mapZoom_ = 1;
     int talentTree_ = 0, talentSel_ = -1;
+    uint32_t skillSel_ = 0;          // 6.19: the selected skill line; skillFolded_: bit per category (5..11) folded away
+    uint32_t skillFolded_ = 0;
     int socialSel_ = -1;
     // confirmation dialog
     std::string confirmText_;
@@ -278,6 +349,11 @@ private:
     uint32_t auctionBid_ = 0, auctionBuyout_ = 0;
     int auctionHours_ = 1;             // 0 2h, 1 8h, 2 24h
     int tradeSel_ = -1;
+    int petSel_ = -1;                  // UI stage 13: the selected entry in the pet window (PetCmdId, 100000 + spell)
+    int feedSel_ = -1;                 // the food picked in the feed list (index into petFoodCandidates())
+    bool petFeedList_ = false;         // the pet window shows the food list
+    int stableSel_ = -1;               // the stabled pet picked (slot)
     uint64_t windowNpc_ = 0;           // the NPC / object of the open stage-6 window (reset when it changes)
+    uint64_t inspect_ = 0;             // UI stage 9: the player Panel::Inspect shows
     static constexpr int kTop = 20, kTabY = 196, kTabH = 44, kContentH = kTabY - kTop;
 };

@@ -27,7 +27,10 @@ const std::vector<uint16_t>& creatureAnimIds() {
         96, 97, 98, 99, 100, 101, 102, 103, 104, 114, 115, 116, 60, 64, 65, 66, 67, 68, 34, 35, 62, 63, 61, 122, 123, 136, 138,
         // the rest of the emotes and special attacks
         69, 70, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 113, 55, 57, 58, 59, 95, 29, 46, 47, 48, 49, 107, 108,
-        119, 120, 126, 130, 127, 7, 8, 117, 118, 85, 133, 134};
+        119, 120, 126, 130, 127, 7, 8, 117, 118, 85, 133, 134,
+        // game objects (stage 5.41): doors, gates, chests, levers: 148 Open, 149 Opened, 146 Close, 147 Closed, 145 Spawn
+        // (150 Destroy and up are for destructible objects of later versions: not kept)
+        148, 149, 146, 147, 145};
     return ids;
 }
 
@@ -45,7 +48,9 @@ uint8_t mapBlendM2(uint16_t b) {
     switch (b) {
         case 0: return W3D_BLEND_OPAQUE;
         case 1: return W3D_BLEND_ALPHAKEY;
-        case 3: case 6: case 7: return W3D_BLEND_ADD;
+        // 6.13: 4 ("Add") too, as for doodads since 5.35j - a game object's glow card (Orgrimmar's braziers) was alpha-blended:
+        // its black square showed
+        case 3: case 4: case 6: case 7: return W3D_BLEND_ADD;
         default: return W3D_BLEND_ALPHA;
     }
 }
@@ -139,6 +144,8 @@ std::vector<uint8_t> buildCreatureBlob(const wowee::pipeline::M2Model& m, int ma
         }
         s.idx.assign(m.indices.begin() + b.indexStart, m.indices.begin() + b.indexStart + b.indexCount);
         for (uint32_t& i : s.idx) if (i >= m.vertices.size()) i = 0;
+        s.idx.resize(s.idx.size() / 3 * 3);   // whole triangles only (meshoptimizer reads past the end otherwise)
+        if (s.idx.empty()) continue;
         subs.push_back(std::move(s));
         info.geosets.insert(b.submeshId);
     }
@@ -208,6 +215,9 @@ std::vector<uint8_t> buildCreatureBlob(const wowee::pipeline::M2Model& m, int ma
     std::vector<W3dSkinSubmesh> outSubs;
     std::vector<W3dSkinVertex> outVerts;
     std::vector<uint16_t> outIdx;
+    size_t fullIdx = 0;                   // stage 6.12: indices of the full mesh (the LODs follow them)
+    std::vector<float> outPos, outUv;     // stage 6.12: float copies of the output vertices (for the LODs)
+    std::vector<uint16_t> outBone;        // stage 6.12: their strongest bone
     // bind-pose bounds for quantisation
     float bmin[3] = {1e30f, 1e30f, 1e30f}, bmax[3] = {-1e30f, -1e30f, -1e30f}, r2 = 0;
     for (auto& v : m.vertices) {
@@ -268,6 +278,9 @@ std::vector<uint8_t> buildCreatureBlob(const wowee::pipeline::M2Model& m, int ma
                         o.weight[1] = f.w[1];
                         it = vmap.emplace(si, (uint16_t)outVerts.size()).first;
                         outVerts.push_back(o);
+                        outPos.insert(outPos.end(), {v.position.x, v.position.y, v.position.z});
+                        outUv.insert(outUv.end(), {v.texCoords[0].x, v.texCoords[0].y});
+                        outBone.push_back(f.bone[0]);
                     }
                     outIdx.push_back(it->second);
                 }
@@ -277,6 +290,33 @@ std::vector<uint8_t> buildCreatureBlob(const wowee::pipeline::M2Model& m, int ma
             palettes.push_back(pal);
             outSubs.push_back(sm);
         }
+    }
+
+    // ---- 3b. stage 6.12: lighter versions of each piece for the distance (same vertices and palette). Joints stay: a vertex
+    // on a triangle whose corners follow different bones is locked (as in the budget simplification above), and so are
+    // open borders (the body's geosets meet there).
+    std::vector<W3dSubLod> lods(outSubs.size());
+    {
+        std::vector<unsigned char> lock(outVerts.size(), 0);
+        for (size_t t = 0; t + 2 < outIdx.size(); t += 3) {
+            const uint16_t a = outBone[outIdx[t]], b = outBone[outIdx[t + 1]], c = outBone[outIdx[t + 2]];
+            if (a != b || b != c) lock[outIdx[t]] = lock[outIdx[t + 1]] = lock[outIdx[t + 2]] = 1;
+        }
+        const size_t full = outIdx.size();
+        for (size_t i = 0; i < outSubs.size(); ++i) {
+            const W3dSkinSubmesh& sm = outSubs[i];
+            if (sm.firstIndex + sm.indexCount > full) continue;
+            std::vector<uint32_t> idx32(outIdx.begin() + sm.firstIndex, outIdx.begin() + sm.firstIndex + sm.indexCount);
+            auto lv = simplifyLods(idx32.data(), idx32.size(), outPos.data(), outVerts.size(), 3 * sizeof(float), outUv.data(),
+                                   2 * sizeof(float), lock.data(), true);
+            for (int k = 0; k < W3D_MODEL_LODS; ++k) {
+                if (lv[k].empty()) continue;
+                lods[i].firstIndex[k] = (uint32_t)outIdx.size();
+                lods[i].indexCount[k] = (uint32_t)lv[k].size();
+                for (uint32_t x : lv[k]) outIdx.push_back((uint16_t)x);
+            }
+        }
+        fullIdx = full;
     }
 
     // ---- 4. skeleton and baked animation
@@ -446,13 +486,16 @@ std::vector<uint8_t> buildCreatureBlob(const wowee::pipeline::M2Model& m, int ma
     out.align(4);
     size_t offA = out.putArray(attach);
     out.align(4);
+    size_t offL = out.putArray(lods);
+    out.align(4);
     auto* hp = out.at<W3dCreatureHeader>(0);
     hp->offTex = (uint32_t)offTex; hp->offSubmeshes = (uint32_t)offSub; hp->offVertices = (uint32_t)offV;
     hp->offIndices = (uint32_t)offI; hp->offPalettes = (uint32_t)offP; hp->offBones = (uint32_t)offB;
     hp->offSeqs = (uint32_t)offS; hp->offKeys = (uint32_t)offK;
     hp->attachCount = (uint32_t)attach.size(); hp->offAttach = (uint32_t)offA;
+    hp->lodCount = W3D_MODEL_LODS; hp->offLods = (uint32_t)offL;
 
-    info.tris = outIdx.size() / 3;
+    info.tris = fullIdx / 3;
     info.verts = outVerts.size();
     info.palettes = palettes.size();
     info.bones = boneCount;

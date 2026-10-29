@@ -72,10 +72,25 @@ struct Character {
     uint64_t guid = 0;
     std::string name;
     uint8_t race = 0, cls = 0, gender = 0, level = 0;
+    uint8_t skin = 0, face = 0, hairStyle = 0, hairColor = 0, facialHair = 0;   // stage 5.29: drawn on the screen
     uint32_t zone = 0, map = 0;
     float x = 0, y = 0, z = 0;
     uint32_t guild = 0, flags = 0;
+    bool firstLogin = false;
+    // what the character wears, per equipment slot 0..18 (+ the first bag): ItemDisplayInfo id and inventory type
+    uint32_t equipDisplay[20] = {};
+    uint8_t equipInv[20] = {};
 };
+
+// CMSG_CHAR_CREATE (stage 5.29)
+struct CharCreateInfo {
+    std::string name;
+    uint8_t race = 1, cls = 1, gender = 0, skin = 0, face = 0, hairStyle = 0, hairColor = 0, facialHair = 0, outfit = 0;
+};
+// SMSG_CHAR_CREATE / SMSG_CHAR_DELETE result codes (vMaNGOS ResponseCodes, 1.12)
+enum : uint8_t { CHAR_CREATE_SUCCESS = 0x2E, CHAR_DELETE_SUCCESS = 0x39 };
+const char* charCreateResultText(uint8_t code);   // "Name already in use" ...
+const char* charDeleteResultText(uint8_t code);
 
 struct Packet {
     uint16_t opcode = 0;
@@ -92,6 +107,12 @@ public:
     void update();
     void requestCharacters();
     void login(uint64_t guid);
+    // Stage 5.29: at the character list. The answer comes as takeCreateResult / takeDeleteResult (once); a success asks
+    // for the list again (state WaitCharEnum until it is there).
+    void createCharacter(const CharCreateInfo& c);
+    void deleteCharacter(uint64_t guid);
+    int takeCreateResult() { int r = createResult_; createResult_ = -1; return r; }   // -1 = no answer yet
+    int takeDeleteResult() { int r = deleteResult_; deleteResult_ = -1; return r; }
     void logout();
     void send(uint32_t opcode, const Bytes& payload);
 
@@ -105,9 +126,19 @@ public:
     const float* position() const { return pos_; }
     float orientation() const { return orient_; }
     uint32_t lastLatencyMs() const { return latency_; }
+    // 5.35d: every pong of the session (one per pingIntervalMs): count, min, max, sum
+    uint32_t pongs() const { return pongs_; }
+    uint32_t latencyMin() const { return latMin_; }
+    uint32_t latencyMax() const { return latMax_; }
+    uint32_t latencyAvg() const { return pongs_ ? (uint32_t)(latSum_ / pongs_) : 0; }
     const Timings& timings() const { return t_; }
     const std::map<uint16_t, uint32_t>& opcodeCounts() const { return opCounts_; }
     uint64_t bytesReceived() const { return bytesIn_; }
+    // stage 6 (perf log): packets in / out, bytes sent, bytes received but not parsed yet (a burst waiting)
+    uint64_t packetsReceived() const { return packetsIn_; }
+    uint64_t packetsSent() const { return packetsOut_; }
+    uint64_t bytesSent() const { return bytesOut_; }
+    size_t pendingBytes() const { return inBuf_.size(); }
     // True once the server sent SMSG_WARDEN_DATA (anticheat). We do not answer
     // it, so such servers usually disconnect the client shortly afterwards.
     bool wardenSeen() const { return wardenSeen_; }
@@ -129,12 +160,15 @@ private:
     std::vector<Character> chars_;
     uint64_t playerGuid_ = 0;
     uint32_t queuePos_ = 0, map_ = 0, pingSeq_ = 0, latency_ = 0;
+    uint32_t pongs_ = 0, latMin_ = 0, latMax_ = 0;
+    uint64_t latSum_ = 0;
     float pos_[3] = {0, 0, 0}, orient_ = 0;
     uint64_t t0_ = 0, tStep_ = 0, lastPing_ = 0, pingSent_ = 0, deadline_ = 0;
     Timings t_;
     std::map<uint16_t, uint32_t> opCounts_;
-    uint64_t bytesIn_ = 0;
+    uint64_t bytesIn_ = 0, packetsIn_ = 0, packetsOut_ = 0, bytesOut_ = 0;
     bool wardenSeen_ = false;
+    int createResult_ = -1, deleteResult_ = -1;
 };
 
 const char* raceName(uint8_t r);

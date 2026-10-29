@@ -1,3 +1,4 @@
+#include <algorithm>
 // Runs proto3ds/source/streamer.cpp on the PC with stubbed libctru: the camera
 // flies a circuit over a pack and every frame the resident data is checked the
 // way the GPU would use it (model indices within the vertex buffer, textures
@@ -5,6 +6,7 @@
 //   streamer_pc <pack.w3dp> [frames] [cx cy radius]
 #include "../source/world.h"
 #include "../source/creature_view.hpp"
+#include "../source/fx.hpp"
 #include "w3d_anim.h"
 
 #include <cmath>
@@ -22,6 +24,21 @@ size_t stubLinearUsed();
 size_t stubLinearPeak();
 size_t stubTexturesLive();
 
+// Stage 5.30: the reads as slow as an SD card when SD_KBPS is set (+ SD_SEEK_US for a jump in the file), so the order of
+// the reads shows in the timings.
+void pcTestIoDelay(int file, uint32_t offset, uint32_t size) {
+    static const char* kb = std::getenv("SD_KBPS");
+    static const char* sk = std::getenv("SD_SEEK_US");
+    if (!kb) return;
+    static int lastFile = -1;
+    static uint32_t lastEnd = 0;
+    double us = size * 1000.0 / std::atof(kb);
+    if (file != lastFile || offset != lastEnd) us += sk ? std::atof(sk) : 0.0;
+    lastFile = file;
+    lastEnd = offset + size;
+    std::this_thread::sleep_for(std::chrono::microseconds((long long)us));
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) return 2;
     PackIndex index;
@@ -36,8 +53,18 @@ int main(int argc, char** argv) {
         int tx = (index.minTileX + index.maxTileX) / 2, ty = (index.minTileY + index.maxTileY) / 2;
         cx = (32.0f - ty - 0.5f) * kTileSize; cy = (32.0f - tx - 0.5f) * kTileSize; rad = kTileSize * 0.8f;
     }
-    size_t checks = 0, problems = 0, maxInst = 0, maxModels = 0;
+    size_t bldgProblems = 0, bldgGroups = 0, bldgCompleteClosed = 0;
+    size_t checks = 0, problems = 0, maxInst = 0, maxModels = 0, chunkProblems = 0, chunksSeen = 0;
+    const auto tStart = std::chrono::steady_clock::now();
+    std::set<uint64_t> shownKey;            // placements already counted
+    std::vector<std::pair<double, float>> shownAt;   // (ms since start, distance then)
+    std::set<uint64_t> groundSeen;
+    std::vector<double> groundAt;                    // when each tile's ground first showed
+    std::set<uint64_t> firstShown;      // stage 5.30: placements in the order they showed ...
+    std::vector<float> shownOrder;      // ... and their distance from the camera then
     std::set<uint32_t> modelsSeen;
+    std::set<uint32_t> fxModels;   // stage 5.32
+    size_t fxPeak = 0, fxQuadPeak = 0, fxProblems = 0;
     // Creatures (stage 5.3): synthetic units cycling through every display in the pack,
     // appearing/disappearing, changing display, walking, running and dying.
     std::vector<uint32_t> displayIds;
@@ -73,18 +100,111 @@ int main(int argc, char** argv) {
     std::vector<W3dMat34> pose;
     size_t crtDrawn = 0, crtChecks = 0, crtProblems = 0, deathSeqs = 0, walkSeqs = 0, runSeqs = 0, attackSeqs = 0;
     uint32_t nowMs = 0;
+    int memWalks = 0, memMismatch = 0;
+    const bool inFrame = std::getenv("UPLOAD_IN_FRAME") != nullptr;
     for (int f = 0; f < frames; ++f) {
         float a = (float)f / frames * 6.2831853f * 2;
         float r = rad * (0.25f + 0.75f * std::fabs(std::sin(a * 0.5f)));
         float cam[3] = {cx + std::cos(a) * r, cy + std::sin(a) * r, 120.0f};
-        float dist = (f / 500) % 2 ? 800.0f : 250.0f;   // switches the 3x3 / 5x5 radius too
-        streamerUpdate(cam, dist);
+        if (std::getenv("CAM_WALK")) {   // stage 5.30: arrive in the middle and walk slowly east (a city visit)
+            cam[0] = cx; cam[1] = cy + f * std::atof(std::getenv("CAM_WALK")); cam[2] = 60.0f;
+        }
+        float dist = std::getenv("CAM_WALK") ? 250.0f : (f / 500) % 2 ? 800.0f : 250.0f;   // switches the 3x3 / 5x5 radius too
+        if (inFrame) { streamerUpdate(cam, dist, true); streamerUploadTextures(); }   // stage 6: the main loop's way
+        else streamerUpdate(cam, dist);
+        {   // stage 5.32: the effects of what is near, as render.cpp drawFx does (models freed meanwhile must take their
+            // particles with them: ASan would catch a particle reading a freed blob)
+            static std::vector<fx::Source> fsrc;
+            static std::vector<fx::Quad> fq;
+            fsrc.clear();
+            for (Tile* t : streamerReadyTiles())
+                for (const Instance& in : t->instances) {
+                    const Model* m = in.model;
+                    if (!m->fx || !m->drawable) continue;
+                    if ((size_t)m->fxTexBase + m->fx->texCount > m->tex.size()) { ++fxProblems; continue; }
+                    fxModels.insert(m->id);
+                    fx::Source fs;
+                    fs.key = &in; fs.owner = m; fs.blob = m->blob; fs.h = m->fx;
+                    fs.tex = (const void* const*)(m->tex.data() + m->fxTexBase);
+                    for (int k = 0; k < 3; ++k) { fs.pos[k] = in.pos[k]; fs.rot[k] = in.rot[k]; }
+                    fs.scale = in.scale;
+                    fsrc.push_back(fs);
+                }
+            static const float rows[3][3] = {{0, -1, 0}, {0, 0, 1}, {-1, 0, 0}};
+            fx::Budget fb = fx::budgetFor(2);
+            fb.emitRange = fb.glowRange = 5000.0f;   // the camera flies high and far here: every lamp runs
+            fx::global().setBudget(fb);
+            fx::global().frame(1.0f / 30, f / 30.0f, cam, rows, fsrc, fq);
+            for (const fx::Quad& q : fq) {
+                if (q.tex) {   // a texture of a model that is still alive (forgotten ones took their particles)
+                    const GpuTex* gt = (const GpuTex*)q.tex;
+                    fxProblems += gt->refs <= 0;
+                }
+                fxProblems += !std::isfinite(q.c[0]) || !std::isfinite(q.half);
+            }
+            fxPeak = std::max(fxPeak, fx::global().alive());
+            fxQuadPeak = std::max(fxQuadPeak, fq.size());
+        }
         size_t inst = 0;
+        for (Tile* t : streamerReadyTiles())
+            if (groundSeen.insert((uint64_t)t->tx << 8 | (uint64_t)t->ty).second)
+                groundAt.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tStart).count());
+        for (Tile* t : streamerReadyTiles()) {   // stage 6.10: the chunks cover the instances, each inside its sphere
+            uint32_t next = 0;
+            for (const Tile::Chunk& ch : t->chunks) {
+                if (ch.begin != next || ch.end <= ch.begin || ch.end > t->instances.size()) { ++chunkProblems; break; }
+                for (uint32_t i = ch.begin; i < ch.end; ++i) {
+                    const float* p = t->instances[i].pos;
+                    const float d = std::sqrt((p[0] - ch.center[0]) * (p[0] - ch.center[0]) + (p[1] - ch.center[1]) * (p[1] - ch.center[1]) +
+                                              (p[2] - ch.center[2]) * (p[2] - ch.center[2]));
+                    if (d > ch.half * 1.0001f + 0.01f) ++chunkProblems;
+                }
+                next = ch.end;
+                ++chunksSeen;
+            }
+            if (next != t->instances.size()) ++chunkProblems;
+        }
+        for (Tile* t : streamerReadyTiles()) {   // stage 6.11: the buildings (placements sharing a transform)
+            int closed = 0;
+            for (size_t b = 0; b < t->bldgs.size(); ++b) {
+                const Tile::Bldg& g = t->bldgs[b];
+                if (!g.open) ++closed;
+                ++bldgGroups;
+                for (uint32_t i : g.members) {
+                    if (i >= t->instances.size() || t->instances[i].bldg != b + 1) { ++bldgProblems; continue; }
+                    const Instance& a = t->instances[i];
+                    const Instance& f = t->instances[g.members[0]];
+                    if (memcmp(a.rot, f.rot, sizeof a.rot) || a.scale != f.scale) ++bldgProblems;   // (the position is each group's own)
+                }
+                if (g.members.size() < 2 && !g.open) ++bldgProblems;   // nothing to wait for
+            }
+            for (const Instance& in : t->instances) if (in.bldg > t->bldgs.size()) ++bldgProblems;
+            if (closed != t->bldgsClosed) ++bldgProblems;
+            if (t->complete && t->bldgsClosed) ++bldgCompleteClosed;   // a complete tile has every model drawable: nothing waits
+        }
         for (Tile* t : streamerReadyTiles()) {
-            for (const Instance& in : t->instances) {
+            for (Instance& in : t->instances) {
                 ++inst;
                 Model* m = in.model;
-                if (m->state != AssetState::Ready || !m->h) continue;
+                // stage 5.30: as the renderer, each model once it and its textures are in (the tile shows its ground first)
+                if (!m->drawable) continue;
+                if (m->state != AssetState::Ready || !m->h || !m->texturesReady()) { ++problems; continue; }
+                if (in.radius <= 0) in.radius = m->h->radius * in.scale;
+                {
+                    const uint64_t k2 = (uint64_t)(uintptr_t)t << 20 ^ (uint64_t)(&in - t->instances.data());
+                    if (shownKey.insert(k2).second) {
+                        const float dx = in.pos[0] - cam[0], dy = in.pos[1] - cam[1];
+                        shownAt.push_back({std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tStart).count(),
+                                           std::sqrt(dx * dx + dy * dy)});
+                    }
+                }
+                {   // when each placement first showed, and how far from the camera it was then
+                    const uint64_t key = (uint64_t)(uintptr_t)t << 20 ^ (uint64_t)(&in - t->instances.data());
+                    if (firstShown.insert(key).second) {
+                        const float dx = in.pos[0] - cam[0], dy = in.pos[1] - cam[1];
+                        shownOrder.push_back(std::sqrt(dx * dx + dy * dy));
+                    }
+                }
                 const W3dModelHeader* h = m->h;
                 const uint16_t* idx = (const uint16_t*)(m->blob + h->offIndices);
                 for (u32 s = 0; s < h->submeshCount; ++s) {
@@ -210,6 +330,19 @@ int main(int argc, char** argv) {
                 if (c.displayId == 987654321u && !c.look && view.drawn(c.guid)) ++crtProblems;
         }
         maxModels = std::max(maxModels, (size_t)streamerStats().models);
+        if (f % 25 == 0) {   // stage 6 (perf log): the memory walk agrees with the running texture totals
+            StreamMemory m;
+            streamerMemory(&m);
+            uint64_t sum = (uint64_t)m.bodyVramBytes + m.bodyLinearBytes;
+            for (int c = 0; c < kStreamClasses; ++c) sum += (uint64_t)m.texVramByClass[c] + m.texLinearByClass[c];
+            const StreamStats& ss = streamerStats();
+            if (sum != (uint64_t)ss.texVram + ss.texLinear) {
+                ++memMismatch;
+                if (memMismatch < 4) std::printf("memory walk: textures %llu bytes, totals %llu\n", (unsigned long long)sum,
+                                                 (unsigned long long)ss.texVram + ss.texLinear);
+            }
+            memWalks++;
+        }
         streamerEndFrame();
         std::this_thread::sleep_for(std::chrono::microseconds(pace));
     }
@@ -236,9 +369,113 @@ int main(int argc, char** argv) {
     if (!charIds.empty() && playersDrawn == 0) ++problems;
     if (displayIds.size() > 1 && crtDrawn == 0) ++problems;
     const StreamStats& s = streamerStats();
+    {   // stage 5.30: how soon what is near shows (placements within 250 yd of the camera when they appeared)
+        std::vector<double> nearT, allT;
+        for (auto& [ms, d] : shownAt) { allT.push_back(ms); if (d < 250.0f) nearT.push_back(ms); }
+        std::sort(nearT.begin(), nearT.end());
+        std::sort(allT.begin(), allT.end());
+        auto pct = [](const std::vector<double>& v, double q) { return v.empty() ? 0.0 : v[std::min(v.size() - 1, (size_t)(q * v.size()))]; };
+        std::printf("ground: %zu tiles shown, first at %.0f ms, last at %.0f ms\n", groundAt.size(),
+                    groundAt.empty() ? 0.0 : groundAt.front(), groundAt.empty() ? 0.0 : groundAt.back());
+        std::printf("shown: near (<250 yd) %zu, 50%% at %.0f ms, 90%% at %.0f ms; all %zu, 50%% at %.0f ms, 90%% at %.0f ms, last at %.0f ms\n",
+                    nearT.size(), pct(nearT, 0.5), pct(nearT, 0.9), allT.size(), pct(allT, 0.5), pct(allT, 0.9), allT.empty() ? 0.0 : allT.back());
+    }
+    std::printf("effects: %zu models with effects, peak %zu particles, %zu quads, %zu problems\n", fxModels.size(), fxPeak,
+                fxQuadPeak, fxProblems);
+    problems += fxProblems;
     std::printf("%d frames: tile loads %u, max resident instances %zu, models %zu, distinct models drawn %zu\n", frames,
                 s.tileLoads, maxInst, maxModels, modelsSeen.size());
+    std::printf("progressive: ground after avg %.0f ms, complete after avg %.0f ms (%u tiles); read queue max %d, dropped %u\n",
+                s.tileLoads ? s.sumTileMs / s.tileLoads : 0.0, s.tileFullLoads ? s.sumTileFullMs / s.tileFullLoads : 0.0,
+                s.tileFullLoads, s.maxQueued, s.jobsCancelled);
+    if (shownOrder.size() >= 10) {   // the nearest show first: the first fifth closer on average than the last fifth
+        const size_t q = shownOrder.size() / 5;
+        double a = 0, b = 0;
+        for (size_t i = 0; i < q; ++i) { a += shownOrder[i]; b += shownOrder[shownOrder.size() - 1 - i]; }
+        std::printf("show order: first fifth avg %.0f yd, last fifth avg %.0f yd (%zu placements)\n", a / q, b / q, shownOrder.size());
+        if (std::getenv("ORDER_EXPECT") && !(a < b)) { std::printf("show order: the far ones came first\n"); ++problems; }
+    }
     std::printf("submesh checks %zu, problems %zu; linear peak %.1f MB\n", checks, problems, stubLinearPeak() / 1048576.0);
+    {   // stage 6: IO accounting for the perf log
+        uint64_t kb = 0;
+        uint32_t rd = 0;
+        for (int k = 0; k < kStreamJobKinds; ++k) { kb += s.ioBytesKind[k]; rd += s.ioReadsKind[k]; }
+        std::printf("perf: %u reads (%u failed), %.1f MB, read time %.0f ms, IO CPU %.0f ms; memory walks %d, mismatches %d\n",
+                    (unsigned)s.ioReads, (unsigned)s.ioFails, s.ioBytes / 1048576.0, s.ioReadMs, s.ioCpuMs, memWalks, memMismatch);
+        if (kb != s.ioBytes || rd != s.ioReads || memMismatch || !s.ioReads) ++problems;
+    }
+    // every texture a tile or model asked for was in the pack(s) and was read (stage 5.27: also from the pool parts)
+    std::printf("textures not in the pack %u, reads failed %u\n", (unsigned)s.texNotInPack, (unsigned)s.texReadFailed);
+    if (s.texNotInPack || s.texReadFailed) ++problems;
+    // 6.17 (env HOLE_EXPECT=N): the terrain holes of converter/tests/gen_terrain_layers.py - N sample points of the tile not on
+    // drawn ground; inside a hole the filled-in height (a membrane) is never a floor to step up onto, beside it the ground is.
+    int holeBad = 0;
+    if (const char* he = std::getenv("HOLE_EXPECT")) {
+        const float hc[3] = {cx, cy, 200.0f};
+        for (int f = 0; f < 2000 && !streamerTileReadyAt(cx, cy); ++f) {
+            streamerUpdate(hc, 250.0f);
+            streamerEndFrame();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        int uncovered = 0, membraneChecks = 0, groundChecks = 0;
+        for (Tile* t : streamerReadyTiles()) {
+            if (t->covered.size() != (size_t)kHeightN * kHeightN) { ++holeBad; continue; }
+            for (int y = 1; y < kHeightN - 1; ++y)
+                for (int x = 1; x < kHeightN - 1; ++x) {
+                    const float wx = t->th->origin[0] + (float)x / (kHeightN - 1) * kTileSize;
+                    const float wy = t->th->origin[1] + (float)y / (kHeightN - 1) * kTileSize;
+                    float g, fz;
+                    bool hole = false;
+                    if (!streamerGroundHeightEx(wx, wy, &g, &hole)) { ++holeBad; continue; }
+                    const bool ok = streamerFloorHeight(wx, wy, g - 1.0f, &fz);   // feet 1 yd under the ground's height there
+                    if (!t->covered[y * kHeightN + x]) {
+                        ++uncovered;
+                        ++membraneChecks;
+                        if (!hole) { ++holeBad; std::printf("hole FAIL: point %d,%d not reported as a hole\n", x, y); }
+                        if (ok && fz > g - 0.5f) { ++holeBad; std::printf("hole FAIL: %d,%d stepped up onto the membrane\n", x, y); }
+                    } else if (!hole) {
+                        ++groundChecks;
+                        if (!ok || std::fabs(fz - g) > 0.01f) { ++holeBad; std::printf("hole FAIL: ground %d,%d not a step up\n", x, y); }
+                    }
+                }
+        }
+        if (uncovered != std::atoi(he)) { ++holeBad; std::printf("hole FAIL: %d uncovered sample points, want %s\n", uncovered, he); }
+        std::printf("terrain holes: %d uncovered points (membrane checks %d), ground checks %d, %d wrong\n", uncovered, membraneChecks,
+                    groundChecks, holeBad);
+        problems += holeBad;
+    }
+    // 6.18a (env GROUND_POINTS=file from converter/tests/ground_ref.py, GROUND_EXPECT=exact|old): the ground height and the hole
+    // flag of streamerGroundHeightEx() at the reference points. exact: with GRND every point within 0.01 yd (and the hole flags
+    // right); old: the same pack converted with --no-exact-ground - the 129x129 grid must be off by more than 0.2 yd somewhere
+    // (the negative control: the test is able to tell the two apart).
+    int groundBad = 0;
+    if (const char* gp = std::getenv("GROUND_POINTS")) {
+        const bool exact = !std::getenv("GROUND_EXPECT") || std::string(std::getenv("GROUND_EXPECT")) == "exact";
+        const float hc[3] = {cx, cy, 200.0f};
+        for (int f = 0; f < 2000 && !streamerTileReadyAt(cx, cy); ++f) {
+            streamerUpdate(hc, 250.0f);
+            streamerEndFrame();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        std::ifstream pf(gp);
+        double x, y, z, nz;
+        int hole, n = 0, wrongHole = 0, missing = 0;
+        double worst = 0;
+        while (pf >> x >> y >> z >> hole >> nz) {
+            ++n;
+            float g;
+            bool h = false;
+            if (!streamerGroundHeightEx((float)x, (float)y, &g, &h)) { ++missing; continue; }
+            worst = std::max(worst, (double)std::fabs(g - z));
+            wrongHole += (h ? 1 : 0) != hole;
+        }
+        std::printf("ground via the streamer (%s): %d points, worst error %.4f yd, %d missing, %d wrong hole flags\n", exact ? "GRND" : "old grid", n,
+                    worst, missing, wrongHole);
+        if (n < 1000 || missing) ++groundBad;
+        if (exact && (worst > 0.01 || wrongHole)) ++groundBad;
+        if (!exact && worst < 0.2) { ++groundBad; std::printf("ground FAIL: the old grid was expected to be off by more than 0.2 yd\n"); }
+        problems += groundBad;
+    }
     // Optional: walk the floor-height expectations of converter/tests/gen_wmo_data.py
     // (env WALK_EXPECT=expect.json) through the real streamerFloorHeight().
     int walkBad = 0;
@@ -306,10 +543,42 @@ int main(int argc, char** argv) {
             walkBad += wallBad + (cases == 0);
         }
     }
+    // Stage 5.26: the liquid queries of converter/tests/gen_water_data.py (env LIQUID_EXPECT=expect.txt, Q lines)
+    // through the real streamerLiquidAt() (LIQD loaded with the tiles; feet at the surface).
+    const char* lq = std::getenv("LIQUID_EXPECT");
+    if (lq && *lq) {
+        std::ifstream ef(lq);
+        std::string line;
+        int n = 0, wrong = 0;
+        while (std::getline(ef, line)) {
+            if (line.size() < 2 || line[0] != 'Q') continue;
+            float x, y, level; int wet, flags;
+            if (std::sscanf(line.c_str() + 2, "%f %f %d %d %f", &x, &y, &wet, &flags, &level) != 5) continue;
+            float c2[3] = {x, y, 90.0f};
+            for (int f = 0; f < 600 && !streamerTileReadyAt(x, y); ++f) {
+                streamerUpdate(c2, 250.0f);
+                streamerEndFrame();
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            LiquidHere h;
+            const bool got = streamerLiquidAt(x, y, wet ? level : 80.0f, &h);
+            ++n;
+            if (got != (wet != 0) || (got && (h.flags != flags || std::fabs(h.level - level) > 0.05f))) {
+                ++wrong;
+                std::printf("liquid FAIL (%.2f, %.2f): %d flags %d level %.2f, want %d %d %.2f\n", x, y, got, got ? h.flags : 0,
+                            got ? h.level : 0.0f, wet, flags, level);
+            }
+        }
+        std::printf("liquid queries through the streamer: %d, %d wrong\n", n, wrong);
+        walkBad += wrong + (n == 0);
+    }
     streamerShutdown();
     size_t leakLin = stubLinearUsed(), leakTex = stubTexturesLive();
     std::printf("after shutdown: linear in use %zu bytes, textures alive %zu\n", leakLin, leakTex);
-    bool ok = problems == 0 && leakLin == 0 && leakTex == 0 && s.tileLoads > 0 && walkBad == 0;
+    std::printf("tile chunks: %zu checked, %zu problems\n", chunksSeen, chunkProblems);
+    std::printf("buildings: %zu groups seen, %zu problems, %zu complete tiles with a closed building; found %u, opened with every group %u, late %u, closed now %d\n",
+                bldgGroups, bldgProblems, bldgCompleteClosed, s.bldgFound, s.bldgOpenedFull, s.bldgOpenedLate, s.bldgClosed);
+    bool ok = problems == 0 && leakLin == 0 && leakTex == 0 && s.tileLoads > 0 && walkBad == 0 && chunkProblems == 0 && chunksSeen > 0 && bldgProblems == 0 && bldgCompleteClosed == 0;
     std::printf("STREAMER: %s\n", ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;
 }

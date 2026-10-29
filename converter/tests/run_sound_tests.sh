@@ -7,7 +7,16 @@ CONV=${1:-$W/../../build/conv/w3dconv}
 OUT=${OUT:-/tmp/w3d_sound}
 rm -rf "$OUT" && mkdir -p "$OUT"
 python3 "$T/gen_sound_data.py" "$OUT/data"
-"$CONV" --data "$OUT/data" --sound -o "$OUT/sound" -v
+"$CONV" --data "$OUT/data" --sound -o "$OUT/sound" -v | tee "$OUT/conv.log"
+grep -q "liquid sounds: splash=enterwatermediuma swim=swimslowmedium wade=footstepswatersmall fishbite=fishbite" "$OUT/conv.log"
+grep -q "^L	fishbite	3355" "$OUT/sound/sounds.txt"
+# UI stage 8: voices - NPC sets by display (own and by race), error lines (listed and found by file name), emote voices
+V="$OUT/sound/sounds.txt"
+grep -q "^N	103	500	501	502$" "$V" && grep -q "^N	104	503	0	0$" "$V" && grep -q "^N	106	700	0	0$" "$V" && \
+grep -qP "^N\t107\t21[0-9]{8}\t0\t0$" "$V" && \
+grep -q "^V	1	0	norage	600$" "$V" && grep -q "^V	1	0	outofrange	601$" "$V" && grep -qP "^V\t2\t1\tnomana\t21[0-9]{8}$" "$V" && \
+grep -q "^T	21	1	0	800$" "$V" && ! grep -q "9999" "$V" && grep -q "voices: 3 error lines (2 listed, 1 by file name), 3 NPC sets, 5 displays with a voice (2 by race), 1 emote voices" "$OUT/conv.log" \
+  && echo "VOICES (sounds.txt N / V / T): PASS" || { echo "VOICES: FAIL"; grep -E "^(N|V|T)	" "$V"; grep voices "$OUT/conv.log"; exit 1; }
 ls "$OUT/sound" "$OUT/sound/music"
 g++ -std=c++20 -O1 -g -fsanitize=address,undefined -Wall -I"$W/proto3ds/source" -I"$W/common" \
     "$W/proto3ds/tests/sound_test.cpp" "$W/proto3ds/source/audio_core.cpp" -o "$OUT/sound_test"
@@ -18,7 +27,7 @@ L=${LOGS:-/tmp/w3d_stage5}
 g++ -std=c++20 -O1 -g -fsanitize=address,undefined -Wall -I"$W/proto3ds/source" -I"$W/common" -I"$N" \
     "$W/proto3ds/tests/sound_world_test.cpp" "$W/proto3ds/source/sound_world.cpp" "$W/proto3ds/source/audio_core.cpp" \
     "$N/game.cpp" "$N/game_social.cpp" "$N/game_spells.cpp" "$N/game_items.cpp" "$N/game_life.cpp" "$N/factions.cpp" \
-    "$N/game_factions.cpp" "$N/game_vendor.cpp" "$N/game_quests.cpp" "$N/game_group.cpp" "$N/game_friends.cpp" \
-    "$N/game_services.cpp" "$N/game_mail.cpp" "$N/game_auction.cpp" "$N/game_trade.cpp" "$N/tables.cpp" "$N/result_text.cpp" \
+    "$N/game_factions.cpp" "$N/game_vendor.cpp" "$N/game_quests.cpp" "$N/game_group.cpp" "$N/game_pet.cpp" "$N/game_friends.cpp" \
+    "$N/game_services.cpp" "$N/game_mail.cpp" "$N/game_auction.cpp" "$N/game_trade.cpp" "$N/game_water.cpp" "$N/tables.cpp" "$N/result_text.cpp" \
     "$N/objects.cpp" "$N/transport.cpp" "$N/movement.cpp" "$N/client.cpp" "$N/crypto.cpp" "$N/socket.cpp" "$N/inflate.cpp" -o "$OUT/sound_world_test"
 "$OUT/sound_world_test" "$L/fight.w3dl" "$L/life.w3dl" "$L/trade.w3dl" "$L/party.w3dl"

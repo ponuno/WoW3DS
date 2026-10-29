@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 
 using namespace w3d;
 
@@ -25,7 +26,9 @@ static void usage() {
         "  --model-tex N         max model texture size (default 64)\n"
         "  --format etc1|rgb565  texture format (default etc1; alpha -> etc1a4/rgba4)\n"
         "  --max-tris N          triangle budget per model (default 400)\n"
+        "  --draw-error YD       how far a simplified model may move from its exact shape (default 0.15; 0 = 2% of its size)\n"
         "  --max-doodads N       limit doodad placements (default all; synthetic 600)\n"
+        "  --synthetic-variety N with --synthetic: N distinct models and textures per tile (streaming tests)\n"
         "  --no-wmo              skip buildings (WMO)\n"
         "  --no-wmo-doodads      buildings without the models placed inside them\n"
         "  --wmo-exterior-only   drop interior-only WMO groups\n"
@@ -36,7 +39,14 @@ static void usage() {
         "  --no-floors           no COLL entries at all (walking ignores building floors and walls)\n"
         "  --no-walls            COLL with floors only (walking passes through walls)\n"
         "  --no-doodad-coll      no collision of doodads (fences, tree trunks, model bridges)\n"
-        "  --doodad-coll-tris N  collision triangle budget per doodad model (96; 0 = all)\n"
+        "  --no-fx               no particle emitters and lamp glows on doodads (stage 5.32)\n"
+        "  --no-spell-fx         no spell effects with the creatures (stage 5.33)\n"
+        "  --explain-spell L     print the Spell -> SpellVisual -> Kit -> EffectName chain of these spell ids (comma list)\n"
+        "  --spell-fx            only the spell effects into -o pack (normally with the creatures / --all)\n"
+        "  --doodad-coll-tris N  collision triangle budget per doodad model (default 0 = all; 96 was the limit before 6.18)\n"
+        "  --no-exact-ground     no GRND entries (the ground to walk on = the old 129x129 grid of the drawn corners)\n"
+        "  --no-terrain-centers  do not draw the centre vertices (cheaper; the walker then sinks up to ~1 yd on rough ground)\n"
+        "  --terrain-centers     (default since 6.19b) draw the centre vertex of every ground square too (the shape the walker stands on; +50% LOD 0 triangles)\n"
         "  --world               every tile of the map (0..63; missing ones are skipped), big packs go through a spill file\n"
         "  --creatures           add creature displays + skinned animated models (all of CreatureDisplayInfo)\n"
         "  --creature-displays L only these display ids (comma list), implies --creatures\n"
@@ -44,15 +54,29 @@ static void usage() {
         "  --dungeons            every instance map of Map.dbc that is only a WDT with one building: map<ID>.w3dp into the folder of -o\n"
         "  --gameobjects [L]     models of ordinary game objects (pumpkins, banners, chests ...); L = path keywords, empty: all\n"
         "  --transports          ship and zeppelin models (GameObjectDisplayInfo) + transports.txt (paths, decks)\n"
-        "  --transport-filter L  model path keywords of transports (default transport,zeppelin,ship,boat)\n"
+        "  --transport-filter L  model path keywords of transports (default transport,zeppelin,ship,boat,elevator,subway,tram)\n"
+        "  --default-objects L   with --creatures every game object model comes along (6.12); L = path keywords to keep only\n"
+        "                        those (e.g. chest,herb,mineral,vein,mailbox,sign,door,gate - the old compact set; the log says the size)\n"
+        "  --no-default-objects  leave that set out (only --gameobjects adds object models)\n"
         "  --no-items            players without worn items (armour on the body, helmets, shoulders, weapons)\n"
         "  --item-tris N         triangle budget per item model (default 300)\n"
         "  --item-tex N          max texture size of item models (default 128)\n"
         "  --creature-tex N      max creature texture size (default 128)\n"
         "  --creature-tris N     triangle budget per creature model (default 800)\n"
+        "  --player-tris N       triangle budget per character (race) model, all geosets together (default 3500)\n"
         "  --creature-anim-kb N  animation budget per creature model, KB (default 320; 0 = every animation)\n"
         "  --player-anim-kb N    animation budget per race model, KB (default 900)\n"
+        "  --water-tex N         max size of a liquid texture frame (default 128)\n"
+        "  --water-frames N      animation frames of each liquid, 1..30 (default 30; fewer = less memory)\n"
+        "  --water-tint F        0..1 how much the Light.dbc water colour tints the texture (default: by the texture)\n"
+        "  --no-wmo-water        leave out the liquids of buildings (canals, fountains, dungeon pools)\n"
         "  --texts-only          only write spells.txt and factions.txt next to -o (seconds, no tiles)\n"
+        "  --all                 EVERYTHING in one run into the folder of -o: ui.w3dp + texts, sound/, every map of Map.dbc\n"
+        "                        (map<ID>.w3dp with the tiles only) and ONE shared asset pool common.w3dp (+ common1.w3dp ...)\n"
+        "                        with all textures, models, buildings, creatures, players, items, ships (each stored once)\n"
+        "  --maps L              with --all: only these Map.dbc ids (comma list; default all but test maps 13,25,29,42,169,451)\n"
+        "  --no-ui / --no-sound-step   with --all: leave out the interface pack / the sound\n"
+        "  --pool-part-mb N      with --all: pool part size (default 3900: FAT32 files stay below 4 GB)\n"
         "  -v                    verbose\n"
         "ui options:\n"
         "  --ui-skin F           sprite list (default: built in, same as ui_skin.txt)\n"
@@ -68,11 +92,15 @@ static void usage() {
 static bool pow2ok(int v) { return v >= 8 && v <= 1024 && (v & (v - 1)) == 0; }
 
 int main(int argc, char** argv) {
+    w3d::installCrashGuard();
     Options o;
     std::string info;
-    bool textsOnly = false, uiMode = false, soundMode = false;
+    bool textsOnly = false, uiMode = false, soundMode = false, spellFxMode = false;
+    std::vector<uint32_t> explainIds;
     SoundOptions so;
     UiOptions uo;
+    AllOptions ao;
+    bool allMode = false;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         auto next = [&]() -> const char* {
@@ -107,16 +135,23 @@ int main(int argc, char** argv) {
         }
         else if (a == "--max-tris") o.maxModelTris = std::atoi(next());
         else if (a == "--max-doodads") o.maxDoodads = std::atoi(next());
+        else if (a == "--synthetic-variety") o.syntheticVariety = std::atoi(next());
         else if (a == "--no-wmo") o.noWmo = true;
         else if (a == "--no-wmo-doodads") o.noWmoDoodads = true;
         else if (a == "--wmo-exterior-only") o.wmoExteriorOnly = true;
         else if (a == "--wmo-tex") o.wmoTex = std::atoi(next());
         else if (a == "--wmo-tris") o.wmoGroupTris = std::atoi(next());
+        else if (a == "--draw-error") o.drawMaxError = (float)std::atof(next());
         else if (a == "--dump-placements") o.dumpPlacements = next();
         else if (a == "--no-floors") o.noFloors = true;
         else if (a == "--no-walls") o.noWalls = true;
         else if (a == "--no-doodad-coll") o.noDoodadColl = true;
+        else if (a == "--no-fx") o.noFx = true;
+        else if (a == "--no-spell-fx") o.spellFx = false;
         else if (a == "--doodad-coll-tris") o.doodadCollTris = std::atoi(next());
+        else if (a == "--no-exact-ground") o.exactGround = false;
+        else if (a == "--terrain-centers") o.terrainCenters = true;
+        else if (a == "--no-terrain-centers") o.terrainCenters = false;
         else if (a == "--creatures") o.creatures = true;
         else if (a == "--players") o.players = true;
         else if (a == "--no-items") o.noItems = true;
@@ -127,25 +162,58 @@ int main(int argc, char** argv) {
             if (i + 1 < argc && argv[i + 1][0] != '-') o.goFilter = argv[++i];
         }
         else if (a == "--transport-filter") { o.transports = true; o.transportFilter = next(); }
+        else if (a == "--default-objects") { o.defaultObjects = true; o.defaultObjectWords = next(); }
+        else if (a == "--no-default-objects") o.defaultObjects = false;
         else if (a == "--item-tris") o.itemModelTris = std::atoi(next());
         else if (a == "--item-tex") o.itemTex = std::atoi(next());
         else if (a == "--creature-displays") { o.creatures = true; o.creatureDisplays = next(); }
         else if (a == "--creature-tex") o.creatureTex = std::atoi(next());
         else if (a == "--creature-tris") o.creatureTris = std::atoi(next());
+        else if (a == "--player-tris") o.playerTris = std::atoi(next());
         else if (a == "--creature-anim-kb") o.creatureAnimKb = std::atoi(next());
         else if (a == "--player-anim-kb") o.playerAnimKb = std::atoi(next());
         else if (a == "--synthetic") o.synthetic = true;
+        else if (a == "--all") allMode = true;
+        else if (a == "--maps") {
+            std::string l = next();
+            for (size_t p = 0; p < l.size();) {
+                size_t q = l.find(',', p);
+                if (q == std::string::npos) q = l.size();
+                if (q > p) ao.maps.insert((uint32_t)std::strtoul(l.substr(p, q - p).c_str(), nullptr, 10));
+                p = q + 1;
+            }
+        }
+        else if (a == "--no-ui") ao.ui = false;
+        else if (a == "--no-sound-step") ao.sound = false;
+        else if (a == "--pool-part-mb") ao.partBytes = (uint64_t)std::max(1, std::atoi(next())) << 20;
+        else if (a == "--pool-part-kb") ao.partBytes = (uint64_t)std::max(16, std::atoi(next())) << 10;   // tests
+        else if (a == "--water-tex") o.waterTex = std::atoi(next());
+        else if (a == "--water-frames") o.waterFrames = std::max(1, std::min(30, std::atoi(next())));
+        else if (a == "--water-tint") o.waterTint = (float)std::atof(next());
+        else if (a == "--no-wmo-water") o.noWmoWater = true;
         else if (a == "--info") info = next();
         else if (a == "--texts-only") textsOnly = true;
         else if (a == "--ui") uiMode = true;
         else if (a == "--sound") soundMode = true;
+        else if (a == "--spell-fx") spellFxMode = true;
+        else if (a == "--explain-spell") {   // 5.35f: comma list of Spell.dbc ids
+            for (const char* q = next(); *q;) {
+                char* e = nullptr;
+                const unsigned long v = std::strtoul(q, &e, 10);
+                if (e == q) break;
+                explainIds.push_back((uint32_t)v);
+                q = *e == ',' ? e + 1 : e;
+            }
+        }
         else if (a == "--sound-events") so.eventsFile = next();
         else if (a == "--no-music") so.music = false;
         else if (a == "--no-ambience") so.ambience = false;
         else if (a == "--no-areas") so.areas = false;
         else if (a == "--no-world-sounds") so.world = false;
+        else if (a == "--sound-max-sec") so.worldMaxSec = std::max(1, std::min(60, std::atoi(next())));
         else if (a == "--sound-variants") so.worldVariants = std::max(1, std::min(10, std::atoi(next())));
         else if (a == "--ui-skin") uo.skinConfig = next();
+        else if (a == "--consoleport") uo.consolePort = next();
         else if (a == "--ui-font") uo.font = next();
         else if (a == "--ui-font-fallback") uo.fallbackFonts.push_back(next());
         else if (a == "--ui-font-small") uo.fontSmall = next();
@@ -159,7 +227,7 @@ int main(int argc, char** argv) {
     }
     if (!info.empty()) return printPackInfo(info);
     if (o.grid != 9 && o.grid != 5 && o.grid != 3) { std::fputs("--grid must be 9, 5 or 3\n", stderr); return 1; }
-    if (!pow2ok(o.terrainTex) || !pow2ok(o.modelTex)) { std::fputs("texture sizes must be pow2 in 8..1024\n", stderr); return 1; }
+    if (!pow2ok(o.terrainTex) || !pow2ok(o.modelTex) || !pow2ok(o.waterTex)) { std::fputs("texture sizes must be pow2 in 8..1024\n", stderr); return 1; }
 
     auto t0 = std::chrono::steady_clock::now();
     PackWriter pack;
@@ -177,6 +245,27 @@ int main(int argc, char** argv) {
         size_t cut = o.out.find_last_of("\\/");
         return cut == std::string::npos ? std::string() : o.out.substr(0, cut + 1);
     };
+    if (!explainIds.empty()) {
+        if (o.synthetic) { std::fputs("--explain-spell needs --data\n", stderr); return 1; }
+        return explainSpells(data, explainIds);
+    }
+    if (allMode) {   // stage 5.27: everything, one shared asset pool
+        if (o.synthetic) { std::fputs("--all needs --data\n", stderr); return 1; }
+        ao.folder = o.out == "test.w3dp" ? std::string(".") : o.out;
+        std::error_code ec;
+        std::filesystem::create_directories(ao.folder, ec);
+        return convertAll(o, data, ao, uo, so);
+    }
+    if (spellFxMode) {   // stage 5.33: a pack with the spell effects only (tests; --all puts them into the pool)
+        if (o.synthetic) { std::fputs("--spell-fx needs --data\n", stderr); return 1; }
+        PackWriter pack;
+        ConvStats st;
+        if (!convertSpellEffects(o, data, pack, st)) return 4;
+        if (!pack.write(o.out)) { std::fprintf(stderr, "cannot write %s\n", o.out.c_str()); return 3; }
+        std::printf("  effects: %zu models with %zu particle emitters and %zu glow sprites (%zu animated), %zu emitters dropped (no rate / life)\n", st.fxModels, st.fxEmitters, st.fxGlows, st.fxAnimated, st.fxEmittersDropped);
+        std::printf("wrote %s\n", o.out.c_str());
+        return 0;
+    }
     if (soundMode) {
         if (o.synthetic) { std::fputs("--sound needs --data\n", stderr); return 1; }
         so.outDir = o.out == "test.w3dp" ? std::string("sound") : o.out;
@@ -191,11 +280,15 @@ int main(int argc, char** argv) {
         o.out = uo.out;
         bool ok = convertUi(uo, data, o.verbose);
         exportSpellNames(data, textDir() + "spells.txt", o.verbose);
+        exportSpellDescriptions(data, textDir() + "spelldesc.bin", o.verbose);
         exportFactions(data, textDir() + "factions.txt", o.verbose);
         exportTalents(data, textDir() + "talents.txt", o.verbose);
+        exportSkills(data, textDir() + "skills.txt", o.verbose);
         exportTaxi(data, textDir() + "taxi.txt", o.verbose);
         exportLocks(data, textDir() + "locks.txt", o.verbose);
+        exportAreaTriggers(data, textDir() + "areatriggers.txt", o.verbose);
         exportEmotes(data, textDir() + "emotes.txt", o.verbose);
+        exportGlueTexts(data, textDir() + "glue.txt", o.verbose);
         exportTransports(data, textDir() + "transports.txt", o.verbose);
         double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         std::printf("done in %.0f s\n", secs);
@@ -204,11 +297,15 @@ int main(int argc, char** argv) {
     if (textsOnly) {   // stage 5.12: the text files of the 3DS client without converting anything else
         if (o.synthetic) { std::fputs("--texts-only needs --data\n", stderr); return 1; }
         bool spells = exportSpellNames(data, textDir() + "spells.txt", o.verbose);
+        exportSpellDescriptions(data, textDir() + "spelldesc.bin", o.verbose);
         bool facts = exportFactions(data, textDir() + "factions.txt", o.verbose);
         exportTalents(data, textDir() + "talents.txt", o.verbose);
+        exportSkills(data, textDir() + "skills.txt", o.verbose);
         exportTaxi(data, textDir() + "taxi.txt", o.verbose);
         exportLocks(data, textDir() + "locks.txt", o.verbose);
+        exportAreaTriggers(data, textDir() + "areatriggers.txt", o.verbose);
         exportEmotes(data, textDir() + "emotes.txt", o.verbose);
+        exportGlueTexts(data, textDir() + "glue.txt", o.verbose);
         exportTransports(data, textDir() + "transports.txt", o.verbose);
         return spells || facts ? 0 : 4;
     }
@@ -231,6 +328,7 @@ int main(int argc, char** argv) {
             if (!dp.setSpillPath(m.out + ".spill")) std::fprintf(stderr, "note: cannot create %s.spill\n", m.out.c_str());
             if (!convertDungeon(m, data, dp, ds)) continue;
             emitCollision(m, dp, ds);
+            emitLiquids(m, &data, dp, ds);
             if (m.creatures || m.players || m.gameobjects) convertCreatures(m, data, dp, ds);
             if (!dp.write(m.out)) { std::fprintf(stderr, "cannot write %s\n", m.out.c_str()); continue; }
             std::printf("  wrote %s: %zu buildings, %zu models, %zu textures, floors %zu triangles\n", m.out.c_str(), ds.wmoOk,
@@ -267,17 +365,25 @@ int main(int argc, char** argv) {
     if (st.tiles == 0) { std::fputs("no tiles converted\n", stderr); return 2; }
     if (st.dump) std::fclose(st.dump);
     emitCollision(o, pack, st);
+    progress(true, "liquids of %zu tiles ...", st.liquids.size());
+    emitLiquids(o, o.synthetic ? nullptr : &data, pack, st);
     if ((o.creatures || o.players || o.transports || o.gameobjects) && !o.synthetic) {
         std::printf(o.creatures ? "creatures...\n" : "players...\n");
         convertCreatures(o, data, pack, st);
+        if (o.players) convertGlueScenes(o, data, pack, st);   // stage 5.29: the login / character screen scenes
+        if (o.spellFx) convertSpellEffects(o, data, pack, st);   // stage 5.33
     }
     if (o.creatures && !o.synthetic) {   // the 3DS action bar reads spells.txt next to the pack, the reactions factions.txt
         exportSpellNames(data, textDir() + "spells.txt", o.verbose);
+        exportSpellDescriptions(data, textDir() + "spelldesc.bin", o.verbose);
         exportFactions(data, textDir() + "factions.txt", o.verbose);
         exportTalents(data, textDir() + "talents.txt", o.verbose);
+        exportSkills(data, textDir() + "skills.txt", o.verbose);
         exportTaxi(data, textDir() + "taxi.txt", o.verbose);
         exportLocks(data, textDir() + "locks.txt", o.verbose);
+        exportAreaTriggers(data, textDir() + "areatriggers.txt", o.verbose);
         exportEmotes(data, textDir() + "emotes.txt", o.verbose);
+        exportGlueTexts(data, textDir() + "glue.txt", o.verbose);
     }
     if ((o.creatures || o.transports) && !o.synthetic) exportTransports(data, textDir() + "transports.txt", o.verbose);
     progress(true, "writing %s ...", o.out.c_str());
@@ -292,8 +398,17 @@ int main(int argc, char** argv) {
     }
     std::printf("wrote %s in %.1fs\n", o.out.c_str(), secs);
     std::printf("  tiles: %zu converted, %d skipped\n", st.tiles, failed);
+    std::printf("  draw error (6.19b): %.2f yd; %zu models kept more triangles than their budget to stay on their collision\n", o.drawMaxError, g_errorBoundModels);
+    std::printf("  model LODs (6.12): %zu submeshes, level 1 for %zu (%zu of %zu tris), level 2 for %zu (%zu tris), %zu levels refused (a part would vanish)\n", (size_t)g_lodStats.subs,
+                (size_t)g_lodStats.lod1, (size_t)g_lodStats.tris1, (size_t)g_lodStats.tris0, (size_t)g_lodStats.lod2, (size_t)g_lodStats.tris2, (size_t)g_lodStats.rejected);
     std::printf("  terrain: %zu verts, %zu tris (grid %d); water: %zu tris\n", st.terrainVerts, st.terrainTris, o.grid,
                 st.waterTris);
+    std::printf("  ground (6.18a): GRND for %zu tiles, %.1f MB%s\n", st.groundTiles, st.groundBytes / 1048576.0,
+                o.terrainCenters ? "; the centre vertices are drawn too" : "");
+    std::printf("  liquids: %zu tiles, %zu MCLQ layers, %zu cells (%zu deep), %zu building cells from %zu groups; %zu texture frames"
+                " (%zu missing), LIQD %.0f KB%s\n", st.liquidTiles, st.liquidLayers, st.liquidCells, st.liquidDeepCells,
+                st.liquidQuads, st.liquidWmoGroups, st.liquidFramesOk, st.liquidFramesMissing, st.liquidBytes / 1024.0,
+                st.liquidMclqBad ? " (some MCLQ layers cut short)" : "");
     if (st.wmoSkipped) std::printf("  note: %zu WMO placements skipped (--no-wmo)\n", st.wmoSkipped);
     if (st.wmoPlacements || st.wmoFailed)
         std::printf("  buildings: %zu placed (%zu distinct WMO ok, %zu failed), %zu groups converted (%zu failed, %zu interior skipped),\n"
@@ -306,6 +421,11 @@ int main(int argc, char** argv) {
                     "          to tiles, COLL %.1f MB (largest tile %.0f KB)\n",
                     st.collSource, st.collWalkable, st.collWalls, st.m2CollModels, st.m2CollSimplified, st.m2CollPlaced, st.m2CollSource,
                     st.m2CollWalkable, st.m2CollWalls, st.collPieces, st.collBytes / 1048576.0, st.collMaxTileBytes / 1024.0);
+    if (st.collSource || st.m2CollSource)   // 6.14 audit: what is solid
+        std::printf("  collision audit: %zu of %zu models have a collision mesh (the rest are not solid in the game either: grass, banners,\n"
+                    "          flowers), %zu of them invisible walls / floors kept as stand-ins; %zu transport decks (%zu from the drawn mesh),\n"
+                    "          %zu platforms among the objects\n",
+                    st.m2CollModels, st.modelsOk, st.m2CollOnly, st.transportDecks, st.transportDecksFromMesh, st.staticDecks);
     if (o.creatures)
         std::printf("  creatures: %zu displays (%zu failed), %zu models (%zu failed), %zu tris, %zu bones, %zu palettes,\n"
                     "             %zu animations, %.1f MB of animation keys; %zu of %zu vertices lose >10%% weight (2 bones kept)\n",
@@ -323,6 +443,7 @@ int main(int argc, char** argv) {
                     st.itemDisplays, st.itemLayers, st.itemLayerBytes / 1048576.0, st.itemModels, st.itemModelsFailed,
                     st.itemModelTris, st.itemHelms, st.itemCapes);
     std::printf("  winding: %zu M2 and %zu WMO submeshes flipped to match their normals\n", st.m2SubsFlipped, st.wmoSubsFlipped);
+    std::printf("  effects: %zu models with %zu particle emitters and %zu glow sprites (%zu animated), %zu emitters dropped (no rate / life)\n", st.fxModels, st.fxEmitters, st.fxGlows, st.fxAnimated, st.fxEmittersDropped);
     if (st.duplicatesSkipped) std::printf("  %zu duplicate placements skipped (same uniqueId listed by several tiles)\n", st.duplicatesSkipped);
     std::printf("  models: %zu ok, %zu failed, %zu tris total (unique)\n", st.modelsOk, st.modelsFailed, st.modelTrisTotal);
     std::printf("  placements: %zu\n", st.placements);

@@ -75,6 +75,21 @@ blp("Interface\\Minimap\\MinimapArrow.blp", 32, 32, lambda x, y: (255, 255, 0, 2
 for s in ("Head", "Neck", "Shoulder", "Chest", "Feet", "MainHand", "Bag"):
     blp("Interface\\PaperDoll\\UI-PaperDoll-Slot-%s.blp" % s, 64, 64, lambda x, y: (40, 40, 50, 255) if (x + y) % 16 else (90, 90, 110, 255))
 blp("Interface\\Glues\\CharacterCreate\\UI-CharacterCreate-Classes.blp", 256, 256, lambda x, y: ((x // 64) * 70, (y // 64) * 70, 120, 255))
+# stage 5.29: glue screens (a logo, red glue buttons, a gold border, an edit box, arrows, race / gender sheets)
+blp("Interface\\Glues\\Common\\Glues-WoW-Logo.blp", 256, 128,
+    lambda x, y: (255, 200, 40, 255) if 20 < y < 108 and (x // 16 + y // 16) % 2 else (0, 0, 0, 0))
+for state, c in (("Up", (170, 20, 10)), ("Down", (120, 10, 5)), ("Disabled", (80, 70, 70)), ("Highlight", (255, 255, 160))):
+    blp("Interface\\Glues\\Common\\Glue-Panel-Button-%s.blp" % state, 128, 32,
+        lambda x, y, c=c: (c + (255,) if 2 < x < 78 and 2 < y < 20 else (230, 180, 60, 255)) if x < 80 and y < 22 else (0, 0, 0, 0))
+blp("Interface\\Glues\\Common\\Glue-Tooltip-Border.blp", 128, 16, lambda x, y: (240, 200, 60, 255 if (x % 16) < 3 or y < 3 else 0))
+blp("Interface\\Common\\Common-Input-Border.blp", 128, 32,
+    lambda x, y: (150, 150, 150, 255) if y < 20 and (x < 4 or x > 123 or y < 3 or y > 16) else (0, 0, 0, 0))
+for side in ("Left", "Right"):
+    blp("Interface\\Glues\\Common\\Glue-%sArrow-Button-Up.blp" % side, 32, 32,
+        lambda x, y, sd=side: (255, 210, 0, 255 if (x > 16 - abs(y - 16) if sd == "Left" else x < 16 + abs(y - 16)) and 6 < x < 26 and 6 < y < 26 else 0))
+blp("Interface\\Glues\\CharacterCreate\\UI-CharacterCreate-Races.blp", 256, 256,
+    lambda x, y: (60 + (x // 64) * 50, 40 + (y // 64) * 50, 200 - (y // 128) * 100, 255))
+blp("Interface\\Glues\\CharacterCreate\\UI-CharacterCreate-Gender.blp", 128, 64, lambda x, y: ((80, 120, 255, 255) if x < 64 else (255, 120, 180, 255)))
 
 # ---- world maps: Elwynn (zone, 12 tiles) with one overlay, Azeroth (continent); Westfall has only 3 tiles (skipped)
 def mapTile(name, i, base):
@@ -86,6 +101,28 @@ def mapTile(name, i, base):
 for i in range(12): mapTile("Elwynn", i, (40, 90, 30))
 for i in range(12): mapTile("Azeroth", i, (20, 40, 90))
 for i in range(3): mapTile("Westfall", i, (90, 90, 30))
+# UI stage 8: the unit frame art in the real layout (target's way round: portrait hole centred at (182, 44) radius 31, the
+# level's circle at (203, 66), name and bars at x 31..150, y 22..64), elite with a golden "dragon" on the right
+def unitFrame(elite):
+    def px(x, y):
+        d = math.hypot(x - 182, y - 44)
+        if d < 31: return (0, 0, 0, 0)
+        if d < 35: return (200, 160, 60, 255)
+        dl = math.hypot(x - 203, y - 66)
+        if dl < 8: return (20, 18, 12, 255)
+        if dl < 10: return (200, 160, 60, 255)
+        if 29 <= x <= 152 and 20 <= y <= 66 and (x < 31 or x > 150 or y < 22 or y > 64 or y in (41, 52, 53)):
+            return (170, 140, 60, 255)
+        if elite and 205 <= x <= 250 and 4 <= y <= 90 and (x + y) % 5 < 3 and math.hypot(x - 182, y - 44) < 70: return (230, 190, 40, 255)
+        return (0, 0, 0, 0)
+    return px
+blp("Interface\\TargetingFrame\\UI-TargetingFrame.blp", 256, 128, unitFrame(False))
+blp("Interface\\TargetingFrame\\UI-TargetingFrame-Elite.blp", 256, 128, unitFrame(True))
+blp("Interface\\CharacterFrame\\UI-StateIcon.blp", 64, 64, lambda x, y: (255, 230, 120, 255) if x < 32 and y < 27 and (x // 4 + y // 4) % 2 else
+    (255, 60, 40, 255) if x >= 32 and y < 31 and abs((x - 32) - y) < 4 else (0, 0, 0, 0))
+blp("Interface\\GroupFrame\\UI-Group-LeaderIcon.blp", 16, 16, lambda x, y: (255, 210, 0, 255) if y > 6 and y < 13 else (0, 0, 0, 0))
+blp("Interface\\TargetingFrame\\UI-TargetingFrame-Skull.blp", 16, 16, lambda x, y: (240, 240, 240, 255) if (x - 8) ** 2 + (y - 7) ** 2 < 30 else (0, 0, 0, 0))
+blp("Interface\\MainMenuBar\\UI-ExhaustionTickNormal.blp", 32, 32, lambda x, y: (120, 200, 255, 255) if abs(x - 16) + abs(y - 16) < 9 else (0, 0, 0, 0))
 blp("Interface\\WorldMap\\Elwynn\\Goldshire1.blp", 128, 128, lambda x, y: (255, 0, 0, 255) if x < 100 and y < 80 else (0, 0, 0, 0))
 
 S = Strings()
@@ -107,6 +144,8 @@ dbc("Spell.dbc", 173, spells, S.b)
 # Lock.dbc: ID, Type[8], Index[8], Skill[8], Action[8] (33 fields); 99 = a herb needing herbalism 50
 lk = [99] + [2] + [0] * 7 + [2] + [0] * 7 + [50] + [0] * 7 + [0] * 8
 dbc("Lock.dbc", 33, [lk], b"\0")
+# AreaTrigger.dbc: ID, Map, X, Y, Z, Radius, Box length / width / height / yaw (10 fields): a sphere and a turned box
+dbc("AreaTrigger.dbc", 10, [[2173, 369, -4.0, 5.0, 6.0, 3.5, 0.0, 0.0, 0.0, 0.0], [45, 0, 100.0, 200.0, 30.0, 0.0, 10.0, 4.0, 6.0, 1.5708]], b"\0")
 S = Strings()
 idi = []
 for did, n in ((1001, "INV_Misc_Food_15"), (1002, "INV_Shirt_05"), (1003, "INV_Misc_Food_15"), (1004, "")):

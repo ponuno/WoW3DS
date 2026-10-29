@@ -69,9 +69,27 @@ public:
     bool known(uint32_t id) const;
     size_t size() const { return names_.size(); }
     void add(uint32_t id, const std::string& name, const std::string& rank);
+    // UI stage 10: spells cast at a point on the ground (spells.txt "@ground id range radius"): nullptr for the others
+    struct Ground { float range = 30, radius = 5; };
+    const Ground* ground(uint32_t id) const { auto it = ground_.find(id); return it == ground_.end() ? nullptr : &it->second; }
+    void addGround(uint32_t id, float range, float radius) { ground_[id] = Ground{range, radius}; }
+    // 5.48: spells that need no unit target (Battle Shout, self buffs, around-the-caster areas; spells.txt "@self id"): the
+    // client sends them without a target, as the original does - a selected enemy made the server refuse them.
+    bool selfCast(uint32_t id) const { return selfCast_.count(id) != 0; }
+    void addSelfCast(uint32_t id) { selfCast_.insert(id); }
+    // UI stage 12: the cooldowns of Spell.dbc (spells.txt "@cd id recovery category categoryRecovery onEvent", ms). The
+    // 1.12 server does not send them for ordinary casts: the client starts them itself when its cast goes off.
+    struct Cooldown { uint32_t rec = 0, category = 0, catRec = 0; bool onEvent = false; };
+    const Cooldown* cooldown(uint32_t id) const { auto it = cd_.find(id); return it == cd_.end() ? nullptr : &it->second; }
+    void addCooldown(uint32_t id, const Cooldown& c) { cd_[id] = c; }
+    size_t cooldownCount() const { return cd_.size(); }
+    size_t groundCount() const { return ground_.size(); }
     SpellNames();
 private:
     std::unordered_map<uint32_t, std::pair<std::string, std::string>> names_;
+    std::unordered_map<uint32_t, Ground> ground_;
+    std::unordered_set<uint32_t> selfCast_;
+    std::unordered_map<uint32_t, Cooldown> cd_;
 };
 
 struct ActionButton { uint32_t action = 0; uint8_t type = 0; };   // type 0 = spell (1.12: 0x40 macro, 0x80 item)
@@ -102,6 +120,9 @@ struct ItemInfo {
     uint32_t armor = 0, delayMs = 0, bonding = 0, maxDurability = 0;
     float dmgMin = 0, dmgMax = 0;
     uint32_t spellId[5] = {0, 0, 0, 0, 0}, spellTrigger[5] = {0, 0, 0, 0, 0};   // trigger 0 = on use
+    // UI stage 12: the item's own cooldowns of its spells (ms, -1 = the spell's), category (potions share one)
+    int32_t spellCooldown[5] = {-1, -1, -1, -1, -1}, spellCatCooldown[5] = {-1, -1, -1, -1, -1};
+    uint32_t spellCategory[5] = {0, 0, 0, 0, 0};
     std::string name, description;
     int32_t statType[10] = {0}, statValue[10] = {0};   // ItemModType (3 agility, 4 strength, 5 intellect, 6 spirit, 7 stamina)
     int32_t resist[6] = {0};            // holy, fire, nature, frost, shadow, arcane
@@ -117,7 +138,8 @@ const char* itemSubclassName(uint32_t cls, uint32_t subclass);   // "Sword", "Le
 // resistances, durability ('it' for the current value, may be nullptr), level, Use: / Equip: spells, description,
 // sell price. Spell names come from 'spells'.
 struct InvItem;
-std::vector<std::string> itemTooltip(const ItemInfo& i, const InvItem* it, const class SpellNames& spells);
+std::vector<std::string> itemTooltip(const ItemInfo& i, const InvItem* it, const class SpellNames& spells,
+                                     const class SpellDescTable* desc = nullptr);   // 6.20: with desc the Use: / Equip: lines tell what the spell does
 const char* inventoryTypeName(uint32_t t);   // "Head", "Main Hand", "Bag" ...
 
 // Where an item is, in the addressing the item packets use: bag 255 = the character itself (slots 0..18
@@ -245,6 +267,46 @@ struct Party {
     std::vector<PartyMember> members;   // without us
 };
 
+// ---------------------------------------------------------------- pets (UI stage 13: hunter and warlock pets)
+// SMSG_PET_SPELLS (vMaNGOS Player::PetSpellInitialize): u64 guid (0 = no pet any more), u32 duration, u8 react state,
+// u8 command state, u8 0, u8 flags (0x8 = the bar is disabled), 10 x u32 bar entries (action | type << 24), u8 n,
+// n x u32 spells (the pet's book), u16 m, m x {u32 spell, u16 category, u32 cooldown, u32 category cooldown}.
+// Bar: 0..2 attack / follow / stay (type 7), 3..6 spells, 7..9 aggressive / defensive / passive (type 6).
+// Spell types: 0x01 passive, 0x81 castable, 0xC1 castable + auto-cast on.
+namespace PetAct {
+enum : uint8_t { Passive = 0x01, Reaction = 0x06, Command = 0x07, Disabled = 0x81, Enabled = 0xC1 };
+}
+enum : uint8_t { kPetStay = 0, kPetFollow = 1, kPetAttack = 2 };                    // CommandStates
+enum : uint8_t { kPetPassive = 0, kPetDefensive = 1, kPetAggressive = 2 };          // ReactStates
+constexpr int kPetBarSlots = 10;
+struct PetState {
+    bool active = false;                 // we have a pet (or a charmed unit) with an action bar
+    uint64_t guid = 0;
+    uint8_t react = kPetDefensive, command = kPetFollow;
+    bool enabled = true;                 // false: the bar is disabled (the pet is dead or away)
+    uint32_t bar[kPetBarSlots] = {0};
+    std::vector<uint32_t> spells;        // the book: spell | type << 24
+    std::string name;                    // SMSG_PET_NAME_QUERY_RESPONSE (else the creature's name)
+    uint32_t number = 0, nameAskedMs = 0;
+    uint32_t bars = 0;                   // SMSG_PET_SPELLS received (statistics)
+    static uint32_t spellOf(uint32_t packed) { return packed & 0xFFFFFF; }
+    static uint8_t typeOf(uint32_t packed) { return (uint8_t)(packed >> 24); }
+};
+// Stable master (MSG_LIST_STABLED_PETS, SMSG_STABLE_RESULT; vMaNGOS WorldSession::SendStablePet): the current pet and the
+// stabled ones. Slot 1 = the current pet, 2.. = stable slots.
+struct StabledPet {
+    uint32_t number = 0, entry = 0, level = 0, loyalty = 0;
+    std::string name;
+    uint8_t slot = 0;
+};
+struct StableWindow {
+    bool open = false;
+    uint64_t npc = 0;
+    uint8_t slots = 0;                   // stable slots bought (0..2)
+    std::vector<StabledPet> pets;
+    uint8_t result = 0xFF;               // the last SMSG_STABLE_RESULT
+};
+
 // ---------------------------------------------------------------- friends, ignore, guild (UI stage 6)
 // SMSG_FRIEND_LIST / SMSG_IGNORE_LIST at login and on request, SMSG_FRIEND_STATUS for every change
 // (vMaNGOS PlayerSocial / SocialMgr); the guild roster from SMSG_GUILD_ROSTER (WorldPackets::Guild::GuildRoster).
@@ -330,6 +392,23 @@ struct TradeState {
     bool open() const { return phase == Phase::Open; }
 };
 
+// ---------------------------------------------------------------- liquids (stage 5.26)
+// The bars at the top of the screen (SMSG_START_MIRROR_TIMER, vMaNGOS Player::SendMirrorTimerStart): u32 type, u32 value
+// (ms left), u32 max, i32 scale (-1: running down a ms per ms; 10: filling back up ten times faster), u8 paused, u32 spell.
+// Types 0 fatigue (deep water), 1 breath (under water), 2 feign death. Drowning, exhaustion, lava and slime damage come
+// as SMSG_ENVIRONMENTALDAMAGELOG (u64 victim, u8 type, u32 damage, absorb, resist; type 0 exhausted, 1 drowning,
+// 2 fall, 3 lava, 4 slime, 5 fire).
+struct MirrorTimer {
+    bool active = false, paused = false;
+    uint32_t maxMs = 0, value = 0, baseMs = 0, spell = 0;
+    int32_t scale = -1;
+    uint32_t valueAt(uint32_t nowMs) const;   // ms left now
+};
+enum : uint8_t { kMirrorFatigue = 0, kMirrorBreath = 1, kMirrorFeign = 2, kMirrorTimers = 3 };
+const char* mirrorTimerName(uint32_t type);   // "Fatigue", "Breath", "Feign Death"
+// PvP rank title (1.12 honor ranks 5..18 -> Private / Scout ... Grand Marshal / High Warlord), "" below rank 5.
+const char* pvpRankName(uint32_t rank, bool horde);
+
 // ---------------------------------------------------------------- death (stage 5.10)
 enum class Life : uint8_t { Alive, Dead, Ghost };
 struct CorpseInfo {
@@ -347,6 +426,26 @@ constexpr uint32_t kGlobalCooldownMs = 1500;
 std::string castResultText(uint32_t code);
 std::string inventoryResultText(uint32_t code);
 std::string moneyText(uint32_t copper);      // "1g 2s 3c"
+
+// ---------------------------------------------------------------- the character's voice (UI stage 8)
+// What the character says when something cannot be done, like the original's vocal error messages
+// (Sound\Character\<Race>\...\<Race><Gender>_err_<token>NN.wav): the session only says WHICH line; the client
+// plays it in the voice of our race and gender (sounds.txt "V race gender token sound").
+enum class Vocal : uint8_t {
+    None = 0, NoMana, NoRage, NoEnergy, OutOfRange, NoTarget, InvalidTarget, SpellCooldown, AbilityCooldown, ItemCooldown,
+    NoAmmo, ChestInUse, InventoryFull, BagFull, ItemMaxCount, NotABag, CantUseItem, ItemLocked, NotEquippable,
+    CantEquipLevel, CantEquipSkill, CantEquipEver, CantDropSoulbound, NotEnoughMoney, CantLearnSpell, LootTooFar,
+    LootDidntKill, CantLoot, Count
+};
+const char* vocalToken(Vocal v);             // the file name token: "nomana", "outofrange" ... ("" for None)
+Vocal vocalFromToken(const std::string& t);  // the reverse (None when unknown)
+// SpellCastResult -> the line (powerType: ours, 0 mana / 1 rage / 3 energy; cls: our class, warriors and rogues say
+// "ability" instead of "spell").
+Vocal vocalForCastResult(uint32_t code, uint8_t powerType, uint32_t cls);
+Vocal vocalForInventoryResult(uint32_t code);
+Vocal vocalForLootError(uint8_t error);
+// A red line at the top of the screen (the original's UIErrorsFrame): errors of casts, items, attacks, loot.
+struct UiError { std::string text; uint32_t ms = 0; };
 
 class GameSession {
 public:
@@ -372,7 +471,7 @@ public:
     Mover mover;
 
     struct Stats {
-        uint32_t teleports = 0, newWorlds = 0, speedChanges = 0, roots = 0, queries = 0, packetsOut = 0, flagAcks = 0;
+        uint32_t teleports = 0, newWorlds = 0, speedChanges = 0, roots = 0, queries = 0, packetsOut = 0, flagAcks = 0, areaTriggers = 0;
     } stats;
 
     // Packet tap (both directions) for recording sessions: dir 0 = server->client, 1 = client->server.
@@ -392,6 +491,25 @@ public:
     bool sendTyped(const std::string& line, uint32_t nowMs);
     std::string lineText(const ChatLine& l) const;   // "[Name] says: text" etc.
     void addLocal(const std::string& text, uint32_t nowMs);
+    // System text of the server added as a System line (SMSG_SERVER_MESSAGE, MOTD-like notices)
+    void addSystem(const std::string& text, uint32_t nowMs);
+
+    // ---- channels and chat commands (stage 5.46)
+    // Slot i = channel number i+1 as in the original client ("" = free; the first free slot takes the next channel).
+    const std::vector<std::string>& channelSlots() const { return channels_; }
+    int channelNumber(const std::string& name) const;            // 1-based, 0 = not joined
+    void joinChannel(const std::string& name, const std::string& password, uint32_t nowMs);   // CMSG_JOIN_CHANNEL
+    void leaveChannel(const std::string& name, uint32_t nowMs);                               // CMSG_LEAVE_CHANNEL
+    void listChannel(const std::string& name, uint32_t nowMs);                                // CMSG_CHANNEL_LIST
+    // CMSG_CHANNEL_* with (channel, player) or (channel) payload: moderator, kick, ban, invite, announcements ...
+    void channelCommand(uint16_t opcode, const std::string& channel, const std::string* arg, uint32_t nowMs);
+    void roll(uint32_t lo, uint32_t hi, uint32_t nowMs);          // MSG_RANDOM_ROLL
+    void who(const std::string& query, uint32_t nowMs);          // CMSG_WHO
+    static std::string channelNoticeText(uint8_t kind, const std::string& channel, const std::string& a, const std::string& b);
+    static std::vector<std::string> commandHelp();               // lines of /help
+    static std::vector<std::string> emoteNames();                // the /emotes list
+    uint64_t lastWhisperGuid = 0;                                // /r answers the player who whispered last
+    std::string lastWhisperTo;                                   // and the one we whispered last
 
     // ---- target and melee (stage 5.7)
     uint64_t target() const { return target_; }
@@ -419,6 +537,43 @@ public:
     std::deque<MeleeHit> hits;          // newest last, at most 32
     uint32_t xpGained = 0, kills = 0;
 
+    // ---- other players (UI stage 9): duels, following, inspecting - the original's unit menu of a player
+    struct DuelState {
+        uint64_t arbiter = 0;           // the duel flag object of SMSG_DUEL_REQUESTED (0: no duel)
+        uint64_t opponent = 0;
+        std::string opponentName;
+        bool challenged = false;        // they challenged us: Accept / Decline
+        bool asked = false;             // we challenged them: waiting (Cancel)
+        bool fighting = false;          // accepted: the countdown, then the fight (the opponent is attackable)
+        uint32_t startMs = 0;           // when the fight starts (the countdown's end)
+        bool outOfBounds = false;       // we left the duel area (SMSG_DUEL_OUTOFBOUNDS): back within 10 s or lose
+        uint32_t outMs = 0;
+        std::string result;             // "X has defeated Y in a duel" (shown for a while)
+        uint32_t resultMs = 0;
+        bool active() const { return challenged || asked || fighting; }
+    } duel;
+    static constexpr uint32_t kSpellDuel = 7266;
+    // The Duel spell at the target player; false + a line when it cannot be (no player targeted, a duel already on).
+    bool challengeDuel(uint32_t nowMs);
+    // Accept (CMSG_DUEL_ACCEPTED) or decline / cancel our challenge / give up (CMSG_DUEL_CANCELLED).
+    void answerDuel(bool accept, uint32_t nowMs);
+    // Following (the original's /follow): the client runs after a unit; any move of our own stops it.
+    uint64_t following = 0;
+    std::string followingName;
+    static constexpr float kFollowStartRange = 28.0f, kFollowLoseRange = 40.0f;
+    bool startFollow(uint64_t guid, const float pos[3], uint32_t nowMs);   // false + a line: too far / nobody
+    void stopFollow(uint32_t nowMs, bool tell = true);
+    // Every frame while following: true = run forward facing *yaw; stops (with a line) when the unit is gone or too far.
+    bool followStep(const float pos[3], float* yaw, uint32_t nowMs);
+    // Inspecting a player: CMSG_INSPECT and MSG_INSPECT_HONOR_STATS; the gear is the player's visible items (public
+    // fields, item queries as needed). False + a line when too far (28 yd) / not a player.
+    bool inspect(uint64_t guid, const float pos[3], uint32_t nowMs);
+    uint32_t visibleItem(const WorldObject& player, int slot) const;   // item entry worn in equipment slot 0..18 (0: none)
+    struct HonorView { uint64_t guid = 0; bool known = false; uint8_t highestRank = 0; uint32_t todayKills = 0, lifetimeHK = 0,
+                       lifetimeDHK = 0, lastWeekHonor = 0, lastWeekRank = 0; };
+    HonorView honor;                                     // of the last inspected player
+    uint64_t inspected = 0;
+
     // ---- loot (stage 5.7, window stage 5.10). With autoLoot everything is taken and the window released
     // at once (the stage-5.7 behaviour, used by w3dlogin --fight); otherwise lootWindow stays open until
     // takeLoot / takeAllLoot / closeLoot.
@@ -437,6 +592,7 @@ public:
     // Static data of an item entry; nullptr until the answer arrives (the query is sent on the next update()).
     const ItemInfo* itemInfo(uint32_t entry);
     const ItemInfo* itemInfoIfKnown(uint32_t entry) const;
+    void testSetItemInfo(const ItemInfo& i) { items_[i.entry] = i; }   // tests: an item's query answer without the packet
     std::string itemName(uint32_t entry);              // "Worn Shortsword", or "Item 25" while unknown
     // Everything the character carries: equipped (bag 255, slots 0..18), bags (19..22), backpack (23..38) and the
     // contents of each bag, in that order. From PLAYER_FIELD_INV_SLOT_HEAD and the item/container objects.
@@ -444,6 +600,9 @@ public:
     uint32_t money() const;                            // PLAYER_FIELD_COINAGE (copper)
     uint32_t freeBagSlots() const;
     void useItem(const InvItem& it, uint32_t nowMs);   // CMSG_USE_ITEM on self / the target
+    // UI stage 10: an item whose spell is placed on the ground (grenades, bombs, target dummies): its on-use spell, or 0
+    uint32_t itemGroundSpell(uint32_t entry) const;
+    void useItemAt(const InvItem& it, const float pos[3], uint32_t nowMs);
     void openItem(const InvItem& it, uint32_t nowMs);  // CMSG_OPEN_ITEM (clams, lockboxes, satchels: a loot window)
     void equipItem(const InvItem& it, uint32_t nowMs); // CMSG_AUTOEQUIP_ITEM
     void unequipItem(const InvItem& it, uint32_t nowMs);   // CMSG_AUTOSTORE_BAG_ITEM into the bags
@@ -464,6 +623,12 @@ public:
     struct ObjectAction { const char* verb = nullptr; uint32_t spell = 0; std::string why; };
     ObjectAction objectAction(const WorldObject& o) const;
     LockTable locks;                                     // locks.txt
+    // Stage 5.28: areatriggers.txt. Call every frame with our feet position while in the world (not during a load, not on a
+    // taxi): each newly entered trigger goes to the server as CMSG_AREATRIGGER (its answer: the transfer / new world, or
+    // SMSG_AREA_TRIGGER_MESSAGE as a chat line). Returns the number of packets sent.
+    AreaTriggerTable areaTriggers;
+    AreaTriggerWatch triggerWatch;
+    int checkAreaTriggers(const float pos[3], uint32_t nowMs);
     EmoteTable emotes;                                   // emotes.txt (Emotes.dbc: emote -> animation)
     // Emotes and sitting (the animation stage): /dance /wave ... and /sit /stand /sleep
     static uint32_t textEmoteId(const std::string& cmd);
@@ -472,6 +637,10 @@ public:
     // Sound events for the client (audio.cpp names: "coin", "questaccept", "questcomplete", "whisper", "invite",
     // "mail"); the touch-screen UI drains them every frame.
     std::vector<const char*> sounds;
+    // An area explored for the first time (SMSG_EXPLORATION_EXPERIENCE, stage 5.45): sound("discover"), the chat line
+    // "Discovered <name>: N experience gained" (names from areaName, set by the client from glue.txt), and this record.
+    struct Discovery { uint32_t area = 0, xp = 0, seq = 0; } discovery;
+    std::function<std::string(uint32_t)> areaName;
     void sound(const char* e) { if (sounds.size() < 16) sounds.push_back(e); }
     // Sounds in the world (proto3ds/source/sound_world.cpp turns them into positioned sounds): melee swings,
     // casts starting / going off (with up to 4 hit targets) / failing.
@@ -485,6 +654,19 @@ public:
     };
     std::vector<WorldSound> worldSounds;
     void worldSound(const WorldSound& w) { if (worldSounds.size() < 48) worldSounds.push_back(w); }
+    // UI stage 8: what the character says (the client drains it every frame) and the red error lines of the top screen
+    // (newest last, at most 3, the HUD fades them after a few seconds). error() = a chat line + both.
+    std::vector<Vocal> vocals;
+    void vocal(Vocal v) { if (v != Vocal::None && vocals.size() < 8) vocals.push_back(v); }
+    std::deque<UiError> uiErrors;
+    void error(const std::string& text, Vocal v, uint32_t nowMs, const std::string& chatLine = std::string());
+    // Text emotes heard (SMSG_TEXT_EMOTE: ours echoed back and the players' around): the client plays the emote's voice
+    // for the race and gender of who did it (EmotesTextSound.dbc, sounds.txt "T").
+    struct HeardEmote { uint64_t guid = 0; uint32_t textEmote = 0; };
+    std::vector<HeardEmote> heardEmotes;
+    // The NPC whose window (gossip, vendor, trainer, quests, bank, flight master, auctioneer, innkeeper) is open now, 0 none:
+    // the client greets with its voice when one opens and says goodbye when it closes.
+    uint64_t npcWindow() const;
 
     // ---- gossip (stage 5.10)
     GossipMenu gossip;
@@ -523,12 +705,21 @@ public:
     // Spells to show on the touch bar: the server's bar slots that hold a spell, in slot order (duplicates
     // dropped); without any server bar, the spells of the book that have a real name.
     std::vector<uint32_t> barSpells() const;
-    uint32_t cooldownLeftMs(uint32_t spell, uint32_t nowMs) const;   // own cooldown (spell, 0 = ready)
+    uint32_t cooldownLeftMs(uint32_t spell, uint32_t nowMs) const;   // own cooldown (spell or its category, 0 = ready)
+    uint32_t cooldownTotalMs(uint32_t spell) const;                  // how long that cooldown was when it started (the sweep)
+    // UI stage 12: an item's cooldown (its on-use spells, its category: all potions share one), 0 = ready / unknown
+    uint32_t itemCooldownLeftMs(uint32_t entry, uint32_t nowMs) const;
+    uint32_t itemCooldownTotalMs(uint32_t entry) const;
+    // Starts our cooldown of a spell that went off (from the item 'itemEntry' when non-zero): the item's own numbers, else
+    // Spell.dbc's; "on event" spells wait for SMSG_COOLDOWN_EVENT (force).
+    void startCooldown(uint32_t spell, uint32_t itemEntry, uint32_t nowMs, bool force = false);
     uint32_t gcdLeftMs(uint32_t nowMs) const { return nowMs < gcdEnd_ ? gcdEnd_ - nowMs : 0; }
     // Casts at the current target (or self when there is none). "Attack" toggles auto-attack instead.
     // Returns false and adds a local line when it cannot be sent (unknown spell, cooldown, busy casting).
     bool castSpell(uint32_t spell, uint32_t nowMs);
     void cancelCast(uint32_t nowMs);                  // CMSG_CANCEL_CAST
+    // UI stage 10: a spell at a point on the ground (TARGET_FLAG_DEST_LOCATION 0x40 + x, y, z); same checks as castSpell.
+    bool castSpellAt(uint32_t spell, const float pos[3], uint32_t nowMs);
     // Own power for the bar: type from UNIT_BYTES_0 byte 3 (0 mana, 1 rage, 2 focus, 3 energy); rage is x10 on the wire.
     struct Power { uint8_t type; uint32_t cur, max; };
     Power selfPower() const;
@@ -583,6 +774,19 @@ public:
     uint32_t questsAccepted = 0, questsCompleted = 0, questQueries = 0, questUpdates = 0;
     uint32_t lastQuestInvalid = 0xFFFFFFFFu;
 
+    // ---- liquids and fishing (stage 5.26)
+    MirrorTimer mirror[kMirrorTimers];
+    uint32_t envDamageTaken = 0, lastEnvDamageMs = 0;
+    uint8_t lastEnvDamageType = 0;
+    // Our fishing bobber (GAMEOBJECT_TYPE_FISHINGNODE 17 created by us) in range, 0 = none. When a fish bites the server
+    // plays the splash animation (SMSG_GAMEOBJECT_CUSTOM_ANIM u64 guid, u32 anim) and the bobber must be used within
+    // a few seconds (CMSG_GAMEOBJ_USE -> the loot window); too early or too late: SMSG_FISH_NOT_HOOKED / _ESCAPED.
+    uint64_t fishingBobber() const;
+    bool fishBiting(uint32_t nowMs) const;             // a bite on our bobber in the last kFishBiteMs
+    static constexpr uint32_t kFishBiteMs = 5000, kFishingRange = 45;
+    uint32_t fishBiteMs = 0, fishBites = 0, fishCaughtTries = 0, fishEscaped = 0, fishNotHooked = 0;
+    uint64_t fishBiteGuid = 0;
+
     // ---- party (stage 5.17)
     Party party;
     std::string groupInviteFrom;                       // SMSG_GROUP_INVITE: who invites us (empty = no invitation)
@@ -629,6 +833,12 @@ public:
     // Player name from the cache, asking the server when unknown (friends, mail senders, guild invites).
     std::string playerName(uint64_t guid, uint32_t nowMs);
 
+    // Second line under a unit's name (stage 5.42): "<Guild>" for a player (PLAYER_GUILDID -> CMSG_GUILD_QUERY cache),
+    // "<Subname>" for a creature (CreatureCache subname: "Armorer", "Flight Master", ...); empty when there is none.
+    std::string guildNameOf(uint32_t id) const;           // cached name, empty while unknown
+    std::string unitSubtitle(const WorldObject& o) const;
+    void updateGuildNames(uint32_t nowMs);               // asks the server for the guilds of players in view
+
     // ---- bank (UI stage 6)
     BankWindow bank;
     void openBank(uint64_t npc, uint32_t nowMs);         // CMSG_BANKER_ACTIVATE -> SMSG_SHOW_BANK
@@ -655,6 +865,12 @@ public:
     // CMSG_LEARN_TALENT for the next rank; false + a line when it cannot be learned (points, tier, prerequisite).
     bool learnTalent(uint32_t talentId, uint32_t nowMs);
     uint32_t classId() const;                            // UNIT_BYTES_0 byte 1
+    // ---- skills (stage 6.19): the skill page - weapon skills, professions, languages ... with their progress
+    SkillTable skills;                                   // skills.txt
+    SpellDescTable spellDesc;                            // spelldesc.bin (6.20): descriptions of spells, numbers filled in
+    struct SkillState { uint32_t id = 0; uint16_t value = 0, max = 0; int16_t tempBonus = 0, permBonus = 0; };
+    std::vector<SkillState> playerSkills() const;        // the 128 skill slots of the player's fields, empty ones left out
+    void unlearnSkill(uint32_t skill, uint32_t nowMs);   // CMSG_UNLEARN_SKILL (the server only allows the professions)
     // ---- mail (UI stage 6)
     MailWindow mail;
     void openMailbox(uint64_t box, uint32_t nowMs);      // CMSG_GET_MAIL_LIST
@@ -689,12 +905,57 @@ public:
     void cancelTrade(uint32_t nowMs);                    // CMSG_CANCEL_TRADE
     uint32_t tradesDone = 0;
 
+    // ---- pets (UI stage 13)
+    PetState pet;
+    uint64_t petGuid() const;                           // our pet (UNIT_FIELD_SUMMON) or the charmed unit of the bar, 0 = none
+    const WorldObject* petObject() const;
+    // The pet's commands and the bar (CMSG_PET_ACTION). Attack uses our target. False + a line when nothing was sent.
+    bool petCommand(uint8_t command, uint32_t nowMs);               // kPetStay / kPetFollow / kPetAttack
+    bool petReaction(uint8_t react, uint32_t nowMs);                // kPetPassive / kPetDefensive / kPetAggressive
+    bool petCastSpell(uint32_t spell, uint32_t nowMs);              // a spell of the pet's book at our target
+    void petStopAttack(uint32_t nowMs);                             // CMSG_PET_STOP_ATTACK
+    bool petKnowsSpell(uint32_t spell) const;
+    bool petAutocast(uint32_t spell) const;                         // auto-cast on (type 0xC1)
+    bool petCanAutocast(uint32_t spell) const;                      // castable, not passive
+    void petSetAutocast(uint32_t spell, bool on, uint32_t nowMs);   // CMSG_PET_SPELL_AUTOCAST
+    uint32_t petCooldownLeftMs(uint32_t spell, uint32_t nowMs) const;
+    uint32_t petCooldownTotalMs(uint32_t spell) const;
+    void petDismiss(uint32_t nowMs);                    // CMSG_PET_ABANDON: a warlock's demon goes away; a hunter's pet is gone for good
+    bool petCanRename() const;                          // UNIT_FLAG_PET_RENAME on the pet (hunter pets, once)
+    bool petCanAbandon() const;                         // a hunter's pet
+    bool petRename(const std::string& name, uint32_t nowMs);   // CMSG_PET_RENAME
+    std::string petName() const;                        // the pet's own name (query), else the creature's
+    // 0 unknown, 1 unhappy, 2 content, 3 happy (UNIT_FIELD_POWER5 of the pet, 333000 per step); loyalty level 1..6 (BYTES_1 byte 1)
+    int petHappiness() const;
+    int petLoyalty() const;
+    // Feed Pet (spell 6991) with an item of the bags (TARGET_FLAG_ITEM); false + a line when the spell is not known.
+    bool feedPet(const InvItem& food, uint32_t nowMs);
+    std::vector<InvItem> petFoodCandidates();           // food and meat of the bags (the server decides the diet)
+    static constexpr uint32_t kSpellFeedPet = 6991;
+    uint32_t petFeedback = 0;                           // SMSG_PET_ACTION_FEEDBACK count
+    std::string lastPetNameInvalid;
+    // stable master
+    StableWindow stable;
+    void openStable(uint64_t npc, uint32_t nowMs);      // MSG_LIST_STABLED_PETS (the gossip option opens it by itself)
+    void stableCurrentPet(uint32_t nowMs);              // CMSG_STABLE_PET: the current pet into a free slot
+    void unstablePet(const StabledPet& p, uint32_t nowMs);   // CMSG_UNSTABLE_PET, or STABLE_SWAP_PET when we have a pet
+    void buyStableSlot(uint32_t nowMs);                 // CMSG_BUY_STABLE_SLOT
+    void closeStable() { stable = StableWindow(); }
+
 private:
+    bool handlePet(uint16_t opcode, const Bytes& data, uint32_t nowMs);
+    void updatePet(uint32_t nowMs);
+    std::unordered_map<uint32_t, uint32_t> petCdEnd_, petCdLen_;   // spell -> local time / length (ms)
+    uint32_t petGoneMs_ = 0;
+    std::unordered_map<uint32_t, std::string> guildNames_;   // guild id -> name (SMSG_GUILD_QUERY_RESPONSE)
+    std::unordered_map<uint32_t, uint32_t> guildAskMs_;      // guild id -> when we last asked
+    uint32_t guildScanMs_ = 0;
     bool handleFriends(uint16_t opcode, const Bytes& data, uint32_t nowMs);
     bool handleServices(uint16_t opcode, const Bytes& data, uint32_t nowMs);   // bank, taxi
     bool handleMail(uint16_t opcode, const Bytes& data, uint32_t nowMs);
     bool handleAuction(uint16_t opcode, const Bytes& data, uint32_t nowMs);
     bool handleTrade(uint16_t opcode, const Bytes& data, uint32_t nowMs);
+    bool handleWater(uint16_t opcode, const Bytes& data, uint32_t nowMs);
     std::unordered_map<uint32_t, std::string> mailTexts_;
     std::unordered_set<uint32_t> mailTextAsked_;
     void updateServices(uint32_t nowMs);                 // windows of NPCs / objects we walked away from close
@@ -732,6 +993,9 @@ private:
     bool lifeSeen_ = false;
     uint32_t invScanMs_ = 0;
     std::unordered_map<uint32_t, uint32_t> cooldownEnd_;   // spell -> local time
+    std::unordered_map<uint32_t, uint32_t> cooldownLen_;   // spell -> its length (ms) when it started
+    std::unordered_map<uint32_t, uint32_t> categoryEnd_, categoryLen_;   // cooldown category -> local time / length
+    std::unordered_map<uint32_t, uint32_t> spellCategory_;               // spell -> category (Spell.dbc, items, the server)
     std::unordered_map<uint64_t, CastState> unitCasts_;    // other units' casts (SMSG_SPELL_START with a cast time)
     struct AuraTime { uint32_t spell = 0, endMs = 0; };
     std::array<AuraTime, kAuraSlots> auraTime_{};          // our auras: SMSG_UPDATE_AURA_DURATION
@@ -746,6 +1010,7 @@ private:
 
     uint64_t target_ = 0;
     bool attackWanted_ = false, attackOn_ = false, faceRequest_ = false;
+    bool followMoving_ = false;
     uint16_t attackError_ = 0;
     uint32_t attackErrorMs_ = 0;
     uint64_t lootGuid_ = 0;

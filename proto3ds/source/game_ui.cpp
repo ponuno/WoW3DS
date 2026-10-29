@@ -64,12 +64,16 @@ void GameUi::reset() {
     auctionMode_ = 0; auctionSel_ = -1; auctionSellItem_ = -1; auctionQuery_.clear(); auctionBid_ = auctionBuyout_ = 0;
     tradeSel_ = -1;
     windowNpc_ = 0;
+    kb_ = Kb();
+    kbReturn_ = Panel::Tabs;
+    chatDest_ = "s";
 }
 
 GameUi::Panel GameUi::panel(const w3n::GameSession& g) const {
     if (g.life() != w3n::Life::Alive || g.resurrectOffer.active || g.spiritHealerConfirm) return Panel::Death;
+    if (kb_.on) return Panel::Keyboard;
     if (open_ == Panel::Confirm) return Panel::Confirm;
-    if (!g.groupInviteFrom.empty() || !g.guildInviteFrom.empty()) return Panel::Invite;
+    if (!g.groupInviteFrom.empty() || !g.guildInviteFrom.empty() || g.duel.challenged || g.duel.asked) return Panel::Invite;
     if (g.trade.phase != w3n::TradeState::Phase::None) return Panel::Trade;
     if (g.lootWindow.open) return Panel::Loot;
     if (open_ == Panel::ItemInfo || open_ == Panel::SpellInfo) return open_;   // a tooltip over any window
@@ -79,6 +83,7 @@ GameUi::Panel GameUi::panel(const w3n::GameSession& g) const {
     if (g.binderConfirm) return Panel::Binder;
     if (g.bank.open) return Panel::Bank;
     if (g.taxi.open) return Panel::Taxi;
+    if (g.stable.open) return Panel::Stable;
     if (g.mail.open) return Panel::Mail;
     if (g.auction.open) return Panel::Auction;
     if (g.gossip.open) return Panel::Gossip;
@@ -102,7 +107,7 @@ void GameUi::setTab(Tab t) {
         if (t == Tab::Bags && tab_ != Tab::Bags) subBags_ = 0;
         tab_ = t;
     }
-    if (open_ == Panel::Menu || open_ == Panel::Context || open_ == Panel::Buffs) open_ = Panel::Tabs;
+    if (open_ == Panel::Menu || open_ == Panel::Context || open_ == Panel::Buffs || open_ == Panel::Pet) open_ = Panel::Tabs;
     dirty_ = true;
 }
 
@@ -205,15 +210,86 @@ void GameUi::faceTarget(const w3n::GameSession& g, const Input& in, Output& out)
 // ------------------------------------------------------------------ actions
 void GameUi::pressSpell(w3n::GameSession& g, uint32_t spell, const Input& in, Output& out) {
     if (g.life() != w3n::Life::Alive) { hint("You are dead", in.nowMs); return; }
+    if (g.spellNames.ground(spell)) { beginPlace(g, in, spell, 0, out); return; }   // UI stage 10
     const w3n::WorldObject* t = g.objects.find(g.target());
     bool toggleOff = spell == w3n::kSpellAttack && g.attackWanted();
     // soft target: without a living target, the enemy in front (melee range for Attack, 30 yd for spells)
-    if (!toggleOff && (!t || t->dead() || t->self)) {
+    if (!toggleOff && !g.spellNames.selfCast(spell) && (!t || t->dead() || t->self)) {
         uint64_t s = g.softEnemy(in.pos, in.yaw, spell == w3n::kSpellAttack ? 8.0f : 30.0f, 1.05f, in.nowMs);
         if (s) { g.setTarget(s, in.nowMs); t = g.objects.find(s); }
     }
-    if (!toggleOff && t && t->hasPos && !t->dead() && !t->self) faceTarget(g, in, out);
+    if (!toggleOff && !g.spellNames.selfCast(spell) && t && t->hasPos && !t->dead() && !t->self) faceTarget(g, in, out);
     g.castSpell(spell, in.nowMs);
+}
+
+// ------------------------------------------------------------------ ground spells (UI stage 10)
+// Like the console versions of WoW (and ConsolePort's reticle targeting): the spell does not go off at once - a ring
+// shows where it will land, the C-Stick moves it (the way the camera looks), the same button again casts. The ring
+// starts on the target when it is in range, else in front of us; it never leaves the spell's range.
+void GameUi::beginPlace(w3n::GameSession& g, const Input& in, uint32_t spell, uint32_t item, Output& out) {
+    const w3n::SpellNames::Ground* gr = g.spellNames.ground(spell);
+    if (place_.on && place_.spell == spell && place_.item == item) { confirmPlace(g, in, out); return; }   // pressed again
+    place_ = Place();
+    place_.spell = spell;
+    place_.item = item;
+    place_.range = gr ? std::max(1.0f, gr->range) : 30.0f;
+    place_.radius = gr ? std::max(1.0f, gr->radius) : 5.0f;
+    place_.lastMs = in.nowMs;
+    bool onTarget = false;
+    if (const w3n::WorldObject* t = g.objects.find(g.target()); t && t->hasPos && !t->dead() && !t->self) {
+        float p[3];
+        t->positionAt(in.nowMs, p);
+        if (dist3(p, in.pos) <= place_.range) { memcpy(place_.pos, p, sizeof p); onTarget = true; }
+    }
+    if (onTarget && in.cfg && in.cfg->groundCast == 1) { place_.on = true; confirmPlace(g, in, out); return; }   // "At target"
+    if (!onTarget) {   // in front of us: as far as the camera looks, up to 10 yd (and the range)
+        const float d = std::min(10.0f, place_.range * 0.8f);
+        place_.pos[0] = in.pos[0] + cosf(in.camYaw) * d;
+        place_.pos[1] = in.pos[1] + sinf(in.camYaw) * d;
+        place_.pos[2] = in.pos[2];
+        float z;
+        if (in.groundAt && in.groundAt(place_.pos[0], place_.pos[1], in.pos[2] + 6.0f, &z)) place_.pos[2] = z;
+    }
+    place_.on = true;
+    dirty_ = true;
+}
+
+void GameUi::updatePlace(w3n::GameSession& g, const Input& in, Output& out) {
+    if (!place_.on) return;
+    if (g.life() != w3n::Life::Alive) { place_.on = false; return; }
+    const float dt = std::min(0.1f, (in.nowMs - place_.lastMs) / 1000.0f);
+    place_.lastMs = in.nowMs;
+    // the C-Stick moves the ring: up = away along the camera, right = to the camera's right; faster when far
+    const float speed = 14.0f + 0.5f * place_.range;
+    const float fx = cosf(in.camYaw), fy = sinf(in.camYaw);
+    place_.pos[0] += (fx * in.stickY + fy * in.stickX) * speed * dt;
+    place_.pos[1] += (fy * in.stickY - fx * in.stickX) * speed * dt;
+    // within range of us (also when we walk away from it)
+    const float dx = place_.pos[0] - in.pos[0], dy = place_.pos[1] - in.pos[1], d = sqrtf(dx * dx + dy * dy);
+    const float maxD = std::max(0.5f, place_.range - 0.5f);
+    if (d > maxD) { place_.pos[0] = in.pos[0] + dx / d * maxD; place_.pos[1] = in.pos[1] + dy / d * maxD; }
+    float z;
+    if (in.groundAt && in.groundAt(place_.pos[0], place_.pos[1], std::max(place_.pos[2], in.pos[2]) + 6.0f, &z)) place_.pos[2] = z;
+    out.placing = true;
+    memcpy(out.placePos, place_.pos, sizeof place_.pos);
+    out.placeRadius = place_.radius;
+    out.placeName = place_.item ? g.itemName(place_.item) : g.spellNames.name(place_.spell);
+}
+
+void GameUi::confirmPlace(w3n::GameSession& g, const Input& in, Output& out) {
+    if (!place_.on) return;
+    place_.on = false;
+    dirty_ = true;
+    const float dx = place_.pos[0] - in.pos[0], dy = place_.pos[1] - in.pos[1];
+    if (dx * dx + dy * dy > (place_.range + 1.0f) * (place_.range + 1.0f)) { g.error("Out of range", w3n::Vocal::OutOfRange, in.nowMs); return; }
+    if (dx * dx + dy * dy > 1.0f) { out.faceYaw = true; out.yaw = atan2f(dy, dx); }   // face where it goes
+    if (place_.item) {
+        w3n::InvItem it;
+        if (barsView_ && barsView_->findItem(g, place_.item, &it)) g.useItemAt(it, place_.pos, in.nowMs);
+        else hint("None left: " + g.itemName(place_.item), in.nowMs);
+    } else {
+        g.castSpellAt(place_.spell, place_.pos, in.nowMs);
+    }
 }
 
 void GameUi::useSlot(w3n::GameSession& g, const Input& in, int slot, Output& out) {
@@ -239,8 +315,13 @@ void GameUi::useSlot(w3n::GameSession& g, const Input& in, int slot, Output& out
         pressSpell(g, a.id, in, out);
     } else if (a.type == ActionSlot::Item) {
         w3n::InvItem it;
-        if (in.bars->findItem(g, a.id, &it)) g.useItem(it, in.nowMs);
-        else hint("None left: " + g.itemName(a.id), in.nowMs);
+        if (!in.bars->findItem(g, a.id, &it)) hint("None left: " + g.itemName(a.id), in.nowMs);
+        else if (uint32_t gs = g.itemGroundSpell(a.id)) beginPlace(g, in, gs, a.id, out);   // bombs, dummies: on the ground
+        else g.useItem(it, in.nowMs);
+    } else if (a.type == ActionSlot::PetCmd) {
+        doAction(g, in, Act::PetCommand, (int)a.id, out);
+    } else if (a.type == ActionSlot::PetSpell) {
+        doAction(g, in, Act::PetCast, (int)a.id, out);
     } else {
         hint(tr("Empty slot: drag a spell here (Spells tab)", "Пустая ячейка: перетащите сюда заклинание (Книга)"), in.nowMs);
     }
@@ -249,7 +330,7 @@ void GameUi::useSlot(w3n::GameSession& g, const Input& in, int slot, Output& out
 
 void GameUi::dropOnSlot(const Input& in, int slot, Output& out) {
     if (!in.bars || !padSlotBindable(slot) || !drag_.kind) return;
-    ActionSlot a{drag_.kind == 1 ? ActionSlot::Spell : ActionSlot::Item, drag_.id};
+    ActionSlot a{drag_.kind >= 1 && drag_.kind <= 4 ? drag_.kind : (uint8_t)ActionSlot::Item, drag_.id};   // 1 spell, 2 item, 3 pet command, 4 pet spell
     in.bars->bind(slot, a);
     out.layoutChanged = true;
     std::string where = std::string(padSetName(slot / 8)) + (slot / 8 ? "+" : "") + padButtonGlyph(slot % 8);
@@ -259,10 +340,13 @@ void GameUi::dropOnSlot(const Input& in, int slot, Output& out) {
 void GameUi::interactAction(w3n::GameSession& g, const Input& in, Output& out) {
     const Panel p = panel(g);
     const bool forever = in.cfg && in.cfg->scheme == PadScheme::Forever;
+    if (place_.on) { confirmPlace(g, in, out); return; }   // UI stage 10: cast the ground spell at the ring
     if (p == Panel::Loot) { g.takeAllLoot(in.nowMs); return; }
     if (p == Panel::Quest) { questPrimary(g, in); return; }
     if (p == Panel::Invite) {
-        if (!g.groupInviteFrom.empty()) g.answerGroupInvite(true, in.nowMs);
+        if (g.duel.challenged) g.answerDuel(true, in.nowMs);
+        else if (g.duel.asked) return;   // (our own challenge: only Cancel)
+        else if (!g.groupInviteFrom.empty()) g.answerGroupInvite(true, in.nowMs);
         else g.answerGuildInvite(true, in.nowMs);
         return;
     }
@@ -314,17 +398,22 @@ void GameUi::interactAction(w3n::GameSession& g, const Input& in, Output& out) {
 void GameUi::cancelAction(w3n::GameSession& g, const Input& in) {
     if (drag_.active) { drag_ = Drag(); dirty_ = true; return; }
     if (bindArmed_) { bindArmed_ = false; hint("Binding cancelled", in.nowMs); return; }
+    if (place_.on) { place_.on = false; dirty_ = true; return; }   // UI stage 10: the ground spell is not cast
     const Panel p = panel(g);
     if (p == Panel::Confirm) { open_ = confirmReturn_; return; }
-    if (p == Panel::Menu || p == Panel::Context || p == Panel::ItemInfo || p == Panel::SpellInfo || p == Panel::Buffs) {
+    if (p == Panel::Menu || p == Panel::Context || p == Panel::ItemInfo || p == Panel::SpellInfo || p == Panel::Buffs ||
+        p == Panel::Inspect) {
         open_ = Panel::Tabs;
         return;
     }
+    if (p == Panel::Pet) { if (petFeedList_) petFeedList_ = false; else open_ = Panel::Tabs; return; }
+    if (p == Panel::Stable) { g.closeStable(); return; }
     if (phrases_) { phrases_ = false; return; }
     if (p == Panel::Loot) { g.closeLoot(in.nowMs); return; }
     if (p == Panel::Quest) { g.closeQuestDialog(in.nowMs); return; }
     if (p == Panel::Invite) {
-        if (!g.groupInviteFrom.empty()) g.answerGroupInvite(false, in.nowMs);
+        if (g.duel.challenged || g.duel.asked) g.answerDuel(false, in.nowMs);
+        else if (!g.groupInviteFrom.empty()) g.answerGroupInvite(false, in.nowMs);
         else g.answerGuildInvite(false, in.nowMs);
         return;
     }
@@ -346,29 +435,17 @@ void GameUi::cancelAction(w3n::GameSession& g, const Input& in) {
     if (g.target()) g.setTarget(0, in.nowMs);
 }
 
-bool GameUi::keyboard(w3n::GameSession& g, const Input& in, Output& out, const char* hintText, std::string& text, bool numbers) {
-    // The keyboard applet blocks this thread: release the movement keys first.
-    g.mover.stopAll(in.nowMs);
-    g.update(in.nowMs);
-    SwkbdState kb;
-    char buf[256] = {0};
-    swkbdInit(&kb, numbers ? SWKBD_TYPE_NUMPAD : SWKBD_TYPE_WESTERN, 2, numbers ? 9 : (int)sizeof(buf) - 1);
-    swkbdSetHintText(&kb, hintText);
-    if (!text.empty()) swkbdSetInitialText(&kb, text.c_str());
-    SwkbdButton b = swkbdInputText(&kb, buf, sizeof buf);
-    out.keyboardShown = true;
-    dirty_ = true;
-    if (b != SWKBD_BUTTON_RIGHT) return false;
-    text = buf;
-    return true;
-}
-
 void GameUi::openChat(w3n::GameSession& g, const Input& in, Output& out, const std::string& prefix) {
-    std::string text;
-    if (!keyboard(g, in, out, "say  /y /p /g /w Name /e /join X /1", text)) return;
-    if (text.empty()) return;
-    if (!prefix.empty() && text[0] != '/') text = prefix + text;
-    g.sendTyped(text, in.nowMs);
+    (void)out;
+    // the destination of the Write button decides the prefix (an explicit prefix wins); a typed "/command" is never prefixed
+    const std::string pre = prefix.empty() ? chatDestPrefix(g, chatDest_) : prefix;
+    const std::string dest = prefix.empty() ? chatDestLabel(g, chatDest_) : std::string();
+    g.mover.stopAll(in.nowMs);
+    askText(in, dest.empty() ? std::string(tr("Type a message or /command", "Сообщение или /команда")) : dest + ":", "", false,
+            [pre](w3n::GameSession& gg, uint32_t now, const std::string& text) {
+                if (text.empty()) return;
+                gg.sendTyped(text[0] == '/' ? text : pre + text, now);
+            });
 }
 
 const GameUi::Button* GameUi::hit(int x, int y) const {
@@ -452,6 +529,7 @@ void GameUi::touch(w3n::GameSession& g, const Input& in, Output& out) {
 GameUi::Output GameUi::update(w3n::GameSession& g, const Input& in, bool walking) {
     clicked_ = false;
     Output out = updateInner(g, in, walking);
+    updatePlace(g, in, out);   // UI stage 10: the ground spell's ring follows the C-Stick
     soundEvents(g, in, out);
     return out;
 }
@@ -540,6 +618,12 @@ GameUi::Output GameUi::updateInner(w3n::GameSession& g, const Input& in, bool wa
         if (g.enemyLike(*t)) lastHostile_ = g.target();
     touch(g, in, out);
     autoTabs(g, in);
+    if (kb_.on) {   // the on-screen keyboard: the character stands still, B closes it
+        out.blockMove = out.blockJump = true;
+        g.mover.stopAll(in.nowMs);
+        if (in.pad && in.pad->cancel) closeKeyboard();
+        return out;
+    }
     float yaw;
     if (g.takeFacingRequest(&yaw)) { out.faceYaw = true; out.yaw = yaw; }
     const PadOut* p = in.pad;
@@ -664,7 +748,7 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
                                                      : tr("Tabs switch with combat again", "Вкладки снова переключаются по бою"), now); break;
         case Act::SubView:
             if (tab_ == Tab::Bags) { subBags_ = arg; selected_ = page_ = 0; }
-            else if (tab_ == Tab::Spells) { subSpells_ = arg; page_ = 0; talentSel_ = -1; }
+            else if (tab_ == Tab::Spells) { subSpells_ = arg; page_ = 0; talentSel_ = -1; skillSel_ = 0; }
             else if (tab_ == Tab::Social) {
                 subSocial_ = arg; socialSel_ = -1; page_ = 0;
                 if (arg == 1) g.requestGuildRoster(now);
@@ -741,13 +825,22 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
             break;
         case Act::BuffCancel: if (buffSel_ && g.cancelAura(buffSel_, now)) buffSel_ = 0; break;
         case Act::InviteYes:
-            if (!g.groupInviteFrom.empty()) g.answerGroupInvite(true, now);
+            if (g.duel.challenged) g.answerDuel(true, now);
+            else if (!g.groupInviteFrom.empty()) g.answerGroupInvite(true, now);
             else g.answerGuildInvite(true, now);
             break;
         case Act::InviteNo:
-            if (!g.groupInviteFrom.empty()) g.answerGroupInvite(false, now);
+            if (g.duel.challenged || g.duel.asked) g.answerDuel(false, now);
+            else if (!g.groupInviteFrom.empty()) g.answerGroupInvite(false, now);
             else g.answerGuildInvite(false, now);
             break;
+        case Act::InspectSlot: {
+            Button b{};
+            b.infoKind = 1;
+            b.infoId = (uint32_t)arg;
+            showInfo(g, b);
+            break;
+        }
         case Act::ItemInfo: {
             infoReturn_ = open_;
             infoEntry_ = 0;
@@ -784,6 +877,20 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
         case Act::QuestClose: g.closeQuestDialog(now); break;
         case Act::QuestScroll: questScroll_ = std::max(0, questScroll_ + arg); break;
         case Act::LogSelect: logSel_ = arg; logView_ = 1; questScroll_ = 0; break;
+        case Act::SkillPick: skillSel_ = skillSel_ == (uint32_t)arg ? 0 : (uint32_t)arg; break;
+        case Act::SkillHeader: skillFolded_ ^= 1u << arg; page_ = 0; break;
+        case Act::SkillAbandon: {   // (the server lets only the professions go: SKILL_FLAG_UNLEARNABLE, anything else is reported as a cheat)
+            const w3n::SkillLine* sl = skillSel_ ? g.skills.find(skillSel_) : nullptr;
+            if (!sl || sl->category != 11) break;
+            if (!confirmed_) {
+                confirm(std::string(tr("Unlearn ", "Забыть навык «")) + sl->name + tr("? Its progress is lost.", "»? Прогресс будет потерян."),
+                        Act::SkillAbandon, 0);
+                break;
+            }
+            g.unlearnSkill(skillSel_, now);
+            skillSel_ = 0;
+            break;
+        }
         case Act::LogBack: logView_ = 0; page_ = 0; break;
         case Act::LogReputation: logView_ = 2; page_ = 0; break;
         case Act::TrackQuest: {
@@ -839,11 +946,11 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
                 case 4: setTab(Tab::Quests); logView_ = 0; break;
                 case 5: open_ = Panel::Buffs; buffSel_ = 0; break;
                 case 6: setTab(Tab::Settings); break;
-                case 7: out.freeCamera = true; break;
                 case 8: gamePage_ = false; out.showDebug = true; break;
                 case 9: out.quit = true; break;
                 case 10: setTab(Tab::Map); break;
                 case 11: setTab(Tab::Social); break;
+                case 12: open_ = Panel::Pet; petFeedList_ = false; petSel_ = -1; break;
             }
             selected_ = page_ = 0;
             break;
@@ -856,9 +963,10 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
                 case 3: {
                     const w3n::WorldObject* t = g.objects.find(g.target());
                     if (t && t->type == w3n::ObjType::Player && !t->name.empty()) {
-                        std::string text;
-                        if (keyboard(g, in, out, ("Whisper to " + t->name).c_str(), text) && !text.empty())
-                            g.sendChat(w3n::Chat::Whisper, text, t->name, now);
+                        const std::string nm = t->name;
+                        askText(in, std::string(tr("Whisper to ", "Шёпот: ")) + nm, "", false, [nm](w3n::GameSession& gg, uint32_t n, const std::string& text) {
+                            if (!text.empty()) { gg.lastWhisperTo = nm; gg.sendChat(w3n::Chat::Whisper, text, nm, n); }
+                        });
                     }
                     break;
                 }
@@ -893,6 +1001,19 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
                     else hint("Target a player first", now);
                     break;
                 }
+                case 12:   // UI stage 9: inspect, follow, duel, ignore, stop following
+                    if (g.inspect(g.target(), in.pos, now)) { inspect_ = g.target(); open_ = Panel::Inspect; }
+                    break;
+                case 13: g.startFollow(g.target(), in.pos, now); break;
+                case 14: g.challengeDuel(now); break;
+                case 15: {
+                    const w3n::WorldObject* t = g.objects.find(g.target());
+                    std::string nm = t ? (t->name.empty() ? g.objects.nameOf(t->guid) : t->name) : std::string();
+                    if (t && t->type == w3n::ObjType::Player && !nm.empty()) { g.addIgnore(nm, now); g.setTarget(0, now); }
+                    else hint("Target a player first", now);
+                    break;
+                }
+                case 16: g.stopFollow(now); break;
             }
             break;
         case Act::Setting:
@@ -910,10 +1031,21 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
                 case 51: in.cfg->camSpeed = std::min(4.5f, in.cfg->camSpeed + 0.3f); break;
                 case 60: in.cfg->questTracker = true; break;
                 case 61: in.cfg->questTracker = false; break;
+                case 190: in.cfg->groundCast = 0; break;
+                case 191: in.cfg->groundCast = 1; break;
+                case 180: in.cfg->showStats = true; break;
+                case 181: in.cfg->showStats = false; break;
+                case 200: in.cfg->perfLog = true; break;
+                case 201: in.cfg->perfLog = false; break;
+                case 202: in.cfg->perfLog = !in.cfg->perfLog; break;
+                case 203: in.cfg->gpuKick = !in.cfg->gpuKick; break;   // stage 6.3
+                case 204: in.cfg->vsync = !in.cfg->vsync; break;       // stage 6.4
+                case 205: in.cfg->fadeIn = !in.cfg->fadeIn; break;     // stage 6.11 (the renderer reads it every frame)
                 case 70: case 71: case 72: case 73: in.cfg->drawDist = arg - 70; out.graphicsChanged = true; break;
                 case 80: case 81: case 82: case 83: in.cfg->crowd = arg - 80; out.graphicsChanged = true; break;
                 case 95: case 96: case 97: in.cfg->topMode = arg - 95; out.graphicsChanged = true; break;
                 case 90: in.cfg->doodads = !in.cfg->doodads; out.graphicsChanged = true; break;
+                case 170: case 171: case 172: in.cfg->effects = arg - 170; out.graphicsChanged = true; break;
                 case 100: case 101: in.cfg->lang = arg - 100; ui::g_lang = in.cfg->lang; break;
                 case 110: in.cfg->bigText = !in.cfg->bigText; break;
                 case 120: in.cfg->dimHud = !in.cfg->dimHud; break;
@@ -950,21 +1082,56 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
             break;
         }
         // ---- chat (UI stage 3)
-        case Act::ChatChannel: chatChannel_ = arg; chatScroll_ = 0; break;
-        case Act::ChatScroll: chatScroll_ = std::max(0, chatScroll_ + arg); break;
-        case Act::ChatWrite: {
-            static const char* kPrefix[] = {"", "/s ", "/p ", "/g ", "", ""};
-            std::string prefix = arg >= 0 && arg < 6 ? kPrefix[arg] : "";
-            if (arg == 4) {   // whisper: to the last one who whispered
-                for (size_t i = g.chat.size(); i-- > 0;)
-                    if (g.chat[i].type == w3n::Chat::Whisper || g.chat[i].type == w3n::Chat::WhisperInform) {
-                        std::string who = g.chat[i].name.empty() ? g.chat[i].channel : g.chat[i].name;
-                        if (!who.empty()) { prefix = "/w " + who + " "; break; }
-                    }
-            }
-            openChat(g, in, out, prefix);
+        case Act::ChatChannel: {
+            chatChannel_ = arg;
+            chatScroll_ = 0;
+            // the tab picks the matching destination when there is one (the Write button then goes there)
+            const std::vector<std::string> ds = chatDests(g);
+            auto has = [&](const std::string& d) { return std::find(ds.begin(), ds.end(), d) != ds.end(); };
+            if (arg == 2) { if (has("p")) chatDest_ = g.party.raid && has("r") ? "r" : "p"; }
+            else if (arg == 3) { if (has("g")) chatDest_ = "g"; }
+            else if (arg == 4) { if (has("w")) chatDest_ = "w"; }
+            else if (arg == 5) { for (const std::string& d : ds) if (d[0] == 'c') { chatDest_ = d; break; } }
             break;
         }
+        case Act::ChatScroll: chatScroll_ = std::max(0, chatScroll_ + arg); break;
+        case Act::ChatWrite: openChat(g, in, out); break;
+        case Act::ChatDest: {   // the Write button's destination: the next one
+            const std::vector<std::string> ds = chatDests(g);
+            size_t k = 0;
+            for (size_t i = 0; i < ds.size(); ++i) if (ds[i] == chatDest_) k = i + 1;
+            chatDest_ = ds[k % ds.size()];
+            break;
+        }
+        case Act::ChannelSay: {   // arg = slot: write into that channel
+            const std::string d = "c" + std::to_string(arg);
+            chatDest_ = d;
+            phrases_ = false;
+            openChat(g, in, out);
+            break;
+        }
+        case Act::ChannelList: {
+            const auto& ch = g.channelSlots();
+            if (arg >= 1 && (size_t)arg <= ch.size() && !ch[arg - 1].empty()) g.listChannel(ch[arg - 1], now);
+            phrases_ = false;
+            chatChannel_ = 5;
+            break;
+        }
+        case Act::ChannelLeave: {
+            const auto& ch = g.channelSlots();
+            if (arg >= 1 && (size_t)arg <= ch.size() && !ch[arg - 1].empty()) {
+                g.leaveChannel(ch[arg - 1], now);
+                if (chatDest_ == "c" + std::to_string(arg)) chatDest_ = "s";
+            }
+            break;
+        }
+        case Act::ChannelJoin:
+            askText(in, tr("Channel name (then password after a space)", "Канал (через пробел пароль)"), "", false,
+                    [](w3n::GameSession& gg, uint32_t n, const std::string& t) {
+                        if (!t.empty()) gg.sendTyped("/join " + t, n);
+                    }, 40);
+            break;
+        case Act::KeyboardKey: keyboardKey(g, in, arg); break;
         case Act::ChatPhrases: phrases_ = !phrases_; break;
         case Act::EmotePick:   // 2000 / 2001 the popup's pages, 999 stand up, 1000 sit, 1003 lie down, else a text emote
             if (arg >= 2000) { phrasePage_ = arg - 2000; break; }
@@ -973,11 +1140,8 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
             phrases_ = false;
             break;
         case Act::PhrasePick: {
-            static const uint8_t kType[] = {w3n::Chat::Say, w3n::Chat::Say, w3n::Chat::Party, w3n::Chat::Guild, w3n::Chat::Say, w3n::Chat::Say};
-            uint8_t type = chatChannel_ >= 0 && chatChannel_ < 6 ? kType[chatChannel_] : (uint8_t)w3n::Chat::Say;
-            if (type == w3n::Chat::Party && !g.party.inGroup) type = w3n::Chat::Say;
-            if (type == w3n::Chat::Guild && !g.guildId()) type = w3n::Chat::Say;
-            g.sendChat(type, gameUiPhrase(arg), "", now);
+            // the phrase goes where the Write button goes (a channel or a whisper too)
+            g.sendTyped(chatDestPrefix(g, chatDest_) + gameUiPhrase(arg), now);
             phrases_ = false;
             break;
         }
@@ -991,14 +1155,17 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
         // ---- social (UI stage 6)
         case Act::SocialPick: socialSel_ = arg; break;
         case Act::FriendAdd: case Act::IgnoreAdd: case Act::GroupInvite: {
-            std::string name;
             const char* h = act == Act::FriendAdd ? tr("Friend's name", "Имя друга") : act == Act::IgnoreAdd ? tr("Name to ignore", "Кого игнорировать")
                                                                                      : tr("Invite whom?", "Кого пригласить?");
-            if (!keyboard(g, in, out, h, name) || name.empty()) break;
-            if (act == Act::FriendAdd) g.addFriend(name, now);
-            else if (act == Act::IgnoreAdd) g.addIgnore(name, now);
-            else if (subSocial_ == 1) g.guildInvite(name, now);
-            else g.inviteToGroup(name, now);
+            const Act a0 = act;
+            const bool guild = subSocial_ == 1;
+            askText(in, h, "", false, [a0, guild](w3n::GameSession& gg, uint32_t n, const std::string& name) {
+                if (name.empty()) return;
+                if (a0 == Act::FriendAdd) gg.addFriend(name, n);
+                else if (a0 == Act::IgnoreAdd) gg.addIgnore(name, n);
+                else if (guild) gg.guildInvite(name, n);
+                else gg.inviteToGroup(name, n);
+            }, 12);
             break;
         }
         case Act::FriendRemove:
@@ -1017,9 +1184,9 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
             else if (subSocial_ == 1 && arg >= 0 && arg < (int)g.guild.members.size()) who = g.guild.members[arg].name;
             else if (subSocial_ == 0 && arg >= 0 && arg < (int)g.party.members.size()) who = g.party.members[arg].name;
             if (who.empty()) break;
-            std::string text;
-            if (keyboard(g, in, out, (std::string(tr("Whisper to ", "Шёпот: ")) + who).c_str(), text) && !text.empty())
-                g.sendChat(w3n::Chat::Whisper, text, who, now);
+            askText(in, std::string(tr("Whisper to ", "Шёпот: ")) + who, "", false, [who](w3n::GameSession& gg, uint32_t n, const std::string& text) {
+                if (!text.empty()) { gg.lastWhisperTo = who; gg.sendChat(w3n::Chat::Whisper, text, who, n); }
+            });
             break;
         }
         case Act::GroupLeave:
@@ -1061,6 +1228,63 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
         case Act::TaxiPick: taxiSel_ = arg; break;
         case Act::TaxiFly: if (taxiSel_ > 0) g.flyTo((uint32_t)taxiSel_, now); break;
         case Act::TaxiClose: g.closeTaxi(); break;
+        // ---- pets (UI stage 13)
+        case Act::PetOpen: open_ = Panel::Pet; petFeedList_ = false; page_ = 0; break;
+        case Act::PetCommand: {
+            petSel_ = arg;
+            if (!g.pet.active) { hint(tr("You have no pet", "У вас нет питомца"), now); break; }
+            switch (arg) {
+                case kPetCmdAttack: g.petCommand(w3n::kPetAttack, now); break;
+                case kPetCmdFollow: g.petCommand(w3n::kPetFollow, now); break;
+                case kPetCmdStay: g.petCommand(w3n::kPetStay, now); break;
+                case kPetCmdPassive: g.petReaction(w3n::kPetPassive, now); break;
+                case kPetCmdDefensive: g.petReaction(w3n::kPetDefensive, now); break;
+                case kPetCmdAggressive: g.petReaction(w3n::kPetAggressive, now); break;
+            }
+            break;
+        }
+        case Act::PetCast:
+            petSel_ = 100000 + arg;
+            if (!g.pet.active) hint(tr("You have no pet", "У вас нет питомца"), now);
+            else g.petCastSpell((uint32_t)arg, now);
+            break;
+        case Act::PetAuto: g.petSetAutocast((uint32_t)arg, !g.petAutocast((uint32_t)arg), now); break;
+        case Act::PetBind:
+            if (arg >= 100000) bindWhat_ = {ActionSlot::PetSpell, (uint32_t)(arg - 100000)};
+            else if (arg >= 1 && arg <= 6) bindWhat_ = {ActionSlot::PetCmd, (uint32_t)arg};
+            else break;
+            bindArmed_ = true;
+            hint("Press a button (or tap a bar cell) for " + actionName(g, bindWhat_), now);
+            break;
+        case Act::PetRename: {
+            askText(in, tr("Pet's name (2-12 letters)", "Имя питомца (2-12 букв)"), g.petName(), false,
+                    [](w3n::GameSession& gg, uint32_t n, const std::string& name) { if (!name.empty()) gg.petRename(name, n); }, 12);
+            break;
+        }
+        case Act::PetDismiss:
+            if (!g.pet.active) break;
+            if (!confirmed_) {
+                confirm(g.petCanAbandon() ? tr("Abandon the pet for good?", "Бросить питомца навсегда?") : tr("Dismiss the pet?", "Отпустить питомца?"),
+                        Act::PetDismiss, 0);
+                break;
+            }
+            g.petDismiss(now);
+            open_ = Panel::Tabs;
+            break;
+        case Act::PetFeed: petFeedList_ = arg != 0; page_ = 0; break;
+        case Act::PetFeedPick: {
+            std::vector<w3n::InvItem> food = g.petFoodCandidates();
+            if (arg >= 0 && arg < (int)food.size() && g.feedPet(food[arg], now)) petFeedList_ = false;
+            break;
+        }
+        case Act::StablePick: stableSel_ = arg; break;
+        case Act::StableStable: g.stableCurrentPet(now); stableSel_ = -1; break;
+        case Act::StableUnstable:
+            for (const w3n::StabledPet& p : g.stable.pets)
+                if ((int)p.slot == stableSel_) { g.unstablePet(p, now); stableSel_ = -1; break; }
+            break;
+        case Act::StableBuy: g.buyStableSlot(now); break;
+        case Act::StableClose: g.closeStable(); break;
         // ---- mail (UI stage 6)
         case Act::MailPick: {
             mailSel_ = arg;
@@ -1087,10 +1311,14 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
         case Act::MailCompose: mailView_ = 2; mailItem_ = -1; mailMoney_ = 0; break;
         case Act::MailField: {
             std::string* f = arg == 0 ? &mailTo_ : arg == 1 ? &mailSubject_ : arg == 2 ? &mailBody_ : nullptr;
-            if (f) { keyboard(g, in, out, arg == 0 ? tr("To", "Кому") : arg == 1 ? tr("Subject", "Тема") : tr("Text", "Текст"), *f); break; }
+            if (f) {
+                askText(in, arg == 0 ? tr("To", "Кому") : arg == 1 ? tr("Subject", "Тема") : tr("Text", "Текст"), *f, false,
+                        [f](w3n::GameSession&, uint32_t, const std::string& t) { *f = t; }, arg == 2 ? 500 : arg == 1 ? 64 : 12);
+                break;
+            }
             if (arg == 3) {   // money in copper via the numpad
-                std::string v = mailMoney_ ? std::to_string(mailMoney_) : "";
-                if (keyboard(g, in, out, tr("Copper (100 = 1s)", "Медь (100 = 1с)"), v, true)) mailMoney_ = (uint32_t)strtoul(v.c_str(), nullptr, 10);
+                askText(in, tr("Copper (100 = 1s)", "Медь (100 = 1с)"), mailMoney_ ? std::to_string(mailMoney_) : "", true,
+                        [this](w3n::GameSession&, uint32_t, const std::string& v) { mailMoney_ = (uint32_t)strtoul(v.c_str(), nullptr, 10); });
             }
             if (arg == 4) { mailItem_ = mailItem_ + 1 >= (int)sellable(g).size() ? -1 : mailItem_ + 1; }   // next item to attach
             break;
@@ -1115,10 +1343,16 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
             if (arg == 1) g.listOwnAuctions(now);
             break;
         case Act::AuctionSearch: {
-            std::string q = auctionQuery_;
-            if (arg == 0 && !keyboard(g, in, out, tr("Item name (empty = all)", "Название (пусто = все)"), q)) break;
-            auctionQuery_ = q;
-            g.searchAuctions(q, arg > 0 ? (uint32_t)(arg - 1) : 0, now);
+            if (arg == 0) {
+                askText(in, tr("Item name (empty = all)", "Название (пусто = все)"), auctionQuery_, false,
+                        [this](w3n::GameSession& gg, uint32_t n, const std::string& q) {
+                            auctionQuery_ = q;
+                            gg.searchAuctions(q, 0, n);
+                            auctionSel_ = -1;
+                        }, 40);
+                break;
+            }
+            g.searchAuctions(auctionQuery_, (uint32_t)(arg - 1), now);
             auctionSel_ = -1;
             break;
         }
@@ -1141,10 +1375,10 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
         case Act::AuctionSellPick: auctionSellItem_ = arg; auctionBid_ = auctionBuyout_ = 0; break;
         case Act::AuctionPrice: {
             if (arg == 2) { auctionHours_ = (auctionHours_ + 1) % 3; break; }
-            uint32_t& v = arg == 0 ? auctionBid_ : auctionBuyout_;
-            std::string s = v ? std::to_string(v) : "";
-            if (keyboard(g, in, out, arg == 0 ? tr("Starting bid, copper", "Начальная ставка, медь") : tr("Buyout, copper (0 = none)", "Выкуп, медь (0 = нет)"), s, true))
-                v = (uint32_t)strtoul(s.c_str(), nullptr, 10);
+            uint32_t* v = arg == 0 ? &auctionBid_ : &auctionBuyout_;
+            askText(in, arg == 0 ? tr("Starting bid, copper", "Начальная ставка, медь") : tr("Buyout, copper (0 = none)", "Выкуп, медь (0 = нет)"),
+                    *v ? std::to_string(*v) : "", true,
+                    [v](w3n::GameSession&, uint32_t, const std::string& s) { *v = (uint32_t)strtoul(s.c_str(), nullptr, 10); });
             break;
         }
         case Act::AuctionSell: {
@@ -1180,8 +1414,8 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
         }
         case Act::TradeClear: g.clearTradeItem(arg, now); break;
         case Act::TradeGold: {
-            std::string v = g.trade.mine.gold ? std::to_string(g.trade.mine.gold) : "";
-            if (keyboard(g, in, out, tr("Copper to give", "Сколько меди отдать"), v, true)) g.offerTradeGold((uint32_t)strtoul(v.c_str(), nullptr, 10), now);
+            askText(in, tr("Copper to give", "Сколько меди отдать"), g.trade.mine.gold ? std::to_string(g.trade.mine.gold) : "", true,
+                    [](w3n::GameSession& gg, uint32_t n, const std::string& v) { gg.offerTradeGold((uint32_t)strtoul(v.c_str(), nullptr, 10), n); });
             break;
         }
         case Act::TradeAccept: g.acceptTrade(now); break;

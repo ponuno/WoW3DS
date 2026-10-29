@@ -30,6 +30,7 @@ enum : uint16_t {
     UNIT_FIELD_AURA = 47, UNIT_FIELD_AURAFLAGS = 95, UNIT_FIELD_AURALEVELS = 101, UNIT_FIELD_AURAAPPLICATIONS = 113,
     UNIT_BOUNDINGRADIUS = 129, UNIT_COMBATREACH = 130, UNIT_DISPLAYID = 131, UNIT_NATIVEDISPLAYID = 132,
     UNIT_FIELD_CHANNEL_OBJECT = 20,
+    UNIT_FIELD_SUMMON = 8, UNIT_FIELD_PETNUMBER = 139,   // UI stage 13: our pet's guid (2 fields), the pet's number
     UNIT_MOUNTDISPLAYID = 133, UNIT_BYTES_1 = 138, UNIT_DYNAMIC_FLAGS = 143, UNIT_CHANNEL_SPELL = 144, UNIT_NPC_FLAGS = 147,
     UNIT_NPC_EMOTESTATE = 148,
     UNIT_END = 188,
@@ -39,14 +40,22 @@ enum : uint16_t {
     PLAYER_FLAGS = 190, PLAYER_BYTES = 193, PLAYER_BYTES_2 = 194,
     PLAYER_VISIBLE_ITEM_1_0 = 260, PLAYER_VISIBLE_ITEM_STRIDE = 12,   // entry of equipment slot k: 260 + 12 k
     PLAYER_FIELD_INV_SLOT_HEAD = 486,   // 23 equipped + 4 bags + 16 backpack slots, u64 GUID each (2 fields)
-    PLAYER_XP = 716, PLAYER_NEXT_LEVEL_XP = 717, PLAYER_FIELD_COINAGE = 1176,
+    PLAYER_XP = 716, PLAYER_NEXT_LEVEL_XP = 717, PLAYER_REST_STATE_EXPERIENCE = 1175, PLAYER_FIELD_COINAGE = 1176,
+    PLAYER_SKILL_INFO_1_1 = 718,   // 128 slots x 3 fields: [id | step << 16] [value | max << 16] [temporary bonus | permanent bonus << 16] (int16 each)
+    PLAYER_CHARACTER_POINTS1 = 1102,
     PLAYER_END = 1282,
     // items and bags
     ITEM_FIELD_OWNER = 6, ITEM_FIELD_CONTAINED = 8, ITEM_FIELD_STACK_COUNT = 14, ITEM_FIELD_DURABILITY = 46,
     ITEM_FIELD_MAXDURABILITY = 47, CONTAINER_FIELD_NUM_SLOTS = 48, CONTAINER_FIELD_SLOT_1 = 50,
-    // corpses
-    CORPSE_FIELD_OWNER = 6,
-    GAMEOBJECT_DISPLAYID = 8, GAMEOBJECT_FLAGS = 9, GAMEOBJECT_STATE = 14, GAMEOBJECT_DYN_FLAGS = 19, GAMEOBJECT_TYPE_ID = 21,
+    // corpses (vMaNGOS UpdateFields_1_12_1.h: OWNER 6-7, FACING 8, POS_X/Y/Z 9-11, DISPLAY_ID 12, ITEM 13..31 (display id | inventory type << 24),
+    // BYTES_1 32 (race, gender, skin, face), BYTES_2 33 (hair style, hair colour, facial hair), GUILD 34, FLAGS 35, DYNAMIC_FLAGS 36)
+    CORPSE_FIELD_OWNER = 6, CORPSE_FIELD_FACING = 8, CORPSE_FIELD_POS_X = 9, CORPSE_FIELD_DISPLAY_ID = 12, CORPSE_FIELD_ITEM = 13,
+    CORPSE_FIELD_BYTES_1 = 32, CORPSE_FIELD_BYTES_2 = 33, CORPSE_FIELD_GUILD = 34, CORPSE_FIELD_FLAGS = 35, CORPSE_FIELD_DYNAMIC_FLAGS = 36,
+    // dynamic objects (areas of ground spells): CASTER 6-7, BYTES 8, SPELLID 9, RADIUS 10 (float), POS_X/Y/Z 11-13, FACING 14
+    DYNAMICOBJECT_CASTER = 6, DYNAMICOBJECT_BYTES = 8, DYNAMICOBJECT_SPELLID = 9, DYNAMICOBJECT_RADIUS = 10, DYNAMICOBJECT_POS_X = 11,
+    DYNAMICOBJECT_FACING = 14,
+    GAMEOBJECT_CREATED_BY = 6, GAMEOBJECT_DISPLAYID = 8, GAMEOBJECT_FLAGS = 9, GAMEOBJECT_ROTATION = 10, GAMEOBJECT_STATE = 14,
+    GAMEOBJECT_DYN_FLAGS = 19, GAMEOBJECT_TYPE_ID = 21,
 };
 }
 
@@ -68,6 +77,7 @@ struct WorldObject {
     // Transports (stage 5.21). A GO transport: the server's path progress when its create block arrived (UPDATEFLAG_TRANSPORT).
     uint32_t transportProgress = 0;
     bool hasTransportProgress = false;
+    float stationary[4] = {0, 0, 0, 0};   // position + facing in the create block of a transport (UPDATEFLAG_TRANSPORT): where an elevator rests
     // A unit standing on a transport (MoveFlag::OnTransport): ObjectTable::tickTransports keeps mv at the world position
     // computed from the transport's pose and the unit's offset, and 'carried' turns the usual extrapolation off.
     bool carried = false;
@@ -75,6 +85,8 @@ struct WorldObject {
     float carriedBase[3] = {0, 0, 0}, carriedO = 0;               // offset (x, y, z) in that packet
     std::vector<uint32_t> fields;    // update fields (index -> value), grown on demand
     std::string name, subname;       // from the query caches
+    uint8_t rank = 0;                // creatures (SMSG_CREATURE_QUERY_RESPONSE): 0 normal, 1 elite, 2 rare elite, 3 boss, 4 rare
+    uint8_t creatureType = 0;        // 1 beast, 2 dragonkin, 3 demon, 4 elemental, 5 giant, 6 undead, 7 humanoid, 8 critter ...
     // Melee (stage 5.7, from SMSG_ATTACKSTART/STOP/ATTACKERSTATEUPDATE): drives attack animations.
     uint64_t meleeVictim = 0;        // who it is swinging at (0 = not in melee)
     uint32_t swingMs = 0;            // local time of its last swing (0 = never)
@@ -84,7 +96,11 @@ struct WorldObject {
     uint8_t hitReact = 0;            // 1 wound, 2 critical, 3 dodge, 4 parry, 5 block
     uint32_t emoteMs = 0, emote = 0; // SMSG_EMOTE: a one-shot Emotes.dbc id
     uint32_t castGoMs = 0;           // a spell went off (SMSG_SPELL_GO)
+    uint32_t customAnimMs = 0;       // game objects: SMSG_GAMEOBJECT_CUSTOM_ANIM (the bobber's splash when a fish bites)
     uint32_t castGoSpell = 0;
+    // Game objects (stage 5.41): when GAMEOBJECT_STATE last changed (local ms; 0 = it was like that when we first saw it),
+    // so the door / chest animation plays only for a change we saw happen.
+    uint32_t stateChangeMs = 0;
     bool castGoDirected = false;     // at someone else (the hands point) or around itself
     bool taxiFlight() const { return isUnitLike() && (field(UF::UNIT_FLAGS) & 0x00100000u) != 0; }   // UNIT_FLAG_TAXI_FLIGHT
     uint8_t standState() const { return (uint8_t)(field(UF::UNIT_BYTES_1) & 0xFF); }   // 0 stand, 1 sit, 3 sleep, 8 kneel ...
@@ -105,6 +121,26 @@ struct WorldObject {
     // key-state speed for players, else 0. Drives walk/run animation choice.
     float groundSpeedAt(uint32_t nowMs) const;
     bool swimming() const { return (mv.flags & MoveFlag::Swimming) != 0; }
+
+    // ---- game objects (stage 5.41)
+    uint32_t goType() const { return field(UF::GAMEOBJECT_TYPE_ID); }
+    // 1.12: 0 = GO_STATE_ACTIVE (a door that is open, a button pressed, a chest opened), 1 = GO_STATE_READY (closed / ready), 2 = alternative
+    uint32_t goState() const { return field(UF::GAMEOBJECT_STATE); }
+    // GAMEOBJECT_ROTATION: the quaternion (x y z w) the server places the model with. For an upright object it is only the
+    // facing about Z (sin, cos of half the angle in z / w); with x or y set the object stands tilted (logs, planks, camp parts).
+    // Returns false when the quaternion is missing or invalid.
+    bool goRotation(float q[4]) const;
+    // The same, only when the object really is tilted (|x| or |y| beyond a small bound): then q is the full orientation.
+    bool goTilt(float q[4]) const;
+    // ---- dynamic objects (areas of ground spells: Blizzard, Consecration ...)
+    uint64_t dynCaster() const { return (uint64_t)field(UF::DYNAMICOBJECT_CASTER) | ((uint64_t)field(UF::DYNAMICOBJECT_CASTER + 1) << 32); }
+    uint32_t dynSpell() const { return field(UF::DYNAMICOBJECT_SPELLID); }
+    float dynRadius() const { return fieldF(UF::DYNAMICOBJECT_RADIUS); }
+    // ---- corpses
+    uint64_t corpseOwner() const { return (uint64_t)field(UF::CORPSE_FIELD_OWNER) | ((uint64_t)field(UF::CORPSE_FIELD_OWNER + 1) << 32); }
+    uint32_t corpseDisplay() const { return field(UF::CORPSE_FIELD_DISPLAY_ID); }
+    uint32_t corpseFlags() const { return field(UF::CORPSE_FIELD_FLAGS); }   // 1 = bones (a ghost's body that has been released and decayed), 4 = lootable
+    bool corpseBones() const { return (corpseFlags() & 1u) != 0; }
 };
 
 struct ObjectStats {
@@ -162,6 +198,7 @@ public:
 private:
     bool parseMovementBlock(Reader& r, WorldObject& o, uint32_t nowMs);
     bool parseFields(Reader& r, WorldObject* o);
+    uint32_t nowMs_ = 0;
     bool parseMonsterMove(Reader& r, uint32_t nowMs);
     void remove(uint64_t g);
     void applyNames(WorldObject& o);
@@ -171,6 +208,7 @@ private:
     std::unordered_map<uint64_t, WorldObject> objs_;
     std::unordered_map<uint64_t, std::string> playerNames_;
     std::unordered_map<uint32_t, std::pair<std::string, std::string>> creatureNames_;
+    std::unordered_map<uint32_t, std::pair<uint8_t, uint8_t>> creatureRank_;   // entry -> rank, type
     std::unordered_map<uint32_t, std::string> goNames_;
     std::unordered_map<uint32_t, GoInfo> goInfo_;
     std::vector<uint64_t> created_;

@@ -230,15 +230,34 @@ void GameUi::tabBar() {
     }
 }
 
+// What a hotbar entry looks like (UI stage 13: the pet's commands and spells too).
+ui::Image GameUi::actionIcon(w3n::GameSession& g, const ActionSlot& a) {
+    switch (a.type) {
+        case ActionSlot::Spell: case ActionSlot::PetSpell: return spellIcon(a.id);
+        case ActionSlot::Item: return itemIcon(g, a.id);
+        case ActionSlot::PetCmd: return assets().namedIcon(petCmdIcon(a.id));
+        default: return ui::Image();
+    }
+}
+
+std::string GameUi::actionName(w3n::GameSession& g, const ActionSlot& a) const {
+    switch (a.type) {
+        case ActionSlot::Spell: case ActionSlot::PetSpell: return g.spellNames.name(a.id);
+        case ActionSlot::Item: return g.itemName(a.id);
+        case ActionSlot::PetCmd: return petCmdName(a.id);
+        default: return "";
+    }
+}
+
 // The hotbars of the current page over the content: 4 sets (rows) x 8 buttons; tap a cell (bind armed) or drop on it.
 void GameUi::crossbarPicker(w3n::GameSession& g, const Input& in) {
     (void)in;
     const ActionLayout* bars = barsView_;
     window(2, kTop + 1, kTouchW - 4, kContentH - 2, true);
     std::string what;
-    if (drag_.active) what = drag_.kind == 1 ? spellLabel(g, drag_.id) : g.itemName(drag_.id);
+    if (drag_.active) what = actionName(g, ActionSlot{drag_.kind >= 1 && drag_.kind <= 4 ? drag_.kind : (uint8_t)ActionSlot::Item, drag_.id});
     else if (bindWhat_.type == ActionSlot::Spell) what = spellLabel(g, bindWhat_.id);
-    else if (bindWhat_.type == ActionSlot::Item) what = g.itemName(bindWhat_.id);
+    else if (bindWhat_.type != ActionSlot::Empty) what = actionName(g, bindWhat_);
     std::string title = bindWhat_.type == ActionSlot::Empty && !drag_.active ? tr("Clear which button?", "Какую кнопку очистить?")
                                                                               : std::string(tr("Bind: ", "Привязать: ")) + what;
     list_.textFit(10, kTop + 6, title, 220, kGold, true, Font::Normal);
@@ -260,8 +279,7 @@ void GameUi::crossbarPicker(w3n::GameSession& g, const Input& in) {
             }
             const ActionSlot a = bars ? bars->at(slot) : ActionSlot();
             const bool hover = drag_.active && drag_.hoverSlot == slot;
-            if (a.type == ActionSlot::Spell) iconBox(x, y, cell, spellIcon(a.id), g.spellNames.name(a.id), hover ? kGold : kFrameDim, true);
-            else if (a.type == ActionSlot::Item) iconBox(x, y, cell, itemIcon(g, a.id), g.itemName(a.id), hover ? kGold : kFrameDim, true);
+            if (a.type != ActionSlot::Empty) iconBox(x, y, cell, actionIcon(g, a), actionName(g, a), hover ? kGold : kFrameDim, true);
             else { list_.rect(x, y, cell, cell, kRow); list_.outline(x - 1, y - 1, cell + 2, cell + 2, hover ? kGold : kFrameDim); }
             if (hover) list_.outline(x - 2, y - 2, cell + 4, cell + 4, kGold);
             list_.text(x + 2, y + cell - 12, kGlyph[b], kGold);
@@ -295,17 +313,21 @@ std::string GameUi::panelTitle(w3n::GameSession& g, Panel p) const {
         case Panel::ItemInfo: return tr("Item", "Предмет");
         case Panel::SpellInfo: return tr("Spell", "Заклинание");
         case Panel::Buffs: return tr("Buffs and debuffs", "Эффекты");
-        case Panel::Invite: return !g.groupInviteFrom.empty() ? tr("Group invitation", "Приглашение в группу") : tr("Guild invitation", "Приглашение в гильдию");
+        case Panel::Invite: return g.duel.challenged || g.duel.asked ? tr("Duel", "Дуэль") : !g.groupInviteFrom.empty() ? tr("Group invitation", "Приглашение в группу") : tr("Guild invitation", "Приглашение в гильдию");
         case Panel::Menu: return tr("Menu", "Меню");
         case Panel::Confirm: return tr("Are you sure?", "Вы уверены?");
         case Panel::Context: return npcName(g.target(), tr("Target", "Цель"));
+        case Panel::Inspect: return npcName(inspect_, tr("Inspect", "Осмотр"));
+        case Panel::Keyboard: return kb_.hint;
+        case Panel::Pet: return g.petName().empty() ? tr("Pet", "Питомец") : g.petName();
+        case Panel::Stable: return npcName(g.stable.npc, tr("Stable master", "Хозяин стойл"));
         default: break;
     }
     switch (tab_) {
         case Tab::Combat: return tr("Combat", "Бой");
         case Tab::Map: return tr("Map", "Карта");
         case Tab::Bags: case Tab::Gear: return subBags_ ? tr("Equipment", "Экипировка") : tr("Bags", "Сумки");
-        case Tab::Spells: return subSpells_ ? tr("Talents", "Таланты") : tr("Spellbook", "Книга заклинаний");
+        case Tab::Spells: return subSpells_ == 2 ? tr("Skills", "Навыки") : subSpells_ ? tr("Talents", "Таланты") : tr("Spellbook", "Книга заклинаний");
         case Tab::Quests: return tr("Quest log", "Журнал заданий");
         case Tab::Chat: return tr("Chat", "Чат");
         case Tab::Social: return tr("Social", "Общение");
@@ -334,6 +356,20 @@ void GameUi::drawPanel(w3n::GameSession& g, const Input& in) {
         case Panel::Trade: drawTrade(g, in); break;
         case Panel::Invite: {
             window(20, kTop + 30, kTouchW - 40, 110, true);
+            const bool fv0 = in.cfg && in.cfg->scheme == PadScheme::Forever;
+            if (g.duel.challenged || g.duel.asked) {   // UI stage 9: a duel - theirs (Accept / Decline) or ours (Cancel)
+                const std::string who = g.duel.opponentName.empty() ? std::string("?") : g.duel.opponentName;
+                list_.textCentered(kTouchW / 2, kTop + 48, who, kGold, true, Font::Large);
+                if (g.duel.challenged) {
+                    list_.textCentered(kTouchW / 2, kTop + 72, tr("challenges you to a duel.", "вызывает вас на дуэль."), kText, true, Font::Normal);
+                    btn(36, kTop + 100, 116, 28, std::string(tr("Accept", "Принять")) + (fv0 ? " (Y)" : " (A)"), Act::InviteYes, 0, Style::Primary);
+                    btn(168, kTop + 100, 116, 28, std::string(tr("Decline", "Отказать")) + (fv0 ? " (A)" : " (B)"), Act::InviteNo, 0, Style::Normal);
+                } else {
+                    list_.textCentered(kTouchW / 2, kTop + 72, tr("Duel requested. Waiting...", "Вызов на дуэль отправлен. Ждём..."), kText, true, Font::Normal);
+                    btn(102, kTop + 100, 116, 28, std::string(tr("Cancel", "Отменить")) + (fv0 ? " (A)" : " (B)"), Act::InviteNo, 0, Style::Normal);
+                }
+                break;
+            }
             const bool group = !g.groupInviteFrom.empty();
             std::string who = group ? g.groupInviteFrom : g.guildInviteFrom;
             list_.textCentered(kTouchW / 2, kTop + 48, who, kGold, true, Font::Large);
@@ -355,13 +391,17 @@ void GameUi::drawPanel(w3n::GameSession& g, const Input& in) {
             break;
         case Panel::Menu: drawMenu(g); break;
         case Panel::Context: drawContext(g); break;
+        case Panel::Inspect: drawInspect(g); break;
+        case Panel::Keyboard: drawKeyboard(g, in); break;
+        case Panel::Pet: drawPet(g, in); break;
+        case Panel::Stable: drawStable(g, in); break;
         default:
             switch (tab_) {
                 case Tab::Combat: drawCombat(g, in); break;
                 case Tab::Map: drawMap(g, in); break;
                 case Tab::Chat: drawChat(g, in); break;
                 case Tab::Bags: case Tab::Gear: if (subBags_) drawPaperDoll(g, in); else drawItems(g, in); break;
-                case Tab::Spells: if (subSpells_) drawTalents(g, in); else drawSpells(g, in); break;
+                case Tab::Spells: if (subSpells_ == 2) drawSkills(g, in); else if (subSpells_) drawTalents(g, in); else drawSpells(g, in); break;
                 case Tab::Quests: drawQuestLog(g, in); break;
                 case Tab::Social: drawSocial(g, in); break;
                 case Tab::Settings: drawSettings(in); break;
@@ -396,8 +436,9 @@ bool GameUi::draw(w3n::GameSession& g, const Input& in, float fps, uint32_t late
         list_.noClip();
     }
     if (drag_.active) {   // the icon under the finger
-        ui::Image im = drag_.kind == 1 ? spellIcon(drag_.id) : itemIcon(g, drag_.id);
-        std::string nm = drag_.kind == 1 ? g.spellNames.name(drag_.id) : g.itemName(drag_.id);
+        const ActionSlot da{drag_.kind >= 1 && drag_.kind <= 4 ? drag_.kind : (uint8_t)ActionSlot::Item, drag_.id};
+        ui::Image im = actionIcon(g, da);
+        std::string nm = actionName(g, da);
         list_.fade = 210;
         iconBox(drag_.x - 16, drag_.y - 34, 32, im, nm, kGold);
         list_.fade = 255;

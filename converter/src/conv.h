@@ -1,6 +1,8 @@
 // Internal converter interfaces.
 #pragma once
+#include <atomic>
 #include "w3d_format.h"
+#include "w3d_fx.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -11,10 +13,11 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <set>
 #include <unordered_set>
 #include <vector>
 
-namespace wowee::pipeline { struct ADTTerrain; }
+namespace wowee::pipeline { struct ADTTerrain; struct M2Model; }
 
 namespace w3d {
 
@@ -22,6 +25,14 @@ namespace w3d {
 // One updating line: throttled to 4 per second unless force. progressDone ends it with a newline.
 void progress(bool force, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
 void progressDone(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+
+// ------------------------------------------------------------ crash guard (crashguard.cpp)
+// installCrashGuard(): call first thing in main. If the process dies (access violation, abort, uncaught exception),
+// the last trace() line is printed to stderr and stdout is flushed, so the log ends where the converter really died
+// (stdout to a pipe/file is block-buffered: without this the log lost its last few KB and stopped mid-line).
+void installCrashGuard();
+// trace(): remember what is being converted right now ("WMO <path> group 3") and flush stdout. Cheap enough per asset.
+void trace(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 
 // ------------------------------------------------------------ settings
 struct Options {
@@ -36,21 +47,29 @@ struct Options {
     uint8_t texFormat = W3D_TEX_ETC1;
     int maxModelTris = 400;     // per model after simplification
     int maxDoodads = -1;        // -1 = all placements on the tile
+    int syntheticVariety = 0;   // --synthetic-variety N: N distinct models + textures per synthetic tile (a city's load)
     // WMO buildings (stage 5.0)
     bool noWmo = false;         // skip buildings entirely
     bool noWmoDoodads = false;  // buildings without their furniture/lamps
     bool wmoExteriorOnly = false;   // drop interior-only groups (no portals yet, they are drawn anyway)
     int wmoTex = 128;           // max WMO texture size
+    float drawMaxError = 0.15f;  // 6.19b: yards a simplified building / doodad may move from its collision; --draw-error
     int wmoGroupTris = 3000;    // triangle budget per WMO group (0 = keep all)
     std::string dumpPlacements; // debug: text file with every building group/doodad placement
     bool noFloors = false;      // skip COLL entirely (no floors, no walls)
     bool noWalls = false;       // COLL with floors only (walking passes through walls)
+    bool noFx = false;          // stage 5.32: no particle emitters / glow sprites on doodads (--no-fx)
+    bool fxSpell = false;       // stage 5.33: the model being converted is a spell effect (internal)
+    bool spellFx = true;        // stage 5.33: spell visuals with the creatures (--no-spell-fx)
     bool noDoodadColl = false;  // no M2 doodad collision (fences, trunks, bridges) in COLL
-    int doodadCollTris = 96;    // collision triangle budget per doodad model (0 = keep all)
+    int doodadCollTris = 0;     // collision triangle budget per doodad model (0 = keep all; 6.18b: the 96 of before cut fences and bridges)
+    bool exactGround = true;    // 6.18a: a GRND entry per tile (the ADT's 145 heights + holes: the walker's ground); --no-exact-ground
+    bool terrainCenters = true;    // 6.18a: the squares' centre vertices in the drawn ground too (LOD 0; +50% triangles); --terrain-centers
     // Creatures (stage 5.3): every CreatureDisplayInfo row -> CDSP + CMDL (skinned, animated)
     bool creatures = false;
     int creatureTex = 128;      // max creature texture size
     int creatureTris = 800;     // triangle budget per creature model
+    int playerTris = 3500;      // 5.49: per character (race) model - ALL its geosets (hair styles, beards, ears ...) share it; 800 left holes and a ruined face
     int creatureAnimKb = 320;   // animation keys per creature model (the essential animations always fit)
     int playerAnimKb = 900;     // per character (race) model: emotes, sitting, riding ...
     std::string creatureDisplays;   // optional comma list of display ids (default: all)
@@ -61,8 +80,20 @@ struct Options {
     bool gameobjects = false;   // stage 5.23: models of ordinary game objects (event decorations, chests ...) as CDSP 0x80000000|id
     std::string goFilter;       // model path keywords limiting --gameobjects (empty: every display)
     bool transports = false;    // stage 5.21: ship / zeppelin models (GameObjectDisplayInfo) as CDSP 0x80000000|id + deck data
-    std::string transportFilter = "transport,zeppelin,ship,boat";   // model path keywords that make a GO display a transport
+    // model path keywords that make a GO display a transport; elevators and the Deeprun Tram (type 11) since stage 5.41
+    std::string transportFilter = "transport,zeppelin,ship,boat,elevator,subway,tram";
+    // Stage 5.41: with the creatures a compact set of ordinary game objects always comes along (chests, herbs and ore, mailboxes,
+    // signs, banners, braziers, doors, gates ...): the keywords are searched in the model paths of GameObjectDisplayInfo.
+    bool defaultObjects = true;
+    // stage 6.12: empty = EVERY GameObjectDisplayInfo model (no yellow markers left); keywords limit it (the 5.41 compact set:
+    // "chest,herb,mineral,vein,mailbox,sign,banner,brazier,lantern,bonfire,campfire,door,gate,lever,bell,anvil,forge,cauldron")
+    std::string defaultObjectWords;
     bool dungeons = false;      // stage 5.24: one map<ID>.w3dp per instance map (WDT-only maps of Map.dbc) into the folder given with -o
+    // Water (stage 5.26): the game's animated liquid textures, Light.dbc colours
+    int waterTex = 128;         // max size of a liquid texture frame
+    int waterFrames = 30;       // animation frames kept of the 30 (1, 2, 3, 5, 6, 10, 15 or 30)
+    float waterTint = -1;       // 0..1: how much the Light.dbc colour tints the texture (-1: by the texture's own colour)
+    bool noWmoWater = false;    // leave out the liquids of buildings (canals, fountains, dungeon pools)
     bool synthetic = false;
     bool verbose = false;
 };
@@ -79,9 +110,25 @@ public:
     bool setSpillPath(const std::string& path);
     // Returns false if (type,id) already present.
     bool add(uint32_t type, uint32_t id, std::vector<uint8_t> blob);
-    bool has(uint32_t type, uint32_t id) const { return keys_.count(((uint64_t)type << 32) | id) != 0; }
+    bool has(uint32_t type, uint32_t id) const {
+        if (pool_ && !w3d_is_tile_entry(type)) return pool_->has(type, id);
+        return keys_.count(((uint64_t)type << 32) | id) != 0;
+    }
+    // The id of an asset named by 'key' (its game path, plus whatever makes two conversions of it differ): FNV-1a of
+    // the key, unless that id already belongs to another key of the same type - then a salted hash, so two names never
+    // share an entry (a world has hundreds of thousands of names: 32-bit collisions do happen). Same key, same id.
+    uint32_t keyId(uint32_t type, const std::string& key);
+    size_t keyCollisions() const { return pool_ ? pool_->keyCollisions() : collisions_; }
+    // Stage 5.27: a map pack hands every non-tile entry (and the names) to the shared pool.
+    void setPool(PackWriter* pool) { pool_ = pool; }
+    PackWriter* pool() const { return pool_; }
+    // What the file is (PINF entry, written by write()); without it nothing is written (a standalone pack).
+    void setInfo(const W3dPackInfo& info) { info_ = info; haveInfo_ = true; }
     // False when it cannot write the file or the pack would pass 4 GiB (32-bit offsets, also the FAT32 file limit).
     bool write(const std::string& path) const;
+    // The pool: split into parts of at most partBytes, base.w3dp, base1.w3dp, ... (part numbers in their PINF).
+    // Returns the number of parts written, 0 on failure.
+    int writeParts(const std::string& basePath, uint64_t partBytes) const;
     size_t totalBytes(uint32_t type) const;
     size_t count(uint32_t type) const;
     uint64_t storedBytes() const { return pos_; }
@@ -89,6 +136,13 @@ public:
 private:
     struct Item { uint32_t type, id; uint64_t off; uint32_t size; };
     bool readAt(uint64_t off, void* dst, size_t n) const;
+    bool writeItems(const std::string& path, const std::vector<const Item*>& order, const W3dPackInfo* info) const;
+    std::vector<const Item*> fileOrder() const;
+    PackWriter* pool_ = nullptr;
+    std::unordered_map<uint64_t, std::string> names_;   // (type, id) -> key (keyId)
+    size_t collisions_ = 0;
+    W3dPackInfo info_{};
+    bool haveInfo_ = false;
     std::vector<Item> items_;
     std::unordered_set<uint64_t> keys_;
     std::vector<uint8_t> mem_;        // storage without a spill file
@@ -153,6 +207,10 @@ struct Image {
 void setEtcQuality(int q);
 struct TexTiming { double readDecodeSec = 0, encodeSec = 0; size_t count = 0; };
 TexTiming& textureTiming();
+// 5.35h: textures are encoded on a thread pool; this waits for all of them and adds them to their packs (PackWriter::write
+// and writeParts call it, and so does a PackWriter going away).
+void textureFlush();
+bool textureInPack(PackWriter& pack, uint32_t id);   // in it, or on its way (being encoded)
 std::vector<uint8_t> encodeTexture(const Image& src, int maxSize, uint8_t fmt, bool wantAlpha);
 // Box-filter downscale by integer factors / pad up: result is w x h.
 Image resizeImage(const Image& src, int w, int h);
@@ -166,21 +224,39 @@ uint32_t addTextureFromGame(PackWriter& pack, const DataDir& data, const std::st
 // ------------------------------------------------------------ geometry
 struct ModelSource {               // engine-neutral mesh before packing
     struct V { float p[3]; float n[3]; float uv[2]; };
-    struct Sub { uint32_t texId; uint8_t blend, flags; std::vector<uint32_t> idx; };
+    struct Sub { uint32_t texId; uint8_t blend, flags; std::vector<uint32_t> idx; uint16_t tag = 0; };   // tag: stage 5.35, kept apart in the merge
     std::vector<V> verts;
     std::vector<Sub> subs;
     std::vector<uint32_t> texIds;   // TEX entry ids referenced by Sub::texId (index)
+    std::vector<uint16_t> outTags;   // out (stage 5.35): the Sub::tag of every submesh of the blob, in order
+    size_t dropped = 0;             // out: indices/triangles buildModelBlob had to throw away (partial triangle, index out of range)
 };
 // Flips idx (triangle list over m.verts) to be CCW seen from the vertex normals; true if flipped.
 bool orientByNormals(const ModelSource& m, std::vector<uint32_t>& idx);
 // Also normalises winding: CCW seen from the vertex normals' side (flippedOut = submeshes flipped).
-std::vector<uint8_t> buildModelBlob(ModelSource& m, int maxTris, size_t* trisOut, int* flippedOut = nullptr);
+// maxErrYd > 0 (6.19b): the simplified surface stays within that many yards of the original (floors the walker stands on
+// are the exact ones: a ground drawn a yard above them buried the feet); 0 = 2% of the mesh size only.
+std::vector<uint8_t> buildModelBlob(ModelSource& m, int maxTris, size_t* trisOut, int* flippedOut = nullptr, float maxErrYd = 0.0f);
+extern size_t g_errorBoundModels;   // models that kept more triangles than their budget for maxErrYd (report)
+// Stage 6.12: lighter versions of one index list for the distance (W3D_MODEL_LODS levels, ~50% / ~25% of the triangles, each
+// from the one before, error-bounded); an empty level = not worth it (the client uses the level below). lock: vertices that
+// must stay (a skinned mesh's joints), may be null; lockBorder: open borders stay (buildings: no cracks between groups).
+std::vector<std::vector<uint32_t>> simplifyLods(const uint32_t* idx, size_t n, const float* pos, size_t vcount, size_t posStride,
+                                                const float* uv, size_t uvStride, const unsigned char* lock, bool lockBorder);
+struct LodStats { std::atomic<size_t> rejected{0}, subs{0}, lod1{0}, lod2{0}, tris0{0}, tris1{0}, tris2{0}; };   // (models may be built on several threads)
+extern LodStats g_lodStats;   // (for the log: how much the LODs saved)
+
+// Whole file into memory in one read (the byte-by-byte istreambuf_iterator took minutes on a multi-GB map pack).
+bool readFileFast(const std::string& path, std::vector<uint8_t>& out);
 
 struct ConvStats {
+    size_t collOrphanTiles = 0;   // collision tiles dropped because the map has no terrain tile there
     size_t tiles = 0, waterTris = 0, wmoSkipped = 0;
     size_t wmoOk = 0, wmoFailed = 0, wmoGroups = 0, wmoGroupsFailed = 0, wmoGroupsSkipped = 0, wmoTris = 0;
     size_t wmoPlacements = 0, wmoPlacedGroups = 0, wmoDoodads = 0, duplicatesSkipped = 0;
     size_t m2SubsFlipped = 0, wmoSubsFlipped = 0;
+    size_t fxModels = 0, fxEmitters = 0, fxGlows = 0;   // stage 5.32
+    size_t fxAnimated = 0, fxEmittersDropped = 0, fxParticleOnly = 0;   // 5.35f: emitters without a rate or a life                                // stage 5.35: effect models with baked bone animation
     size_t creatureModelsOk = 0, creatureModelsFailed = 0, displaysOk = 0, displaysFailed = 0, creatureTris = 0;
     size_t creatureSeqs = 0, creatureKeyBytes = 0, creaturePalettes = 0, creatureBones = 0;
     size_t creatureSrcVerts = 0, creatureLossyVerts = 0;
@@ -189,7 +265,8 @@ struct ConvStats {
     size_t itemDisplays = 0, itemLayers = 0, itemLayerBytes = 0, itemLayersMissing = 0, itemModels = 0, itemModelsFailed = 0,
            itemModelTris = 0, itemHelms = 0, itemCapes = 0;
     size_t wmoBatchesUntextured = 0;   // WMO batches whose material texture did not resolve (drawn flat)
-    size_t transportDisplays = 0, transportDisplaysFailed = 0, transportDecks = 0;   // stage 5.21
+    size_t transportDisplays = 0, transportDisplaysFailed = 0, transportDecks = 0, transportDecksFromMesh = 0, staticDecks = 0;   // stage 5.21
+    size_t defaultObjectDisplays = 0, defaultObjectBytes = 0;   // stage 5.41: displays added only by the default set, and what they cost
     size_t charRaces = 0, charRacesFailed = 0, charSections = 0, charImages = 0, charImagesFailed = 0, charImageBytes = 0;   // submeshes whose winding disagreed with their normals
     // Placements repeat in every ADT they overlap (same uniqueId): emit each once.
     std::unordered_set<uint32_t> seenDoodadUid, seenWmoUid;
@@ -200,8 +277,20 @@ struct ConvStats {
     size_t collSource = 0, collWalkable = 0, collWalls = 0, collPieces = 0, collBytes = 0, collMaxTileBytes = 0;
     // M2 bounding (collision) triangles in model space, 3 vertices x 3 floats each, by model id.
     std::unordered_map<uint32_t, std::vector<float>> m2Coll;
-    size_t m2CollModels = 0, m2CollSimplified = 0, m2CollPlaced = 0, m2CollSource = 0, m2CollWalkable = 0, m2CollWalls = 0;
+    size_t m2CollOnly = 0, m2CollModels = 0, m2CollSimplified = 0, m2CollPlaced = 0, m2CollSource = 0, m2CollWalkable = 0, m2CollWalls = 0;
     size_t terrainTris = 0, terrainVerts = 0, modelTrisTotal = 0, placements = 0;
+    size_t groundTiles = 0, groundBytes = 0;   // 6.18a: GRND entries
+    // Liquids (stage 5.26), collected per tile while the tiles and buildings are converted, written by emitLiquids().
+    struct LiquidChunk {            // one MCNK's surface (the topmost of its MCLQ layers per cell)
+        uint8_t cell[64];           // W3D_LIQ_* (kind | deep), W3D_LIQ_DRY
+        float h[64][4];             // corner heights of each cell: (r,k) (r,k+1) (r+1,k) (r+1,k+1)
+        float depth[64][4];         // the same corners: surface minus terrain (yards; < 0 = above ground)
+    };
+    struct LiquidQuad { float p[4][3]; uint8_t kind; };   // a building's MLIQ cell, render space, corners in order
+    struct TileLiquids { std::map<int, LiquidChunk> chunks; std::vector<LiquidQuad> quads; };
+    std::map<uint32_t, TileLiquids> liquids;              // by tile id
+    size_t liquidLayers = 0, liquidCells = 0, liquidDeepCells = 0, liquidQuads = 0, liquidWmoGroups = 0, liquidTiles = 0;
+    size_t liquidFramesOk = 0, liquidFramesMissing = 0, liquidBytes = 0, liquidMclqBad = 0;
     size_t modelsOk = 0, modelsFailed = 0, texturesOk = 0, texturesFailed = 0;
 };
 
@@ -228,12 +317,38 @@ bool exportFactions(const DataDir& data, const std::string& path, bool verbose);
 // Talent trees (talents.txt) and flight masters (taxi.txt) for the 3DS client (UI stages 4/6).
 bool exportTalents(const DataDir& data, const std::string& path, bool verbose);
 bool exportTaxi(const DataDir& data, const std::string& path, bool verbose);
+// Spell descriptions (6.20, spelldesc.bin): the text of every spell with its numbers filled in ($s1, $d, $o1, ${$m1*2} ...), for
+// the spell book / talents / buffs and the Use: / Equip: lines of item tooltips. Format: "SDSC", u32 version 1, u32 count,
+// count x {u32 id, u32 offset (from the file start), u32 length} sorted by id, then the texts (UTF-8, no terminator).
+struct SpellTextVals {   // what a description can ask of a spell
+    int32_t base[3] = {0, 0, 0}, dieSides[3] = {0, 0, 0};
+    float perLevel[3] = {0, 0, 0}, radiusMin[3] = {0, 0, 0}, radiusMax[3] = {0, 0, 0}, multiple[3] = {0, 0, 0}, combo[3] = {0, 0, 0};
+    uint32_t amplitudeMs[3] = {0, 0, 0}, chain[3] = {0, 0, 0};
+    int32_t misc[3] = {0, 0, 0};
+    int32_t durationMs = 0;   // -1 = until cancelled
+    uint32_t procChance = 0, procCharges = 0, stack = 0, maxTargets = 0, baseLevel = 0, maxLevel = 0, spellLevel = 0;
+    float rangeMax = 0;
+};
+std::string resolveSpellText(const std::string& text, const SpellTextVals& v,
+                             const std::function<const SpellTextVals*(uint32_t)>& other, int depth = 0);
+bool exportSpellDescriptions(const DataDir& data, const std::string& path, bool verbose);
+// skills.txt (SkillLine.dbc, stage 6.19): "S id category name description" - the skills page of the 3DS client.
+bool exportSkills(const DataDir& data, const std::string& path, bool verbose);
 bool exportLocks(const DataDir& data, const std::string& path, bool verbose);
+// areatriggers.txt (AreaTrigger.dbc, stage 5.28): the zones the client reports with CMSG_AREATRIGGER (dungeon doors, the tram).
+bool exportAreaTriggers(const DataDir& data, const std::string& path, bool verbose);
 bool exportEmotes(const DataDir& data, const std::string& path, bool verbose);
+// glue.txt (stage 5.29): GlueStrings.lua texts, CharStartOutfit.dbc clothes, AreaTable.dbc zone names.
+bool exportGlueTexts(const DataDir& data, const std::string& path, bool verbose);
 // Transports (stage 5.21): transports.txt = "T path node map x y z flags delay" per TaxiPathNode.dbc row and
 // "M display deckZ x0 y0 x1 y1" per transport model that has a walkable deck (found by convertTransports in creatures.cpp).
-struct TransportDeck { float z = 0, x0 = 0, y0 = 0, x1 = 0, y1 = 0; };
+struct TransportDeck { float z = 0, x0 = 0, y0 = 0, x1 = 0, y1 = 0; float area = 0, fill = 0; bool fromMesh = false; };
 std::map<uint32_t, TransportDeck>& transportDecks();
+// 6.14: "S display deckZ x0 y0 x1 y1" - big flat platforms among the ordinary objects (bridges, docks, rafts, stages): the client gives the
+// objects the server places a floor from them.
+std::map<uint32_t, TransportDeck>& staticDecks();
+// Display ids of transport-like models for which no deck was found (listed in the log: these are the ones to look at).
+std::vector<std::string>& transportsWithoutDeck();
 bool exportTransports(const DataDir& data, const std::string& path, bool verbose);
 // The column of the English spell name in Spell.dbc (calibrated on known spells; 120 in 1.12).
 int spellNameColumn(const DbcTable& spell);
@@ -245,6 +360,7 @@ struct SoundOptions {
     std::string eventsFile;          // "event SoundEntriesName ..." lines (override the built-in event list)
     uint32_t sfxRate = 22050, streamRate = 22050;
     bool music = true, ambience = true, areas = true, world = true;
+    int worldMaxSec = 12;            // longest world sound kept (stage 5.43; was 3 s, which cut the Hearthstone cast sound)
     int worldVariants = 2;           // files kept per world sound (SoundEntries has up to 10)
 };
 bool convertSound(const SoundOptions& so, const DataDir& data, bool verbose);
@@ -259,6 +375,10 @@ struct UiOptions {
     int normalPx = 12, largePx = 16, smallPx = 9;
     bool maps = true, icons = true;
     int mapWidth = 384;              // map pictures: mapWidth x mapWidth*2/3
+    // UI stage 11: the user's own copy of the ConsolePort addon (github.com/seblindfors/ConsolePort, Artistic License 2.0):
+    // skin lines with "CP:" paths take its pictures (round crossbar buttons, the targeting icons, button glyphs, the
+    // experience bar's overlay). Empty: "ConsolePort" next to the program / the working folder, if there is one.
+    std::string consolePort;
 };
 bool convertUi(const UiOptions& uo, const DataDir& data, bool verbose);
 
@@ -281,6 +401,11 @@ bool convertItems(const Options& o, const DataDir& data, PackWriter& pack, ConvS
 
 // Creatures: CMDL/CDSP entries for CreatureDisplayInfo (o.creatures).
 bool convertCreatures(const Options& o, const DataDir& data, PackWriter& pack, ConvStats& st);
+// Stage 5.29: the login / character screen scenes (MODL + GLUE entries), with the player models.
+bool convertGlueScenes(const Options& o, const DataDir& data, PackWriter& pack, ConvStats& st);
+// Spell visuals (stage 5.33, spellfx.cpp): effect models + the SVFX table, into the pack (the pool with --all).
+bool convertSpellEffects(const Options& o, const DataDir& data, PackWriter& pack, ConvStats& st);
+int explainSpells(const DataDir& data, const std::vector<uint32_t>& ids);   // --explain-spell (5.35f)
 // Collision of one doodad placement (st.m2Coll of its model, matrix T(pos)*Rz*Ry*Rx*S like the renderer).
 void addPlacementCollision(const Options& o, ConvStats& st, const W3dPlacement& p);
 // Writes the COLL entries collected by placeWmo / addPlacementCollision (one per tile).
@@ -299,9 +424,17 @@ uint32_t addPlaceholderTexture(PackWriter& pack, uint8_t fmt);
 bool emitTile(const Options& o, const wowee::pipeline::ADTTerrain& adt, const std::vector<uint32_t>& texIds,
               const std::vector<uint16_t>& mtexToSlot, const std::function<uint32_t(const std::string&)>& modelFor,
               PackWriter& pack, ConvStats& st,
-              const std::function<void(std::vector<W3dPlacement>&)>& wmoPlace = nullptr);
-void emitWater(const Options& o, const wowee::pipeline::ADTTerrain& adt, float minX, float minY, PackWriter& pack,
-               ConvStats& st);
+              const std::function<void(std::vector<W3dPlacement>&)>& wmoPlace = nullptr,
+              const std::vector<uint8_t>* adtBytes = nullptr);
+// Liquids (stage 5.26). collectAdtLiquids: the MCLQ layers of a tile (from the raw ADT when given - all layers, deep
+// water - else from WoWee's parse), with their depth over the terrain. emitLiquids: WATR (mesh, animated game
+// textures, Light.dbc colours) + LIQD (query grid) for every tile with a TERR that got liquids (data may be null).
+void collectAdtLiquids(const Options& o, const std::vector<uint8_t>* adtBytes, const wowee::pipeline::ADTTerrain& adt,
+                       ConvStats& st);
+void emitLiquids(const Options& o, const DataDir* data, PackWriter& pack, ConvStats& st);
+// Kind (W3dLiquid) of a WMO group's MLIQ the way the server's extractor resolves it (vMaNGOS vmapextract), -1 = none.
+int wmoLiquidKind(uint32_t rootFlags, uint32_t rootId, uint32_t groupFlags, uint32_t groupLiquid, const uint8_t* tiles,
+                  size_t tileCount);
 bool convertTile(const Options& o, const DataDir& data, PackWriter& pack, ConvStats& st);
 // Dungeons (stage 5.24): maps whose WDT holds one global WMO and no ADTs. convertDungeon() puts the building (split by
 // tile) plus a hidden terrain quad per tile into the pack; listDungeonMaps() = Map.dbc rows (id, directory) of such maps.
@@ -311,6 +444,24 @@ bool isDungeonMap(const DataDir& data, const std::string& dir);
 bool convertDungeon(const Options& o, const DataDir& data, PackWriter& pack, ConvStats& st);
 std::vector<DungeonMap> listDungeonMaps(const DataDir& data);
 bool buildSynthetic(const Options& o, PackWriter& pack, ConvStats& st);
+// Stage 5.27: w3dconv --all - interface, sound, every map of Map.dbc with one shared asset pool (all.cpp).
+struct AllOptions {
+    std::string folder;                       // where everything goes (copy it to sdmc:/3ds/w3dproto/)
+    std::set<uint32_t> maps;                  // only these Map.dbc ids (empty: all but 'skip')
+    std::set<uint32_t> skip = {13, 25, 29, 42, 169, 451};   // test and development maps of 1.12
+    bool ui = true, sound = true;
+    uint64_t partBytes = 3900ull << 20;       // pool parts below the FAT32 file limit of 4 GiB
+};
+int convertAll(const Options& o, const DataDir& data, const AllOptions& ao, UiOptions uo, SoundOptions so);
 int  printPackInfo(const std::string& path);   // validator, returns 0 if pack is sound
+
+// Stage 6.13: particle emitters of an M2 (model.cpp; also used for creature / game object models: a brazier's fire) and the
+// fx section + footer behind a blob (the same for MODL and CMDL blobs).
+size_t m2Emitters(const wowee::pipeline::M2Model& mdl, PackWriter& pack, const DataDir& data, const Options& o, ConvStats& st,
+                  bool fire, size_t maxN, std::vector<W3dFxEmitter>& emitters, std::vector<uint32_t>& fxTex,
+                  std::vector<uint32_t>* bones);
+void appendFxBlock(std::vector<uint8_t>& blob, std::vector<W3dFxEmitter>& em, std::vector<W3dFxGlow>& glows,
+                   const std::vector<uint32_t>& texIds);
+bool fireLikePath(const std::string& lowerPath);
 
 }  // namespace w3d

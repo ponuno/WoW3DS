@@ -33,10 +33,23 @@ static int lastErr() { return errno; }
 
 namespace w3n {
 
+
 static bool g_netUp = false;
 #if defined(__3DS__)
 static u32* g_socBuf = nullptr;
+// 5.35d: Wi-Fi only for us while the game runs. The system otherwise keeps scanning for StreetPass and lets SpotPass /
+// friends / eShop daemons use the radio in the background: latency spikes of tens to hundreds of ms. As ftpd does
+// (exclusive infrastructure state, locked), plus the background daemons suspended; all undone in netShutdown.
+static bool g_ndmUp = false, g_ndmLocked = false, g_ndmSuspended = false;
 #endif
+
+bool netRadioExclusive() {
+#if defined(__3DS__)
+    return g_ndmLocked;
+#else
+    return false;
+#endif
+}
 
 bool netInit() {
     if (g_netUp) return true;
@@ -48,6 +61,14 @@ bool netInit() {
     g_socBuf = (u32*)memalign(0x1000, kSocBufSize);
     if (g_socBuf && R_SUCCEEDED(socInit(g_socBuf, kSocBufSize))) g_netUp = true;
     else { free(g_socBuf); g_socBuf = nullptr; }
+    if (g_netUp && R_SUCCEEDED(ndmuInit())) {
+        g_ndmUp = true;
+        if (R_SUCCEEDED(NDMU_EnterExclusiveState(NDM_EXCLUSIVE_STATE_INFRASTRUCTURE))) {
+            if (R_SUCCEEDED(NDMU_LockState())) g_ndmLocked = true;
+            else NDMU_LeaveExclusiveState();
+        }
+        g_ndmSuspended = R_SUCCEEDED(NDMU_SuspendDaemons(NDM_DAEMON_MASK_ALL));
+    }
 #else
     g_netUp = true;
 #endif
@@ -59,6 +80,12 @@ void netShutdown() {
 #if defined(_WIN32)
     WSACleanup();
 #elif defined(__3DS__)
+    if (g_ndmUp) {
+        if (g_ndmSuspended) NDMU_ResumeDaemons(NDM_DAEMON_MASK_ALL);
+        if (g_ndmLocked) { NDMU_UnlockState(); NDMU_LeaveExclusiveState(); }
+        ndmuExit();
+        g_ndmUp = g_ndmLocked = g_ndmSuspended = false;
+    }
     socExit();
     free(g_socBuf);
     g_socBuf = nullptr;

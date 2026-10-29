@@ -16,7 +16,7 @@ using namespace w3n;
 static int g_fail = 0, g_ok = 0;
 #define CHECK(c, ...) do { if (c) ++g_ok; else { ++g_fail; std::printf("FAIL %s:%d ", __FILE__, __LINE__); std::printf(__VA_ARGS__); std::printf("\n"); } } while (0)
 
-struct Run { std::map<std::string, int> what; size_t stops = 0, requests = 0; int unknown = 0; };
+struct Run { std::map<std::string, int> what; size_t stops = 0, requests = 0; int unknown = 0, badLoops = 0; };
 
 // One pass over a log; 'tables' maps every display to sound data 1 (or self to 2) and every spell to visual 1.
 static Run replay(const std::vector<LoggedPacket>& pk, const std::string& tablesPath, std::set<uint32_t>* displays,
@@ -56,6 +56,7 @@ static Run replay(const std::vector<LoggedPacket>& pk, const std::string& tables
                 if (q.stop) { ++run.stops; continue; }
                 run.what[q.what]++;
                 if (!q.sound) ++run.unknown;
+                if (std::string(q.what) == "precast" && (!q.tag || !q.loopMs)) ++run.badLoops;   // stage 5.43: a precast repeats for the cast's length
             }
             if (t + 33 > p.ms) break;
         }
@@ -100,6 +101,7 @@ int main(int argc, char** argv) {
         if (!spells.empty()) {
             CHECK(r.what["cast"] >= 1, "casts sound (%d)", r.what["cast"]);
             CHECK(r.stops >= (size_t)r.what["cast"], "every cast ends its precast (%zu)", r.stops);
+            CHECK(r.badLoops == 0, "every precast carries the cast time as its loop length (%d bad)", r.badLoops);
         }
     }
     std::printf("SOUND WORLD: %d checks, %d failed -> %s\n", g_ok + g_fail, g_fail, g_fail ? "FAIL" : "PASS");

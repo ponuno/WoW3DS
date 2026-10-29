@@ -5,6 +5,18 @@
 
 #include "w3d_format.h"
 
+// ---------------------------------------------------------------- walking rules (stage 6.18c)
+// One set of numbers for the converter (wall or floor) and the client (steps, slopes, body). Sources:
+//  * slope: the retail client refuses ground steeper than 50 degrees (WoWee include/rendering/movement_limits.hpp:
+//    kMaxWalkableSlopeDegrees = 50, "kMinWalkableNormalZ = cos(50)"); a face whose normal.z is below this is not a floor.
+//    (Before 6.18 the converter's boundary was 60 degrees and the terrain had no limit at all.)
+//  * step: WoWee kMaxStepUp = 0.6 yd is its per-frame budget on a finely sampled floor; vMaNGOS contrib/mmap TileWorker.cpp
+//    (what the server's own walking allows) climbs 1.8 yd on terrain and 1.2 yd between terrain and models. The 3DS samples the
+//    floor once per frame at walking speed, so it keeps 1.5 yd (between the two vMaNGOS values; world.h kStepHeight).
+//  * body: a cylinder of radius 0.35 (WoWee feetCross(0.35)); vMaNGOS agentRadius 0.2..0.3.
+#define W3D_WALK_MAX_SLOPE_DEG 50.0f
+#define W3D_WALK_MIN_NZ 0.64278761f   /* cos(50 degrees) */
+
 // Heights of the floor triangles under (x, y) in render space. Reports the highest
 // one at or below zMax (*below, returns bit 1) and the lowest one above zMax
 // (*above, returns bit 2). 0 = no floor triangle covers the point.
@@ -45,6 +57,37 @@ static inline int w3d_coll_query(const uint8_t* blob, float x, float y, float zM
     return found;
 }
 
+// Diagnostics (6.19b): every floor triangle over (x, y): its height at the point and flags (W3D_COLL_M2: a doodad). Up to 'max'.
+static inline int w3d_coll_floors_at(const uint8_t* blob, float x, float y, int max, float* zs, uint16_t* flags) {
+    const W3dCollHeader* h = (const W3dCollHeader*)blob;
+    float lx = x - h->origin[0], ly = y - h->origin[1];
+    const float ts = 533.33333f;
+    if (lx < 0 || ly < 0 || lx > ts || ly > ts) return 0;
+    int n = (int)h->gridN;
+    int cx = (int)(lx / ts * n), cy = (int)(ly / ts * n);
+    if (cx >= n) cx = n - 1;
+    if (cy >= n) cy = n - 1;
+    const uint32_t* cells = (const uint32_t*)(blob + h->offCells);
+    const uint32_t* index = (const uint32_t*)(blob + h->offIndex);
+    const W3dCollTri* tris = (const W3dCollTri*)(blob + h->offTris);
+    const float qx = lx / W3D_COLL_XY_SCALE, qy = ly / W3D_COLL_XY_SCALE;
+    int c = 0;
+    for (uint32_t k = cells[cy * n + cx]; k < cells[cy * n + cx + 1] && c < max; ++k) {
+        const W3dCollTri* t = &tris[index[k]];
+        if (t->flags & W3D_COLL_WALL) continue;
+        float ax = t->x[0], ay = t->y[0], bx = t->x[1], by = t->y[1], ccx = t->x[2], ccy = t->y[2];
+        float den = (by - ccy) * (ax - ccx) + (ccx - bx) * (ay - ccy);
+        if (fabsf(den) < 1e-3f) continue;
+        float w0 = ((by - ccy) * (qx - ccx) + (ccx - bx) * (qy - ccy)) / den;
+        float w1 = ((ccy - ay) * (qx - ccx) + (ax - ccx) * (qy - ccy)) / den;
+        float w2 = 1.0f - w0 - w1;
+        if (w0 < -1e-4f || w1 < -1e-4f || w2 < -1e-4f) continue;
+        zs[c] = h->origin[2] + (w0 * t->z[0] + w1 * t->z[1] + w2 * t->z[2]) * h->zScale;
+        flags[c++] = t->flags;
+    }
+    return c;
+}
+
 // Ground for a walker whose feet are at zFeet: the highest surface (terrain or
 // floor) it can step onto (<= zFeet + step); if it is below everything, the
 // lowest surface. haveTerrain/terrainZ = the heightfield sample.
@@ -71,6 +114,7 @@ static inline float w3d_walk_height(const uint8_t* coll, float x, float y, float
 // and kerbs are left to the floor step) comes closer than r in XY.
 
 #define W3D_WALL_MAX_POLY 8
+#define W3D_WALL_MAX_CANDS 256
 
 // Clips the triangle to zLow <= z <= zHigh; returns the vertex count (0 if it misses).
 static inline int w3d_clip_slab(const float* tx, const float* ty, const float* tz, float zLow, float zHigh,
@@ -220,45 +264,57 @@ static inline int w3d_wall_push(const W3dWallCand* walls, int count, float* x, f
                                 float zLow, float zHigh, float r) {
     float lx = *x, ly = *y;
     int pushes = 0;
-    for (int w = 0; w < count; ++w) {
-        const W3dWallCand* c = &walls[w];
-        if (c->bx0 > lx + r || c->bx1 < lx - r || c->by0 > ly + r || c->by1 < ly - r) continue;
-        float px[W3D_WALL_MAX_POLY], py[W3D_WALL_MAX_POLY];
-        int m = w3d_clip_slab(c->x, c->y, c->z, zLow, zHigh, px, py);
-        if (m < 2) continue;
-        float qx, qy;
-        int inside = w3d_poly_closest(px, py, m, lx, ly, &qx, &qy);
-        float dx = lx - qx, dy = ly - qy, d2 = dx * dx + dy * dy;
-        if (d2 >= r * r) continue;
-        float d = sqrtf(d2);
-        float uw = -c->ny * lx + c->nx * ly;
-        // The extent test uses the whole triangle, not the slab piece: the slab cuts the sloped
-        // edges of neighbouring triangles of one wall at different places, and those cuts are
-        // not corners to slide round.
-        if (!inside && d > 1e-3f && (uw < c->umin || uw > c->umax)) {
-            // beyond a real end of the wall: straight away from its closest point
-            lx = qx + dx / d * r;
-            ly = qy + dy / d * r;
-        } else {
-            // In front of the wall (or on/inside it): out along its horizontal normal, on the
-            // side we came from, far enough to clear the whole slab piece.
-            float nx = c->nx, ny = c->ny, gx = 0, gy = 0;
-            for (int i = 0; i < m; ++i) { gx += px[i]; gy += py[i]; }
-            gx /= m; gy /= m;
-            float side = (prevX - gx) * nx + (prevY - gy) * ny;
-            if (side == 0) side = (lx - gx) * nx + (ly - gy) * ny;
-            if (side < 0) { nx = -nx; ny = -ny; }
-            float far = -3.4e38f;
-            for (int i = 0; i < m; ++i) {
-                float sk = (px[i] - lx) * nx + (py[i] - ly) * ny;
-                if (sk > far) far = sk;
+    // 6.18b: two phases. A wall made of many small coplanar triangles (an unsimplified fence, a building's panels) has seams the
+    // walker can touch beyond the extent of one triangle but inside its neighbour's: pushing away from the seam's end point first
+    // shoved the walker sideways (0.3 yd off the line of a straight walk into the fence). Pushes along the normal come first, they
+    // put the walker clear of the whole plane; the pushes from real ends (corners) only act on what is still too close afterwards.
+    int pending[W3D_WALL_MAX_CANDS];
+    int npending = 0;
+    for (int phase = 0; phase < 2; ++phase) {
+        const int n = phase == 0 ? count : npending;
+        for (int wi = 0; wi < n; ++wi) {
+            const int w = phase == 0 ? wi : pending[wi];
+            const W3dWallCand* c = &walls[w];
+            if (c->bx0 > lx + r || c->bx1 < lx - r || c->by0 > ly + r || c->by1 < ly - r) continue;
+            float px[W3D_WALL_MAX_POLY], py[W3D_WALL_MAX_POLY];
+            int m = w3d_clip_slab(c->x, c->y, c->z, zLow, zHigh, px, py);
+            if (m < 2) continue;
+            float qx, qy;
+            int inside = w3d_poly_closest(px, py, m, lx, ly, &qx, &qy);
+            float dx = lx - qx, dy = ly - qy, d2 = dx * dx + dy * dy;
+            if (d2 >= r * r) continue;
+            float d = sqrtf(d2);
+            float uw = -c->ny * lx + c->nx * ly;
+            // The extent test uses the whole triangle, not the slab piece: the slab cuts the sloped
+            // edges of neighbouring triangles of one wall at different places, and those cuts are
+            // not corners to slide round.
+            const bool radial = !inside && d > 1e-3f && (uw < c->umin || uw > c->umax);
+            if (radial && phase == 0) { pending[npending++] = w; continue; }
+            if (radial) {
+                // beyond a real end of the wall: straight away from its closest point
+                lx = qx + dx / d * r;
+                ly = qy + dy / d * r;
+            } else {
+                // In front of the wall (or on/inside it): out along its horizontal normal, on the
+                // side we came from, far enough to clear the whole slab piece.
+                float nx = c->nx, ny = c->ny, gx = 0, gy = 0;
+                for (int i = 0; i < m; ++i) { gx += px[i]; gy += py[i]; }
+                gx /= m; gy /= m;
+                float side = (prevX - gx) * nx + (prevY - gy) * ny;
+                if (side == 0) side = (lx - gx) * nx + (ly - gy) * ny;
+                if (side < 0) { nx = -nx; ny = -ny; }
+                float far = -3.4e38f;
+                for (int i = 0; i < m; ++i) {
+                    float sk = (px[i] - lx) * nx + (py[i] - ly) * ny;
+                    if (sk > far) far = sk;
+                }
+                float push = far + r;
+                if (push <= 1e-5f) continue;
+                lx += nx * push;
+                ly += ny * push;
             }
-            float push = far + r;
-            if (push <= 1e-5f) continue;
-            lx += nx * push;
-            ly += ny * push;
+            ++pushes;
         }
-        ++pushes;
     }
     *x = lx;
     *y = ly;
@@ -272,7 +328,6 @@ static inline int w3d_wall_push(const W3dWallCand* walls, int count, float* x, f
 #define W3D_WALL_RADIUS 0.35f
 #define W3D_WALL_SLAB_LOW 0.75f
 #define W3D_WALL_SLAB_HIGH 2.0f
-#define W3D_WALL_MAX_CANDS 256
 static inline int w3d_collide_move(const uint8_t* const* colls, int ncoll, float fromX, float fromY, float zFeet,
                                    float* toX, float* toY, float r) {
     static W3dWallCand cand[W3D_WALL_MAX_CANDS];

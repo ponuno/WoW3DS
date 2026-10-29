@@ -268,5 +268,30 @@ exp["equips"] = [
     equip_case([3, 4], [7101, 7001], [(ARM, 0, 0), (TOR, 128, 0)], 5, robe=1),               # shirt art under a robe
     equip_case([0, 3], [7102, 7101], [(ARM, 0, 0), (TOR, 128, 0)], 5),                       # helmet that leaves the man's hair
 ]
+
+# ------------------------------------------------------------ stage 5.29: glue screens
+# a racial scene (a ground plate + a pillar) with its camera and the character's mark, the login scene without a mark
+def scene_m2(name, stand, cam_pos, cam_tgt, with_mark=True):
+    verts, tris = [], []
+    for cx, cy, cz, sz in ((stand[0], stand[1], stand[2] - 0.5, 3.0), (stand[0] - 4, stand[1] + 3, stand[2] + 2, 1.0)):
+        v, t = box(cx, cy, cz, sz, 0)
+        base = len(verts); verts += v; tris += [base + i for i in t]
+    tex = "Interface\\Glues\\Models\\" + name + "\\" + name + "Ground.blp"
+    write(tex, blp(31))
+    return m2(name, verts, tris, [(0, 0, len(tris))], [(0, 0, 0)], [(0, tex)], [0], [(0, 0)], [(-1, (0, 0, 0), {})],
+              [(0, 0, 0, 1000, 0.0)], [], attachments=[(0, 0, stand)] if with_mark else None,
+              cameras=[(0, 0.95, 300.0, 0.5, cam_pos, cam_tgt)])
+write("Interface/Glues/Models/UI_Human/UI_Human.m2", scene_m2("UI_Human", (230.0, 10.0, 5.0), (238.0, 4.0, 7.0), (230.0, 10.0, 6.0)))
+write("Interface/Glues/Models/UI_MainMenu/UI_MainMenu.m2",
+      scene_m2("UI_MainMenu", (0.0, 0.0, 0.0), (40.0, 0.0, 12.0), (0.0, 0.0, 10.0), with_mark=False))
+# CharStartOutfit (1.12: ID, race|class<<8|sex<<16|outfit<<24, ItemID[12], DisplayItemID[12], InventoryType[12])
+outfit = [1, 1 | (1 << 8)] + [38, 39] + [0] * 10 + [7101, 7002] + [0] * 10 + [5, 8] + [0] * 10
+write("DBFilesClient/CharStartOutfit.dbc", dbc(38, [outfit]))
+# AreaTable (1.12: ID, map, parent, bit, flags, 5..10 sound / music / level, 11 name enUS, 12..18 other locales, 19 flags)
+write("DBFilesClient/AreaTable.dbc", dbc(20, [[12, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, "Elwynn Forest"] + [""] * 7 + [0],
+                                            [9, 0, 12, 2, 0, 0, 0, 0, 0, 0, 1, "Northshire Valley"] + [""] * 7 + [0]]))
+write("Interface/GlueXML/GlueStrings.lua", b'RACE_INFO_HUMAN = "Humans are a test race.\\nSecond line with a \\"quote\\".";\n'
+      b'CLASS_INFO_WARRIOR = "Warriors hit things.";\nNOT_A_STRING = 5;\n')
+exp["glue"] = {"scenes": [0, 1], "stand": [230.0, 10.0, 5.0], "outfit": [[7101, 5], [7002, 8]]}
 json.dump(exp, open(exp_path, "w"))
 print("creature data written; human geosets expected:", sorted(keep))

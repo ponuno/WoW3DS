@@ -16,6 +16,11 @@ namespace ui {
 
 enum class Font : uint8_t { Small = 0, Normal = 1, Large = 2 };
 constexpr uint16_t kTexNone = 0, kTexBuiltinFont = 1, kTexPack0 = 2;
+// UI stage 8: textures made at run time, not in the pack (ui_render.cpp: uiSetExternalTexture): the portraits of the unit
+// frames - kTexExternal0 + 0 ours, + 1 the target's. Their picture is the whole texture (kPortraitSize square).
+constexpr uint16_t kTexExternal0 = 0xFFF0, kExternalCount = 4;
+constexpr int kPortraitSize = 64;
+inline bool isExternalTex(uint16_t id) { return id >= kTexExternal0 && id < kTexExternal0 + kExternalCount; }
 
 // A picture in a texture: source rectangle in texels, 9-slice margins.
 struct Image {

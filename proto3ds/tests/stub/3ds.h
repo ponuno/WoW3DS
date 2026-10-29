@@ -30,3 +30,11 @@ Result APT_CheckNew3DS(bool* out);
 Result APT_SetAppCpuTimeLimit(u32 percent);
 void* linearAlloc(size_t size); void linearFree(void* p); u32 linearSpaceFree(void);
 u32 vramSpaceFree(void);
+// stage 6 (perf log)
+int LightEvent_WaitTimeout(LightEvent* e, s64 timeoutNs);
+Result APT_GetAppCpuTimeLimit(u32* percent);
+typedef enum { MEMREGION_ALL = 0, MEMREGION_APPLICATION = 1, MEMREGION_SYSTEM = 2, MEMREGION_BASE = 3 } MemRegion;
+u32 osGetMemRegionSize(MemRegion r); u32 osGetMemRegionUsed(MemRegion r); u32 osGetMemRegionFree(MemRegion r);
+u8 osGetWifiStrength(void);
+void* vramAlloc(size_t size); void vramFree(void* p);
+void svcSleepThread(s64 ns);

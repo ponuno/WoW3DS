@@ -25,7 +25,11 @@ APP_AUTHOR	:=	wow3ds
 #---------------------------------------------------------------------------------
 ARCH	:=	-march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
 
-CFLAGS	:=	-g -Wall -O2 -mword-relocations \
+# Stage 6.10: -O3 and fast float maths (no errno from sqrtf, reassociation, reciprocals), but NaN / infinity stay
+# real: the "!(x > a && x < b)" checks that catch bad numbers in game data must keep working.
+OPT	:=	-O3 -ffast-math -fno-finite-math-only
+
+CFLAGS	:=	-g -Wall $(OPT) -mword-relocations \
 			-ffunction-sections \
 			$(ARCH)
 
@@ -34,7 +38,10 @@ CFLAGS	+=	$(INCLUDE) -D__3DS__
 CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++20 -Wno-psabi   # psabi: GCC 7.1 ABI notes, harmless
 
 ASFLAGS	:=	-g $(ARCH)
-LDFLAGS	=	-specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
+# stage 6.6: libctru's linear allocator has no lock and the sound thread uses it too: every call goes through
+# source/linear_lock.cpp (one recursive lock)
+LINEAR_WRAP := -Wl,--wrap=linearAlloc,--wrap=linearMemAlign,--wrap=linearRealloc,--wrap=linearGetSize,--wrap=linearFree,--wrap=linearSpaceFree
+LDFLAGS	=	-specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map) $(LINEAR_WRAP)
 
 LIBS	:= -lcitro3d -lctru -lm
 

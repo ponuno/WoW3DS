@@ -86,6 +86,40 @@ uint32_t GameSession::guildId() const {
     return me ? me->field(kPlayerGuildId) : 0;
 }
 
+std::string GameSession::guildNameOf(uint32_t id) const {
+    auto it = guildNames_.find(id);
+    return it == guildNames_.end() ? std::string() : it->second;
+}
+
+std::string GameSession::unitSubtitle(const WorldObject& o) const {
+    if (o.type == ObjType::Player) {
+        const uint32_t gid = o.field(kPlayerGuildId);
+        if (!gid) return {};
+        const std::string n = guildNameOf(gid);
+        return n.empty() ? std::string() : "<" + n + ">";
+    }
+    if (o.type == ObjType::Unit && !o.subname.empty()) return "<" + o.subname + ">";
+    return {};
+}
+
+void GameSession::updateGuildNames(uint32_t nowMs) {
+    if (nowMs - guildScanMs_ < 1000 && guildScanMs_) return;
+    guildScanMs_ = nowMs ? nowMs : 1;
+    int asked = 0;
+    for (auto& [guid, o] : objects.all()) {
+        if (o.type != ObjType::Player) continue;
+        const uint32_t gid = o.field(kPlayerGuildId);
+        if (!gid || guildNames_.count(gid)) continue;
+        auto it = guildAskMs_.find(gid);
+        if (it != guildAskMs_.end() && nowMs - it->second < 10000) continue;
+        guildAskMs_[gid] = nowMs ? nowMs : 1;
+        Writer w;
+        w.u32(gid);
+        send(CMSG_GUILD_QUERY, w.b, nowMs);
+        if (++asked >= 3) break;
+    }
+}
+
 void GameSession::requestGuildRoster(uint32_t nowMs) {
     if (!guildId()) return;
     send(CMSG_GUILD_ROSTER, {}, nowMs);
@@ -273,6 +307,7 @@ bool GameSession::handleFriends(uint16_t op, const Bytes& data, uint32_t nowMs) 
             std::vector<std::string> ranks;
             for (int i = 0; i < 10 && !r.bad; ++i) ranks.push_back(r.cstr());
             if (r.bad && name.empty()) return true;
+            if (id && !name.empty()) guildNames_[id] = name;
             if (id == guildId() || !guild.id) {
                 guild.id = id;
                 guild.name = name;

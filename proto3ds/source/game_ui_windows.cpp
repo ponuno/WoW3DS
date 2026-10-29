@@ -14,6 +14,13 @@ using namespace ui;
 
 namespace {
 
+std::string secs(uint32_t ms) {
+    unsigned s = (unsigned)((ms + 999) / 1000);
+    if (s >= 3600) return std::to_string(s / 3600) + tr("h", "ч");
+    if (s >= 60) return std::to_string(s / 60) + tr("m", "м");
+    return std::to_string(s);
+}
+
 // WoW world axes: +x north, +y west.
 const char* compass(float dx, float dy) {
     static const char* en[8] = {"north", "north-east", "east", "south-east", "south", "south-west", "west", "north-west"};
@@ -293,7 +300,7 @@ void GameUi::drawItemInfo(w3n::GameSession& g) {
         list_.text(14, kTop + 14, tr("(asking the server...)", "(запрос к серверу...)"), kGrey, true, Font::Normal);
     } else {
         iconBox(12, kTop + 10, 32, itemIcon(g, infoEntry_), info->name, qualityColor(info->quality));
-        std::vector<std::string> lines = w3n::itemTooltip(*info, infoItem_.guid ? &infoItem_ : nullptr, g.spellNames);
+        std::vector<std::string> lines = w3n::itemTooltip(*info, infoItem_.guid ? &infoItem_ : nullptr, g.spellNames, &g.spellDesc);
         int y = kTop + 10;
         for (size_t i = 0; i < lines.size(); ++i) {
             const std::string& l = lines[i];
@@ -320,9 +327,21 @@ void GameUi::drawSpellInfo(w3n::GameSession& g, const Input& in) {
     std::string rk = g.spellNames.rank(s);
     if (!rk.empty()) list_.text(52, kTop + 30, rk, kGrey, true, Font::Normal);
     int y = kTop + 50;
+    {   // 6.20: what the spell does (spelldesc.bin), as the original's tooltip says it
+        const std::string d = g.spellDesc.text(s);
+        if (!d.empty()) {
+            int lines = 0;
+            for (const std::string& l : HudList::wrap(d, kTouchW - 28, Font::Small)) {
+                if (++lines > 7) break;
+                list_.text(12, y, l, kText, false, Font::Small);
+                y += HudList::lineHeight(Font::Small);
+            }
+            y += 6;
+        }
+    }
     uint32_t cd = g.cooldownLeftMs(s, in.nowMs);
     char b[64];
-    if (cd) { snprintf(b, sizeof b, tr("Cooldown: %.1f s", "Перезарядка: %.1f с"), cd / 1000.0); list_.text(52, y, b, kYellow); y += 14; }
+    if (cd) { snprintf(b, sizeof b, tr("Cooldown: %.1f s", "Перезарядка: %.1f с"), cd / 1000.0); list_.text(12, y, b, kYellow); y += 14; }
     // our aura of this spell: time left, cancel
     const w3n::WorldObject* me = g.selfObject();
     bool aura = false, cancelable = false;
@@ -331,12 +350,17 @@ void GameUi::drawSpellInfo(w3n::GameSession& g, const Input& in) {
             if (a.spell == s) {
                 aura = true;
                 cancelable = a.cancelable && !a.debuff;
-                if (a.leftMs) { snprintf(b, sizeof b, tr("%u s left", "Осталось %u с"), (unsigned)((a.leftMs + 999) / 1000)); list_.text(52, y, b, kText); y += 14; }
-                list_.text(52, y, a.debuff ? tr("Debuff", "Отрицательный эффект") : tr("Buff", "Положительный эффект"), a.debuff ? kRed : kGreen);
+                if (a.leftMs) { snprintf(b, sizeof b, tr("%u s left", "Осталось %u с"), (unsigned)((a.leftMs + 999) / 1000)); list_.text(12, y, b, kText); y += 14; }
+                list_.text(12, y, a.debuff ? tr("Debuff", "Отрицательный эффект") : tr("Buff", "Положительный эффект"), a.debuff ? kRed : kGreen);
                 y += 14;
             }
     const bool known = g.knowsSpell(s) || s == w3n::kSpellAttack;
-    if (known) list_.text(52, y, tr("In your spell book: drag it to a button or tap Bind.", "В вашей книге: перетащите на кнопку или нажмите «Привязать»."), kGrey);
+    if (known) {
+        for (const std::string& l : HudList::wrap(tr("In your spell book: drag it to a button or tap Bind.", "В вашей книге: перетащите на кнопку или нажмите «Привязать»."), kTouchW - 28, Font::Small)) {
+            list_.text(12, y, l, kGrey, false, Font::Small);
+            y += HudList::lineHeight(Font::Small);
+        }
+    }
     const int by = kTabY - 28;
     btn(10, by, 90, 24, tr("Back", "Назад"), Act::InfoBack, 0, Style::Normal);
     if (aura && cancelable) { buffSel_ = s; btn(110, by, 120, 24, tr("Cancel buff", "Снять эффект"), Act::BuffCancel, 0, Style::Primary, Font::Small); }
@@ -791,4 +815,146 @@ void GameUi::drawTrade(w3n::GameSession& g, const Input& in) {
     btn(148, by, 84, 22, t.weAccepted ? tr("Accepted", "Принято") : tr("Accept", "Принять"), Act::TradeAccept, 0,
         t.weAccepted ? Style::ToggleOn : Style::Primary, Font::Small);
     btn(236, by, 80, 22, tr("Cancel", "Отмена"), Act::TradeCancel, 0, Style::Danger, Font::Small);
+}
+
+// ------------------------------------------------------------------ pets (UI stage 13)
+// The pet window: name, level, mood and loyalty, health and power, the orders and stances (tap = do it, drag = bind to a
+// crossbar button), the pet's spells with their auto-cast switch, and Feed / Rename / Dismiss.
+void GameUi::drawPet(w3n::GameSession& g, const Input& in) {
+    window(2, kTop + 2, kTouchW - 4, kContentH - 4, true);
+    const w3n::WorldObject* u = g.petObject();
+    if (!g.pet.active || !u) {
+        list_.textCentered(kTouchW / 2, kTop + 60, tr("You have no pet.", "У вас нет питомца."), kGrey, true, Font::Normal);
+        btn(kTouchW / 2 - 40, kTop + 90, 80, 24, tr("Close", "Закрыть"), Act::ClosePanel, 0, Style::Normal, Font::Small);
+        return;
+    }
+    const int by = kTabY - 28;
+    if (petFeedList_) {   // the food list
+        std::vector<w3n::InvItem> food = g.petFoodCandidates();
+        list_.text(10, kTop + 6, tr("Feed Pet: pick the food", "Кормление: выберите еду"), kGold, true, Font::Normal);
+        if (!g.knowsSpell(w3n::GameSession::kSpellFeedPet)) list_.text(10, kTop + 24, tr("You do not know Feed Pet.", "Вы не знаете «Кормление питомца»."), kRed);
+        else if (food.empty()) list_.text(10, kTop + 24, tr("No food in the bags.", "В сумках нет еды."), kGrey);
+        const int per = 6, rowH = 23;
+        const int pages = std::max(1, ((int)food.size() + per - 1) / per);
+        page_ = std::min(page_, pages - 1);
+        for (int r = 0; r < per; ++r) {
+            const int k = page_ * per + r;
+            if (k >= (int)food.size()) break;
+            const int y = kTop + 26 + r * rowH;
+            list_.rect(8, y, kTouchW - 16, rowH - 2, r % 2 ? kRowAlt : kRow);
+            iconBox(10, y + 1, 19, itemIcon(g, food[k].entry), g.itemName(food[k].entry), kFrameDim);
+            list_.textFit(34, y + 4, g.itemName(food[k].entry), 210, kText, false, Font::Normal);
+            list_.textRight(kTouchW - 14, y + 4, "x" + std::to_string(food[k].count), kGrey, false);
+            region(8, y, kTouchW - 16, rowH - 2, Act::PetFeedPick, k);
+        }
+        btn(8, by, 80, 22, tr("Back", "Назад"), Act::PetFeed, 0, Style::Normal, Font::Small);
+        pager(by, page_, pages);
+        return;
+    }
+    // ---- header: name, level, mood, loyalty
+    std::string nm = g.petName();
+    if (nm.empty()) nm = "...";
+    list_.textFit(10, kTop + 5, nm, 150, kGold, true, Font::Normal);
+    char b[64];
+    snprintf(b, sizeof b, "%s %u", tr("Level", "Уровень"), (unsigned)u->level());
+    list_.textRight(kTouchW - 10, kTop + 5, b, kText, false);
+    const int mood = g.petHappiness();
+    if (mood) {
+        const char* mt = mood == 3 ? tr("Happy", "Довольна") : mood == 2 ? tr("Content", "Спокойна") : tr("Unhappy", "Недовольна");
+        snprintf(b, sizeof b, "%s, %s %d", mt, tr("loyalty", "преданность"), g.petLoyalty());
+        list_.text(10, kTop + 19, b, mood == 3 ? kGreen : mood == 2 ? kYellow : kRed, false);
+    }
+    list_.bar(160, kTop + 20, 150, 6, u->maxHealth() ? (float)u->health() / u->maxHealth() : 0, hudRgba(30, 200, 30));
+    {
+        const uint8_t pt = (uint8_t)((u->field(w3n::UF::UNIT_BYTES_0) >> 24) & 0xFF);
+        const uint8_t type = pt > 3 ? 0 : pt;
+        const uint32_t mx = u->field((uint16_t)(w3n::UF::UNIT_MAXPOWER1 + type));
+        if (mx) list_.bar(160, kTop + 28, 150, 4, (float)u->field((uint16_t)(w3n::UF::UNIT_POWER1 + type)) / mx, powerColor(type));
+    }
+    // ---- orders and stances (left)
+    list_.text(10, kTop + 36, tr("Orders", "Приказы"), kGold);
+    static const struct { uint32_t id; const char* en; const char* ru; } kCmds[6] = {
+        {kPetCmdAttack, "Attack", "Атака"}, {kPetCmdFollow, "Follow", "За мной"}, {kPetCmdStay, "Stay", "Стоять"},
+        {kPetCmdPassive, "Passive", "Пассивный"}, {kPetCmdDefensive, "Defend", "Защита"}, {kPetCmdAggressive, "Aggress.", "Агрессия"}};
+    for (int i = 0; i < 6; ++i) {
+        const int x = 8 + (i % 2) * 72, y = kTop + 48 + (i / 2) * 27 + (i >= 3 ? 6 : 0) * 0;
+        const bool on = petCmdActive(g, kCmds[i].id);
+        btn(x, y, 70, 24, tr(kCmds[i].en, kCmds[i].ru), Act::PetCommand, (int)kCmds[i].id, on ? Style::ToggleOn : Style::Toggle, Font::Small);
+        Button& rb = buttons_.back();
+        rb.dragKind = 3;
+        rb.dragId = kCmds[i].id;
+    }
+    // ---- the pet's spells (right)
+    list_.text(160, kTop + 36, tr("Pet spells", "Умения питомца"), kGold);
+    std::vector<uint32_t> book;
+    for (uint32_t p : g.pet.spells) book.push_back(w3n::PetState::spellOf(p));
+    if (book.empty()) list_.text(160, kTop + 52, tr("none", "нет"), kGrey, false);
+    const int rows = 5, rowH = 22;
+    const int pages = std::max(1, ((int)book.size() + rows - 1) / rows);
+    page_ = std::min(page_, pages - 1);
+    for (int r = 0; r < rows; ++r) {
+        const int k = page_ * rows + r;
+        if (k >= (int)book.size()) break;
+        const uint32_t sp = book[k];
+        const int y = kTop + 48 + r * rowH;
+        const bool can = g.petCanAutocast(sp), sel = petSel_ == 100000 + (int)sp;
+        list_.rect(158, y, 154, rowH - 2, sel ? kRowSel : r % 2 ? kRowAlt : kRow);
+        const uint32_t cd = g.petCooldownLeftMs(sp, in.nowMs);
+        iconBox(160, y + 1, 19, spellIcon(sp), g.spellNames.name(sp), g.petAutocast(sp) ? kGreen : kFrameDim, cd > 1500 || !can);
+        list_.textFit(183, y + 4, g.spellNames.name(sp), can ? 84 : 126, can ? kText : kGrey, false, Font::Small);
+        if (can) {
+            Button& rb = region(158, y, 106, rowH - 2, Act::PetCast, (int)sp);
+            rb.dragKind = 4;
+            rb.dragId = sp;
+            rb.infoKind = 2;
+            rb.infoId = sp;
+            btn(266, y + 1, 44, rowH - 4, tr("Auto", "Авто"), Act::PetAuto, (int)sp, g.petAutocast(sp) ? Style::ToggleOn : Style::Toggle, Font::Small);
+        } else {
+            Button& rb = region(158, y, 154, rowH - 2, Act::PetOpen, 0);
+            rb.infoKind = 2;
+            rb.infoId = sp;
+            list_.text(300, y + 4, "P", kGrey, false, Font::Small);
+        }
+        if (cd > 1500) list_.textRight(264, y + 4, secs(cd), kYellow, false, Font::Small);
+    }
+    if (pages > 1) pager(kTop + 48 + rows * rowH, page_, pages);
+    // ---- bottom row
+    btn(8, by, 56, 22, tr("Feed", "Корм"), Act::PetFeed, 1, Style::Normal, Font::Small);
+    if (g.petCanRename()) btn(68, by, 64, 22, tr("Rename", "Имя"), Act::PetRename, 0, Style::Normal, Font::Small);
+    btn(136, by, 72, 22, g.petCanAbandon() ? tr("Abandon", "Бросить") : tr("Dismiss", "Отпустить"), Act::PetDismiss, 0, Style::Danger, Font::Small);
+    if (petSel_ >= 0) btn(212, by, 50, 22, tr("Bind", "Кнопка"), Act::PetBind, petSel_, Style::Normal, Font::Small);
+    btn(kTouchW - 52, by, 48, 22, tr("Close", "Закрыть"), Act::ClosePanel, 0, Style::Normal, Font::Small);
+}
+
+// ------------------------------------------------------------------ stable master: the current pet and the stabled ones
+void GameUi::drawStable(w3n::GameSession& g, const Input& in) {
+    (void)in;
+    const w3n::StableWindow& st = g.stable;
+    char b[64];
+    snprintf(b, sizeof b, "%s: %d", tr("Stable slots", "Мест в стойле"), (int)st.slots);
+    list_.text(6, kTop + 4, b, kGold, true, Font::Normal);
+    btn(kTouchW - 52, kTop + 2, 50, 19, "✕", Act::StableClose, 0, Style::Normal, Font::Small);
+    const int top = kTop + 24, rowH = 27, by = kTabY - 26;
+    if (st.pets.empty()) list_.text(10, top + 6, tr("No pets here.", "Питомцев нет."), kGrey, true, Font::Normal);
+    int shown = 0;
+    bool haveCurrent = false;
+    for (const w3n::StabledPet& p : st.pets) {
+        haveCurrent = haveCurrent || p.slot == 1;
+        if (shown >= 5) break;
+        const int y = top + shown * rowH;
+        const bool sel = stableSel_ == (int)p.slot;
+        list_.rect(2, y, kTouchW - 4, rowH - 2, sel ? kRowSel : shown % 2 ? kRowAlt : kRow);
+        if (sel) list_.outline(2, y, kTouchW - 4, rowH - 2, kGold);
+        snprintf(b, sizeof b, "%s %u", tr("Level", "Ур."), (unsigned)p.level);
+        list_.textFit(8, y + 2, p.name.empty() ? std::string("?") : p.name, 150, kText, false, Font::Normal);
+        list_.text(8, y + 14, p.slot == 1 ? tr("with you", "с вами") : tr("in the stable", "в стойле"), p.slot == 1 ? kGreen : kGrey, false, Font::Small);
+        list_.textRight(kTouchW - 8, y + 2, b, kGold, false, Font::Small);
+        snprintf(b, sizeof b, "%s %u", tr("loyalty", "преданность"), (unsigned)p.loyalty);
+        list_.textRight(kTouchW - 8, y + 14, b, kGrey, false, Font::Small);
+        region(2, y, kTouchW - 4, rowH - 2, Act::StablePick, (int)p.slot);
+        ++shown;
+    }
+    if (haveCurrent) btn(2, by, 100, 22, tr("Stable it", "Сдать в стойло"), Act::StableStable, 0, Style::Normal, Font::Small);
+    if (stableSel_ > 1) btn(106, by, 100, 22, haveCurrent ? tr("Swap", "Обменять") : tr("Take out", "Забрать"), Act::StableUnstable, 0, Style::Primary, Font::Small);
+    btn(210, by, 104, 22, tr("Buy a slot", "Купить место"), Act::StableBuy, 0, Style::Normal, Font::Small);
 }

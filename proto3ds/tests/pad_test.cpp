@@ -75,7 +75,8 @@ int main() {
     CHECK(o.released == PadOut::None, "L+R is not a targeting release");
     CHECK(press(p, f, 0, KEY_START).menu, "START menu");
     // UI stage 3: SELECT tapped = free camera (on release); SELECT + D-left/right = tabs, no camera, no hotbar slot
-    CHECK(!press(p, f, 0, KEY_SELECT).freeCamera && press(p, f, 0, 0, 0, 0, 0, 0, false, 0, KEY_SELECT).freeCamera, "SELECT tap: camera on release");
+    CHECK(!press(p, f, 0, KEY_SELECT).freeCamera && !press(p, f, 0, 0, 0, 0, 0, 0, false, 0, KEY_SELECT).freeCamera,
+          "SELECT tap: no free camera any more (stage 5.31)");
     press(p, f, 0, KEY_SELECT);
     o = press(p, f, KEY_SELECT, KEY_DRIGHT);
     CHECK(o.tabDelta == 1 && o.slot < 0, "SELECT + D-right: next tab");

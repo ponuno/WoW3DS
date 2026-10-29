@@ -223,6 +223,8 @@ TransportPose TransportPath::at(uint32_t progressMs) const {
 bool TransportTable::parse(const std::string& text) {
     paths_.clear();
     decks_.clear();
+    staticDecks_.clear();
+    elevators_.clear();
     built_.clear();
     std::map<uint32_t, std::map<uint32_t, TaxiPathNode>> tmp;
     size_t at = 0;
@@ -237,6 +239,18 @@ bool TransportTable::parse(const std::string& text) {
             if (std::sscanf(line.c_str() + 2, "%u %f %f %f %f %f", &id, &d.z, &d.x0, &d.y0, &d.x1, &d.y1) == 6) decks_[id] = d;
             continue;
         }
+        if (line.size() >= 3 && line[0] == 'S' && line[1] == '\t') {   // 6.14: a platform among the ordinary objects
+            unsigned id = 0;
+            DeckInfo d;
+            if (std::sscanf(line.c_str() + 2, "%u %f %f %f %f %f", &id, &d.z, &d.x0, &d.y0, &d.x1, &d.y1) == 6) staticDecks_[id] = d;
+            continue;
+        }
+        if (line.size() >= 3 && line[0] == 'A' && line[1] == '\t') {
+            unsigned entry = 0, t = 0;
+            ElevatorNode n;
+            if (std::sscanf(line.c_str() + 2, "%u %u %f %f %f", &entry, &t, &n.x, &n.y, &n.z) == 5) { n.t = t; elevators_[entry].add(n); }
+            continue;
+        }
         if (line.size() < 3 || line[0] != 'T' || line[1] != '\t') continue;
         unsigned path = 0, idx = 0, map = 0, flags = 0, delay = 0;
         float x = 0, y = 0, z = 0;
@@ -249,8 +263,54 @@ bool TransportTable::parse(const std::string& text) {
         auto& v = paths_[kv.first];
         for (auto& nd : kv.second) v.push_back(nd.second);
     }
-    loaded_ = !paths_.empty() || !decks_.empty();
+    loaded_ = !paths_.empty() || !decks_.empty() || !staticDecks_.empty() || !elevators_.empty();
     return loaded_;
+}
+
+void ElevatorAnim::add(const ElevatorNode& n) {
+    auto it = std::lower_bound(nodes_.begin(), nodes_.end(), n.t, [](const ElevatorNode& a, uint32_t t) { return a.t < t; });
+    if (it != nodes_.end() && it->t == n.t) *it = n;
+    else nodes_.insert(it, n);
+}
+
+bool ElevatorAnim::offsetAt(uint32_t progressMs, float out[3]) const {
+    if (!valid()) return false;
+    const uint32_t tm = progressMs % total();
+    // vMaNGOS: next = first node with TimeSeg >= tm, prev = the node before it (none at the very start)
+    auto nx = std::lower_bound(nodes_.begin(), nodes_.end(), tm, [](const ElevatorNode& a, uint32_t t) { return a.t < t; });
+    if (nx == nodes_.end()) nx = nodes_.end() - 1;
+    if (nx == nodes_.begin()) { out[0] = nx->x; out[1] = nx->y; out[2] = nx->z; return true; }   // the server keeps the old spot here
+    const ElevatorNode& pv = *(nx - 1);
+    const ElevatorNode& n = *nx;
+    if (pv.x == n.x && pv.y == n.y && pv.z == n.z) { out[0] = pv.x; out[1] = pv.y; out[2] = pv.z; return true; }
+    const float k = (float)(tm - pv.t) / (float)(n.t - pv.t);
+    out[0] = pv.x + (n.x - pv.x) * k;
+    out[1] = pv.y + (n.y - pv.y) * k;
+    out[2] = pv.z + (n.z - pv.z) * k;
+    return true;
+}
+
+TransportPose elevatorPose(const ElevatorAnim& a, uint32_t progressMs, const float st[4], const float q[4]) {
+    TransportPose p;
+    float off[3];
+    if (!a.offsetAt(progressMs, off)) return p;
+    // G3D: offset * Matrix3(quat) == transpose(R(quat)) * offset, R from the unit quaternion (x y z w)
+    float x = q[0], y = q[1], z = q[2], w = q[3];
+    const float n = std::sqrt(x * x + y * y + z * z + w * w);
+    if (n > 1e-6f) { x /= n; y /= n; z /= n; w /= n; } else { x = y = z = 0; w = 1; }
+    const float r00 = 1 - 2 * (y * y + z * z), r01 = 2 * (x * y - z * w), r02 = 2 * (x * z + y * w);
+    const float r10 = 2 * (x * y + z * w), r11 = 1 - 2 * (x * x + z * z), r12 = 2 * (y * z - x * w);
+    const float r20 = 2 * (x * z - y * w), r21 = 2 * (y * z + x * w), r22 = 1 - 2 * (x * x + y * y);
+    const float vx = r00 * off[0] + r10 * off[1] + r20 * off[2];
+    const float vy = r01 * off[0] + r11 * off[1] + r21 * off[2];
+    const float vz = r02 * off[0] + r12 * off[1] + r22 * off[2];
+    p.x = st[0] + vx;
+    p.y = st[1] - vy;
+    p.z = st[2] + vz;
+    p.o = st[3];
+    p.moving = true;
+    p.valid = true;
+    return p;
 }
 
 bool TransportTable::load(const std::string& path) {

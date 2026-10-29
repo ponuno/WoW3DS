@@ -105,6 +105,7 @@ bool SfxBank::synthesize(Alloc a, Free f) {
         {"coin", {{60, 2400, 2400, 0.15f}, {90, 3200, 3200, 0.13f}}},
         {"levelup", {{110, 523, 523, 0.2f}, {110, 659, 659, 0.2f}, {110, 784, 784, 0.2f}, {260, 1046, 1046, 0.2f}}},
         {"questcomplete", {{120, 660, 660, 0.2f}, {200, 880, 880, 0.2f}}},
+        {"discover", {{100, 784, 784, 0.18f}, {100, 988, 988, 0.18f}, {100, 1175, 1175, 0.18f}, {320, 1568, 1568, 0.18f}}},
         {"whisper", {{90, 1400, 1400, 0.16f}, {120, 1000, 1000, 0.14f}}},
         {"targethostile", {{35, 700, 600, 0.14f}}},
         {"targetlost", {{35, 500, 400, 0.10f}}},
@@ -157,6 +158,11 @@ bool MusicTable::load(const char* dir) {
             for (size_t k = 3; k < c.size(); ++k)
                 if (!c[k].empty()) s.files.push_back(c[k]);
         } else if (c[0] == "M" && c.size() >= 3) mapArea_[num(c[1])] = num(c[2]);
+        else if (c[0] == "G" && c.size() >= 3) {
+            glue_.volume = std::clamp(num(c[1]) / 100.0f, 0.05f, 1.0f);
+            for (size_t k = 2; k < c.size(); ++k)
+                if (!c[k].empty()) glue_.files.push_back(c[k]);
+        }
     }
     fclose(f);
     return !areas_.empty();
@@ -227,18 +233,32 @@ ZoneSound MusicTable::zone(uint32_t area) const {
 // ------------------------------------------------------------------ Director
 std::string Director::pickFrom(const MusicTable& t, const SoundSet* s) {
     if (!s || s->files.empty()) return {};
-    return t.path(s->files[rng_() % s->files.size()]);
+    std::string p = t.path(s->files[rng_() % s->files.size()]);
+    for (int i = 0; i < 4 && s->files.size() > 1 && p == lastTrack_; ++i) p = t.path(s->files[rng_() % s->files.size()]);   // another track than the last
+    lastTrack_ = p;
+    return p;
 }
 
 void Director::update(const MusicTable& t, uint32_t area, bool night, uint32_t nowMs) {
-    if (area != area_ || night != night_) {
+    // stage 5.43: standing on an area border made the music jump between two zones' tracks and cut every one short; the
+    // music follows an area only after it held for a second (the first area at once)
+    if (area != cand_) { cand_ = area; candMs_ = nowMs; }
+    const bool areaChanged = area != area_ && (area_ == ~0u || (int32_t)(nowMs - candMs_) >= 1000);
+    if (areaChanged || night != night_) {
+        area = areaChanged ? area : area_;
         area_ = area;
         night_ = night;
         zone_ = t.zone(area);
         const SoundSet* m = night && zone_.night ? zone_.night : zone_.day ? zone_.day : zone_.night;
         const SoundSet* a = night && zone_.ambNight ? zone_.ambNight : zone_.ambDay ? zone_.ambDay : zone_.ambNight;
         const uint32_t mid = zone_.music * 2 + (m == zone_.night ? 1 : 0), aid = zone_.ambience * 2 + (a == zone_.ambNight ? 1 : 0);
-        if (mid != musicId_) {   // other music: a track of it right away (as entering a zone in the original)
+        bool keep = false;   // the playing track belongs to the new music too (other ZoneMusic rows list the same files): let it finish
+        if (m && !music_.empty())
+            for (const std::string& f : m->files) keep |= t.path(f) == music_;
+        if (mid != musicId_ && keep) {
+            musicId_ = mid;
+            musicVol_ = m->volume;
+        } else if (mid != musicId_) {   // other music: a track of it right away (as entering a zone in the original)
             musicId_ = mid;
             music_ = pickFrom(t, m);
             musicVol_ = m ? m->volume : 1;
@@ -259,7 +279,10 @@ void Director::update(const MusicTable& t, uint32_t area, bool night, uint32_t n
 
 void Director::musicEnded(uint32_t nowMs) {
     music_.clear();
-    uint32_t lo = std::min<uint32_t>(zone_.silMinMs, 180000u), hi = std::min<uint32_t>(std::max(zone_.silMaxMs, lo), 240000u);
+    // ZoneMusic asks for 2-5 minutes of silence between tracks; on a handheld that felt like the music had stopped
+    // (stage 5.31: a quarter of it, 5..45 s; stage 5.43: an eighth, 3..20 s).
+    uint32_t lo = std::clamp<uint32_t>(zone_.silMinMs / 8, 3000u, 10000u);
+    uint32_t hi = std::clamp<uint32_t>(std::max(zone_.silMaxMs, zone_.silMinMs) / 8, lo, 20000u);
     silenceUntil_ = nowMs + lo + (hi > lo ? rng_() % (hi - lo + 1) : 0);
     pendingTrack_ = true;
 }
@@ -332,6 +355,11 @@ bool SoundTables::load(const char* path) {
         else if (c[0] == "F" && c.size() >= 3) footstep_[num(c[1])] = num(c[2]);
         else if (c[0] == "Q" && c.size() >= 7) visual_[num(c[1])] = {num(c[2]), num(c[3]), num(c[4]), num(c[5]), num(c[6])};
         else if (c[0] == "P" && c.size() >= 3) spellVisual_[num(c[1])] = num(c[2]);
+        else if (c[0] == "L" && c.size() >= 3) liquid_[c[1]] = num(c[2]);
+        else if (c[0] == "N" && c.size() >= 5) npcVoice_[num(c[1])] = {num(c[2]), num(c[3]), num(c[4])};
+        else if (c[0] == "V" && c.size() >= 5) errorVoice_[c[1] + " " + c[2] + " " + c[3]] = num(c[4]);
+        else if (c[0] == "T" && c.size() >= 5)
+            emoteVoice_[((uint64_t)num(c[1]) << 16) | ((num(c[2]) & 0xFF) << 8) | (num(c[3]) & 0xFF)] = num(c[4]);
     }
     fclose(f);
     loaded_ = true;
@@ -355,6 +383,26 @@ uint32_t SoundTables::footstep(uint32_t id) const {
     if (it == footstep_.end()) it = footstep_.find(0);
     if (it == footstep_.end() && !footstep_.empty()) it = footstep_.begin();
     return it == footstep_.end() ? 0 : it->second;
+}
+
+uint32_t SoundTables::liquid(const char* kind) const {
+    auto it = liquid_.find(kind);
+    return it == liquid_.end() ? 0 : it->second;
+}
+
+const NpcVoice* SoundTables::npcVoice(uint32_t displayId) const {
+    auto it = npcVoice_.find(displayId);
+    return it == npcVoice_.end() ? nullptr : &it->second;
+}
+
+uint32_t SoundTables::errorVoice(uint32_t race, uint32_t gender, const char* token) const {
+    auto it = errorVoice_.find(std::to_string(race) + " " + std::to_string(gender) + " " + token);
+    return it == errorVoice_.end() ? 0 : it->second;
+}
+
+uint32_t SoundTables::emoteVoice(uint32_t textEmote, uint32_t race, uint32_t gender) const {
+    auto it = emoteVoice_.find(((uint64_t)textEmote << 16) | ((race & 0xFF) << 8) | (gender & 0xFF));
+    return it == emoteVoice_.end() ? 0 : it->second;
 }
 
 const SpellSounds* SoundTables::spell(uint32_t spellId) const {
@@ -397,6 +445,8 @@ void Stream::close() {
     m_.reset();
     pcm_.clear();
     pcmPos_ = 0;
+    framesRead_ = 0;
+    endReason_ = 0;
 }
 
 bool Stream::open(const std::string& path) {
@@ -417,6 +467,15 @@ bool Stream::open(const std::string& path) {
     mp3_ = true;
     m_ = std::make_unique<Mp3>();
     mp3dec_init(&m_->dec);
+    {   // an ID3v2 tag in front (cover art can be hundreds of KB and holds byte runs that look like frame headers): skip it
+        uint8_t id[10];
+        if (fread(id, 1, 10, f_) == 10 && id[0] == 'I' && id[1] == 'D' && id[2] == '3' && !((id[6] | id[7] | id[8] | id[9]) & 0x80)) {
+            const long size = ((long)id[6] << 21) | ((long)id[7] << 14) | ((long)id[8] << 7) | (long)id[9];
+            fseek(f_, 10 + size + ((id[5] & 0x10) ? 10 : 0), SEEK_SET);
+        } else {
+            fseek(f_, 0, SEEK_SET);
+        }
+    }
     // the first frame tells the rate and the channels
     channels_ = 0;
     if (!fillMp3() || !channels_) { close(); return false; }
@@ -428,7 +487,9 @@ bool Stream::rewind() { return open(path_); }
 bool Stream::fillMp3() {   // decodes at least one more frame into pcm_ (false at the end)
     Mp3& m = *m_;
     mp3d_sample_t pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
-    for (int tries = 0; tries < 64; ++tries) {
+    // Only the end of the file ends a track. (It used to give up after 64 frames without samples and drop the whole
+    // buffer on the first stretch it could not sync on, which cut tracks short.)
+    for (int tries = 0; tries < 20000; ++tries) {
         if (m.in.size() - m.inPos < 16384 && !m.eof) {
             m.in.erase(m.in.begin(), m.in.begin() + (long)m.inPos);
             m.inPos = 0;
@@ -438,12 +499,12 @@ bool Stream::fillMp3() {   // decodes at least one more frame into pcm_ (false a
             m.in.resize(old + got);
             if (!got) m.eof = true;
         }
-        if (m.inPos >= m.in.size()) return false;
+        if (m.inPos >= m.in.size()) { endReason_ = 1; return false; }
         mp3dec_frame_info_t info;
         int n = mp3dec_decode_frame(&m.dec, m.in.data() + m.inPos, (int)(m.in.size() - m.inPos), pcm, &info);
         if (!info.frame_bytes) {
-            if (m.eof) return false;
-            m.inPos = m.in.size();   // garbage: skip what we have
+            if (m.eof) { endReason_ = 1; return false; }
+            m.inPos += std::min<size_t>(1024, m.in.size() - m.inPos);   // no frame here: step on, the buffer is refilled below
             continue;
         }
         m.inPos += info.frame_bytes;
@@ -468,6 +529,7 @@ bool Stream::fillMp3() {   // decodes at least one more frame into pcm_ (false a
         }
         return true;
     }
+    endReason_ = 2;
     return false;
 }
 
@@ -496,6 +558,7 @@ int Stream::read(int16_t* out, int frames) {
         pcmPos_ += take * channels_;
         done += (int)take;
     }
+    framesRead_ += (uint64_t)done;
     return done;
 }
 

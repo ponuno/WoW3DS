@@ -1,5 +1,6 @@
 #include "sound_world.hpp"
 
+#include <algorithm>
 #include <cmath>
 
 using namespace w3n;
@@ -35,13 +36,14 @@ uint32_t SoundWorld::weaponSubclass(GameSession& g, const WorldObject& o) const 
     return ~0u;
 }
 
-void SoundWorld::at(const GameSession& g, uint64_t guid, uint32_t sound, const char* what, std::vector<SoundReq>& out, uint64_t tag) {
+void SoundWorld::at(const GameSession& g, uint64_t guid, uint32_t sound, const char* what, std::vector<SoundReq>& out, uint64_t tag, uint32_t loopMs) {
     if (!sound) return;
     const WorldObject* o = g.objects.find(guid);
     SoundReq r;
     r.sound = sound;
     r.what = what;
     r.tag = tag;
+    r.loopMs = loopMs;
     if (o && o->hasPos) {
         float p[3];
         o->positionAt(now_, p, nullptr);   // along its spline when it walks
@@ -54,7 +56,7 @@ void SoundWorld::at(const GameSession& g, uint64_t guid, uint32_t sound, const c
 }
 
 void SoundWorld::update(GameSession& g, const float pos[3], bool moving, bool onGround, bool walking, uint32_t nowMs,
-                        std::vector<SoundReq>& out) {
+                        std::vector<SoundReq>& out, int water) {
     const uint64_t me = g.selfGuid();
     now_ = nowMs;
     // ---- the session's events
@@ -90,7 +92,7 @@ void SoundWorld::update(GameSession& g, const float pos[3], bool moving, bool on
             }
             case GameSession::WorldSound::SpellStart: {
                 const snd::SpellSounds* ss = tables_.spell(w.spell);
-                if (ss && w.castMs) at(g, w.src, ss->precast, "precast", out, w.src | 1);
+                if (ss && w.castMs) at(g, w.src, ss->precast, "precast", out, w.src | 1, w.castMs);
                 break;
             }
             case GameSession::WorldSound::SpellGo: {
@@ -144,6 +146,26 @@ void SoundWorld::update(GameSession& g, const float pos[3], bool moving, bool on
         for (auto it = units_.begin(); it != units_.end();)
             it = nowMs - it->second.seenMs > 10000 ? units_.erase(it) : std::next(it);
 
+    // ---- a fish bites (stage 5.26): the splash the server announces at our bobber
+    if (g.fishBiteMs && g.fishBiteMs != biteMs_) {
+        biteMs_ = g.fishBiteMs;
+        if (uint32_t s = tables_.liquid("fishbite")) at(g, g.fishBiteGuid, s, "fishbite", out);
+    }
+    // ---- swimming: a stroke now and then while moving (no footsteps)
+    if (water == 2) {
+        if (moving && nowMs - strokeMs_ > 1100) {
+            strokeMs_ = nowMs;
+            SoundReq r;
+            r.sound = tables_.liquid("swim");
+            r.self = true;
+            r.what = "swim";
+            r.gain = 0.45f;
+            if (r.sound) out.push_back(r);
+        }
+        lastPos_[0] = pos[0]; lastPos_[1] = pos[1]; lastPos_[2] = pos[2];
+        havePos_ = true;
+        return;
+    }
     // ---- our footsteps: one per stride on the ground
     if (havePos_ && moving && onGround) {
         const float dx = pos[0] - lastPos_[0], dy = pos[1] - lastPos_[1];
@@ -160,6 +182,11 @@ void SoundWorld::update(GameSession& g, const float pos[3], bool moving, bool on
             r.self = true;
             r.what = "step";
             r.gain = 0.35f;
+            if (water == 1 && tables_.liquid("wade")) {   // wading: the step splashes
+                r.sound = tables_.liquid("wade");
+                r.what = "wade";
+                r.gain = 0.45f;
+            }
             if (r.sound) out.push_back(r);
         }
     } else if (!moving) {
@@ -169,4 +196,16 @@ void SoundWorld::update(GameSession& g, const float pos[3], bool moving, bool on
     lastPos_[1] = pos[1];
     lastPos_[2] = pos[2];
     havePos_ = true;
+}
+
+void SoundWorld::splash(const float pos[3], float speed, uint32_t nowMs, std::vector<SoundReq>& out) {
+    (void)nowMs;
+    SoundReq r;
+    r.sound = tables_.liquid("splash");
+    r.x = pos[0]; r.y = pos[1]; r.z = pos[2];
+    r.self = true;
+    r.what = "splash";
+    r.gain = std::min(1.0f, 0.4f + std::max(0.0f, speed) * 0.05f);
+    if (r.sound) out.push_back(r);
+    strokeMs_ = nowMs;
 }

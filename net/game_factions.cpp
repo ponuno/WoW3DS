@@ -150,6 +150,7 @@ Rank GameSession::shownReaction(const WorldObject& o) const {
 
 bool GameSession::canAttack(const WorldObject& o) const {
     if (o.self || o.guid == self_ || !o.isUnitLike() || o.dead()) return false;
+    if (o.type == ObjType::Player && duel.fighting && o.guid == duel.opponent && duel.startMs && now_ >= duel.startMs) return true;
     const uint32_t fl = o.field(UF::UNIT_FLAGS);
     if (fl & (UnitFlag::NonAttackable2 | UnitFlag::Spawning | UnitFlag::TaxiFlight | UnitFlag::NotAttackable1 |
               UnitFlag::NotSelectable | UnitFlag::ImmuneToPlayer))
@@ -164,7 +165,7 @@ bool GameSession::canAttack(const WorldObject& o) const {
                 if (const FactionInfo* f = factions.faction(t->faction))
                     if (f->repIndex >= 0 && !atWarWith(*f)) return false;
     }
-    if (theyPlayer) return (fl & UnitFlag::Pvp) != 0;   // other players: only when they are flagged (no duels yet)
+    if (theyPlayer) return (fl & UnitFlag::Pvp) != 0;   // other players: only when they are flagged
     return true;
 }
 

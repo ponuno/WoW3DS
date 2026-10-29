@@ -4,7 +4,7 @@
 
 namespace ui {
 
-int g_lang = 1;
+int g_lang = 0;   // 6.20: English by default (0), also in the main menu
 
 uint32_t qualityColor(uint32_t q) {
     switch (q) {
@@ -125,11 +125,53 @@ std::string trText(const std::string& en) {
         {"Target a player first", "Сначала выберите игрока"},
         {"Binding cancelled", "Привязка отменена"},
         {"You are dead", "Вы мертвы"},
+        // UI stage 8: the red error lines of the top screen
+        {"You have no target", "Нет цели"},
+        {"Invalid target", "Неверная цель"},
+        {"Out of range", "Слишком далеко"},
+        {"Not enough mana", "Недостаточно маны"},
+        {"Not enough rage", "Недостаточно ярости"},
+        {"Not enough energy", "Недостаточно энергии"},
+        {"Not enough focus", "Недостаточно концентрации"},
+        {"Spell is not ready yet", "Заклинание ещё не готово"},
+        {"Ability is not ready yet", "Способность ещё не готова"},
+        {"Item is not ready yet", "Предмет ещё не готов"},
+        {"Another action is in progress", "Выполняется другое действие"},
+        {"Interrupted", "Прервано"},
+        {"You are facing the wrong way", "Вы смотрите не в ту сторону"},
+        {"You must be standing", "Нужно встать"},
+        {"Inventory is full", "Инвентарь полон"},
+        {"That bag is full", "Сумка полна"},
+        {"Out of ammo", "Нет боеприпасов"},
+        {"Target not in line of sight", "Цель вне поля зрения"},
+        {"Can't do that while moving", "Нельзя делать это на ходу"},
+        {"You can't do that yet", "Пока нельзя"},
+        {"You can't carry any more of those items", "Больше таких предметов не унести"},
+        {"You can't carry any more of those items.", "Больше таких предметов не унести."},
+        {"You can't learn that yet.", "Пока нельзя изучить."},
+        {"You don't have permission to loot that corpse.", "Вы не можете обыскать это тело."},
+        {"You are too far away to loot that corpse.", "Слишком далеко, чтобы обыскать."},
+        {"You cannot loot that.", "Это нельзя обыскать."},
+        {"Someone is already looting that corpse.", "Тело уже обыскивают."},
+        {"You must be facing the corpse to loot it.", "Повернитесь к телу, чтобы обыскать."},
+        {"You need to be standing up to loot something!", "Чтобы обыскать, нужно встать!"},
+        {"Target is friendly", "Цель дружественна"},
+        {"Target is hostile", "Цель враждебна"},
+        {"Target needs to be in front of you", "Цель должна быть перед вами"},
+        {"You must be in front of your target", "Встаньте перед целью"},
+        {"Target too close", "Цель слишком близко"},
+        // UI stage 9
+        {"You are already in a duel", "Вы уже участвуете в дуэли"},
+        {"You decline the duel.", "Вы отказались от дуэли."},
+        {"The duel was cancelled.", "Дуэль отменена."},
     };
     for (const Pair& p : exact)
         if (en == p.en) return p.ru;
     static const Pair prefix[] = {
         {"You loot ", "Добыча: "},
+        {"Following ", "Следование: "},
+        {"You are no longer following ", "Вы больше не следуете за "},
+        {"You have requested a duel with ", "Вы вызвали на дуэль: "},
         {"Quest accepted: ", "Задание принято: "},
         {"You have learned a new spell: ", "Изучено заклинание: "},
         {"You gain ", "Получено "},

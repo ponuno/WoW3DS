@@ -69,49 +69,85 @@ struct ModelInfo {
     TransportDeck deck;
 };
 
-// The deck of a ship: the horizontal level with the most upward-facing collision area (the main deck), and the extent
-// of the triangles on that level (model space = transport-local space of the passengers).
+// The deck of a ship: the horizontal level with the most flat area (the main deck), and the extent of the triangles on
+// that level (model space = transport-local space of the passengers).
+// 6.14: from the model's collision mesh (what the game itself walks on); a model without one (or with too little flat area
+// in it) falls back to the drawn mesh, where a level of upward-facing triangles is the floor. Static platforms are taken
+// from the collision mesh only (a flat drawn thing without collision - a ground glow, a rug in the air - is not solid).
+struct FlatTri { float z, area, x0, y0, x1, y1; bool up; };
+
+static bool deckFromTris(const std::vector<FlatTri>& tris, double minArea, TransportDeck& out) {
+    // up-facing pieces first (a floor), else either side of a flat piece (winding is not trusted)
+    for (int pass = 0; pass < 2; ++pass) {
+        std::map<int, double> bins;   // z in 0.25 steps -> area
+        for (const FlatTri& t : tris)
+            if (pass == 1 || t.up) bins[(int)std::lround(t.z * 4.0f)] += t.area;
+        int best = 0;
+        double bestArea = 0;
+        for (auto& kv : bins) {
+            double a = kv.second + (bins.count(kv.first - 1) ? bins[kv.first - 1] : 0) + (bins.count(kv.first + 1) ? bins[kv.first + 1] : 0);
+            if (a > bestArea) { bestArea = a; best = kv.first; }
+        }
+        if (bestArea < minArea) continue;
+        double zsum = 0, asum = 0;
+        float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
+        for (const FlatTri& t : tris) {
+            if (pass == 0 && !t.up) continue;
+            if (std::fabs(t.z - best * 0.25f) > 0.5f) continue;
+            zsum += (double)t.z * t.area;
+            asum += t.area;
+            x0 = std::min(x0, t.x0); y0 = std::min(y0, t.y0); x1 = std::max(x1, t.x1); y1 = std::max(y1, t.y1);
+        }
+        if (asum <= 0) continue;
+        out.z = (float)(zsum / asum);
+        out.x0 = x0; out.y0 = y0; out.x1 = x1; out.y1 = y1;
+        out.area = (float)asum;
+        const double box = (double)(x1 - x0) * (y1 - y0);
+        out.fill = box > 1e-6 ? (float)std::min(1.0, asum / box) : 0.0f;
+        return true;
+    }
+    return false;
+}
+
+template <class P>
+static void flatTri(std::vector<FlatTri>& tris, const P& a, const P& b, const P& c) {
+    float ux = b.x - a.x, uy = b.y - a.y, uz = b.z - a.z, vx = c.x - a.x, vy = c.y - a.y, vz = c.z - a.z;
+    float nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    float len = std::sqrt(nx * nx + ny * ny + nz * nz);
+    if (!(len > 1e-5f) || std::fabs(nz) / len < 0.9f) return;
+    FlatTri t;
+    t.z = (a.z + b.z + c.z) / 3.0f;
+    t.area = len * 0.5f;
+    t.up = nz > 0;
+    t.x0 = std::min({a.x, b.x, c.x}); t.x1 = std::max({a.x, b.x, c.x});
+    t.y0 = std::min({a.y, b.y, c.y}); t.y1 = std::max({a.y, b.y, c.y});
+    tris.push_back(t);
+}
+
 bool findDeck(const wowee::pipeline::M2Model& m, TransportDeck& out) {
-    const auto& V = m.collisionVertices;
-    const auto& I = m.collisionIndices;
-    if (V.empty() || I.size() < 3) return false;
-    struct Tri { float z, area, x0, y0, x1, y1; };
-    std::vector<Tri> tris;
-    std::map<int, double> bins;   // z in 0.25 steps -> area
-    for (size_t k = 0; k + 2 < I.size(); k += 3) {
-        if (I[k] >= V.size() || I[k + 1] >= V.size() || I[k + 2] >= V.size()) continue;
-        const auto &a = V[I[k]], &b = V[I[k + 1]], &c = V[I[k + 2]];
-        float ux = b.x - a.x, uy = b.y - a.y, uz = b.z - a.z, vx = c.x - a.x, vy = c.y - a.y, vz = c.z - a.z;
-        float nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
-        float len = std::sqrt(nx * nx + ny * ny + nz * nz);
-        if (len < 1e-5f || std::fabs(nz) / len < 0.9f) continue;   // winding is not trusted: either side of a flat piece
-        Tri t;
-        t.z = (a.z + b.z + c.z) / 3.0f;
-        t.area = len * 0.5f;
-        t.x0 = std::min({a.x, b.x, c.x}); t.x1 = std::max({a.x, b.x, c.x});
-        t.y0 = std::min({a.y, b.y, c.y}); t.y1 = std::max({a.y, b.y, c.y});
-        tris.push_back(t);
-        bins[(int)std::lround(t.z * 4.0f)] += t.area;
+    out = TransportDeck();
+    {
+        const auto& V = m.collisionVertices;
+        const auto& I = m.collisionIndices;
+        std::vector<FlatTri> tris;
+        for (size_t k = 0; k + 2 < I.size(); k += 3)
+            if (I[k] < V.size() && I[k + 1] < V.size() && I[k + 2] < V.size()) flatTri(tris, V[I[k]], V[I[k + 1]], V[I[k + 2]]);
+        if (deckFromTris(tris, 20.0, out)) return true;
     }
-    int best = 0;
-    double bestArea = 0;
-    for (auto& kv : bins) {
-        double a = kv.second + (bins.count(kv.first - 1) ? bins[kv.first - 1] : 0) + (bins.count(kv.first + 1) ? bins[kv.first + 1] : 0);
-        if (a > bestArea) { bestArea = a; best = kv.first; }
+    // the drawn mesh (a tram car whose collision is a box or missing)
+    {
+        const auto& V = m.vertices;
+        const auto& I = m.indices;
+        std::vector<FlatTri> tris;
+        for (size_t k = 0; k + 2 < I.size(); k += 3)
+            if (I[k] < V.size() && I[k + 1] < V.size() && I[k + 2] < V.size())
+                flatTri(tris, V[I[k]].position, V[I[k + 1]].position, V[I[k + 2]].position);
+        if (deckFromTris(tris, 12.0, out)) {
+            out.fromMesh = true;
+            return true;
+        }
     }
-    if (bestArea < 20.0) return false;
-    double zsum = 0, asum = 0;
-    float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
-    for (const Tri& t : tris) {
-        if (std::fabs(t.z - best * 0.25f) > 0.5f) continue;
-        zsum += (double)t.z * t.area;
-        asum += t.area;
-        x0 = std::min(x0, t.x0); y0 = std::min(y0, t.y0); x1 = std::max(x1, t.x1); y1 = std::max(y1, t.y1);
-    }
-    if (asum <= 0) return false;
-    out.z = (float)(zsum / asum);
-    out.x0 = x0; out.y0 = y0; out.x1 = x1; out.y1 = y1;
-    return true;
+    return false;
 }
 
 // ------------------------------------------------------------------ players (stage 5.5)
@@ -151,8 +187,8 @@ static void convertCharactersImpl(const Options& o, const DataDir& data, PackWri
     // CIMG id: the layer's path hash mixed with its region, so one file in two places stays two entries.
     auto addLayer = [&](const std::string& path, const Region& rg) -> uint32_t {
         if (path.empty()) return 0;
-        uint32_t id = w3d_fnv1a(path.c_str()) ^ (uint32_t)(rg.x * 7919 + rg.y * 104729 + rg.w * 31 + rg.h);
-        if (id == 0) id = 1;
+        uint32_t id = pack.keyId(W3D_ENTRY_CHARIMG, DataDir::normalize(path) + "@" + std::to_string(rg.x) + "," + std::to_string(rg.y) + "," +
+                                                     std::to_string(rg.w) + "," + std::to_string(rg.h));
         if (pack.has(W3D_ENTRY_CHARIMG, id)) return id;
         std::vector<uint8_t> bytes;
         Image im;
@@ -285,6 +321,14 @@ std::map<uint32_t, TransportDeck>& transportDecks() {
     static std::map<uint32_t, TransportDeck> d;
     return d;
 }
+std::map<uint32_t, TransportDeck>& staticDecks() {
+    static std::map<uint32_t, TransportDeck> d;
+    return d;
+}
+std::vector<std::string>& transportsWithoutDeck() {
+    static std::vector<std::string> v;
+    return v;
+}
 
 // Stage 5.21: GameObjectDisplayInfo rows whose model looks like a ship or zeppelin -> CMDL + a CDSP entry under
 // 0x80000000 | display id (the GAMEOBJECT_DISPLAYID of the transport), and the walkable deck for boarding.
@@ -308,15 +352,27 @@ static void convertTransports(const Options& o, const DataDir& data, PackWriter&
         std::string tok;
         while (std::getline(ss, tok, ',')) if (!tok.empty()) goWords.push_back(lower(tok));
     }
+    auto stored = [&]() -> uint64_t { return pack.storedBytes() + (pack.pool() ? pack.pool()->storedBytes() : 0); };
+    std::vector<std::string> defWords;   // stage 5.41: the compact default set (only with the creatures)
+    if (o.creatures && o.defaultObjects) {
+        std::stringstream ss(o.defaultObjectWords);
+        std::string tok;
+        while (std::getline(ss, tok, ',')) if (!tok.empty()) defWords.push_back(lower(tok));
+    }
     for (uint32_t r = 0; r < gdi.records; ++r) {
         std::string mdx = gdi.str(r, 1);
         if (mdx.empty()) continue;
         std::string lm = lower(mdx);
-        bool isT = false, isG = o.gameobjects && goWords.empty();
+        bool isT = false, isG = o.gameobjects && goWords.empty(), isDef = false;
+        // the fishing bobber (stage 5.26) always comes with the creatures: it is small and every angler needs it
+        if (o.creatures && lm.find("fishingbobber") != std::string::npos) isG = true;
         if (o.transports) for (auto& w : words) isT = isT || lm.find(w) != std::string::npos;
         if (o.gameobjects) for (auto& w : goWords) isG = isG || lm.find(w) != std::string::npos;
-        const bool hit = isT || isG;
+        for (auto& w : defWords) isDef = isDef || lm.find(w) != std::string::npos;
+        if (o.creatures && o.defaultObjects && defWords.empty()) isDef = true;   // stage 6.12: every object model by default
+        const bool hit = isT || isG || isDef;
         if (!hit) continue;
+        const uint64_t bytesBefore = stored();
         progress(false, "transports: display %u/%u, %zu ok", r + 1, gdi.records, st.transportDisplays);
         const ModelInfo& mi = modelFor(mdx);
         if (!mi.ok) { ++st.transportDisplaysFailed; continue; }
@@ -328,15 +384,32 @@ static void convertTransports(const Options& o, const DataDir& data, PackWriter&
         const uint32_t id = 0x80000000u | gdi.u32(r, 0);
         if (!pack.add(W3D_ENTRY_DISPLAY, id, std::move(b.data))) continue;
         ++st.transportDisplays;
+        if (isDef && !isT) {   // what the default set costs (6.12: also when --gameobjects asked for the same model): the display, its model and the textures it was the first to need
+            ++st.defaultObjectDisplays;
+            st.defaultObjectBytes += (size_t)(stored() - bytesBefore);
+        }
         if (mi.deckOk && isT) {
             transportDecks()[gdi.u32(r, 0)] = mi.deck;
             ++st.transportDecks;
+            if (mi.deck.fromMesh) ++st.transportDecksFromMesh;
+        } else if (isT) {
+            transportsWithoutDeck().push_back(mdx);
+        } else if (mi.deckOk && !mi.deck.fromMesh && mi.deck.area >= 12.0f && mi.deck.fill >= 0.5f) {
+            // 6.14: a big flat floor in the model's own collision mesh (a bridge, a dock, a raft, a stage): the client lets the
+            // objects the server places carry a walker. A transport whose name the filter does not know is covered the same way.
+            staticDecks()[gdi.u32(r, 0)] = mi.deck;
+            ++st.staticDecks;
         }
         if (o.verbose)
             std::printf("  transport display %u: %s%s\n", gdi.u32(r, 0), mdx.c_str(), mi.deckOk ? " (deck)" : " (no deck)");
     }
-    progressDone("transports: %zu displays (%zu failed), %zu with a deck", st.transportDisplays, st.transportDisplaysFailed,
-                 st.transportDecks);
+    progressDone("transports: %zu displays (%zu failed), %zu with a deck (%zu from the drawn mesh), %zu platforms among the objects",
+                 st.transportDisplays, st.transportDisplaysFailed, st.transportDecks, st.transportDecksFromMesh, st.staticDecks);
+    for (const std::string& n : transportsWithoutDeck())
+        std::printf("  transport model WITHOUT a deck (nobody can stand on it): %s\n", n.c_str());
+    if (o.creatures && o.defaultObjects)
+        std::printf("  default game objects: %zu displays added (%.1f MB; %s)\n", st.defaultObjectDisplays,
+                    st.defaultObjectBytes / 1048576.0, defWords.empty() ? "all of them (6.12)" : o.defaultObjectWords.c_str());
 }
 
 bool convertCreatures(const Options& o, const DataDir& data, PackWriter& pack, ConvStats& st) {
@@ -411,7 +484,7 @@ bool convertCreatures(const Options& o, const DataDir& data, PackWriter& pack, C
         double texBefore = textureTiming().readDecodeSec + textureTiming().encodeSec;
         // character (race) models carry every emote players use: a larger animation budget than creatures
         const bool character = key.rfind("character/", 0) == 0;
-        auto blob = buildCreatureBlob(m, o.creatureTris, fixedTex, mi.info,
+        auto blob = buildCreatureBlob(m, character ? o.playerTris : o.creatureTris, fixedTex, mi.info,
                                       (size_t)(character ? o.playerAnimKb : o.creatureAnimKb) * 1024);
         st.creatureSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - tb).count() -
                           (textureTiming().readDecodeSec + textureTiming().encodeSec - texBefore);
@@ -420,7 +493,18 @@ bool convertCreatures(const Options& o, const DataDir& data, PackWriter& pack, C
             if (o.verbose) std::fprintf(stderr, "  creature model failed: %s (%s)\n", m2.c_str(), mi.info.error.c_str());
             return mi;
         }
-        mi.id = w3d_fnv1a(key.c_str());
+        if (!character && !o.noFx) {   // 6.13: particles (a brazier's fire and smoke, a forge's sparks) behind the CMDL blob
+            std::vector<W3dFxEmitter> em;
+            std::vector<W3dFxGlow> glows;
+            std::vector<uint32_t> fxTex;
+            if (m2Emitters(m, pack, data, o, st, fireLikePath(key), 6, em, fxTex, nullptr)) {
+                appendFxBlock(blob, em, glows, fxTex);
+                ++st.fxModels;
+                st.fxEmitters += em.size();
+                if (o.verbose) std::printf("    fx %s: %zu emitters (creature / object model)\n", m2.c_str(), em.size());
+            }
+        }
+        mi.id = pack.keyId(W3D_ENTRY_CREATURE, key);
         pack.add(W3D_ENTRY_CREATURE, mi.id, std::move(blob));
         mi.ok = true;
         ++st.creatureModelsOk;
@@ -519,7 +603,7 @@ bool convertCreatures(const Options& o, const DataDir& data, PackWriter& pack, C
                           haveFacial ? &facial : nullptr, cdi, modelPath, modelFor);
         if (!o.noItems) convertItems(o, data, pack, st);   // stage 5.19: armour, helmets, shoulders, weapons for players
     }
-    if (o.transports || o.gameobjects) convertTransports(o, data, pack, st, modelFor);
+    if (o.transports || o.gameobjects || o.creatures) convertTransports(o, data, pack, st, modelFor);
     return true;
 }
 

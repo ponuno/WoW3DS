@@ -36,6 +36,7 @@ struct Voice {
 };
 
 bool g_ok = false;
+uint64_t g_t0 = 0;
 Thread g_thread = nullptr;
 std::atomic<bool> g_quit{false};
 LightLock g_lock;
@@ -54,7 +55,7 @@ char g_status[128] = "sound: off";
 std::string g_soundsTxt;
 // world sounds
 snd::WorldBank g_world;
-struct Req { uint32_t sound; float x, y, z; bool self, stop; uint64_t tag; float gain; };
+struct Req { uint32_t sound; float x, y, z; bool self, stop; uint64_t tag; float gain; uint32_t loopMs; };
 Req g_reqs[64];
 int g_reqHead = 0, g_reqTail = 0;
 float g_lx = 0, g_ly = 0, g_lz = 0, g_lyaw = 0;
@@ -62,8 +63,11 @@ LightEvent g_wake;
 struct Cached { int16_t* pcm = nullptr; uint32_t samples = 0, rate = 0, lastUse = 0; float volume = 1; };
 std::unordered_map<uint32_t, Cached> g_cache;   // (id << 3 | variant) -> samples
 size_t g_cacheBytes = 0;
-struct WorldVoice { uint32_t key = 0; uint64_t tag = 0; uint32_t startMs = 0; ndspWaveBuf wb; };
+struct WorldVoice { uint32_t key = 0; uint64_t tag = 0; uint32_t startMs = 0, endMs = 0; ndspWaveBuf wb; };   // endMs: a looping precast's last moment
 WorldVoice g_wv[kWorldChN - kWorldCh0];
+// stage 6 (perf log)
+int g_core = -1;
+std::atomic<uint32_t> g_misses{0}, g_fails{0}, g_busyUs{0}, g_requests{0}, g_dropped{0};
 std::minstd_rand g_rng(7);
 uint32_t g_worldPlayed = 0;
 
@@ -84,14 +88,15 @@ const Cached* cached(uint32_t id, int k, uint32_t now) {
         auto victim = g_cache.end();
         for (auto i = g_cache.begin(); i != g_cache.end(); ++i)
             if (!keyPlaying(i->first) && (victim == g_cache.end() || i->second.lastUse < victim->second.lastUse)) victim = i;
-        if (victim == g_cache.end()) return nullptr;
+        if (victim == g_cache.end()) { ++g_fails; return nullptr; }
         linearFree(victim->second.pcm);
         g_cacheBytes -= ((size_t)victim->second.samples + kW3dImaBlock) * 2;
         g_cache.erase(victim);
     }
     Cached e;
+    ++g_misses;
     e.pcm = (int16_t*)linearAlloc(bytes);
-    if (!e.pcm) return nullptr;
+    if (!e.pcm) { ++g_fails; return nullptr; }
     if (!g_world.decode(*c, e.pcm)) { linearFree(e.pcm); return nullptr; }
     DSP_FlushDataCache(e.pcm, c->samples * 2);
     e.samples = c->samples;
@@ -105,7 +110,7 @@ const Cached* cached(uint32_t id, int k, uint32_t now) {
 void runRequest(const Req& r, uint32_t now, float sfxVol) {
     if (r.stop) {
         for (int i = 0; i < kWorldChN - kWorldCh0; ++i)
-            if (g_wv[i].tag == r.tag && r.tag) { ndspChnWaveBufClear(kWorldCh0 + i); g_wv[i].tag = 0; }
+            if (g_wv[i].tag == r.tag && r.tag) { ndspChnWaveBufClear(kWorldCh0 + i); g_wv[i].tag = 0; g_wv[i].endMs = 0; }
         return;
     }
     const int n = g_world.variants(r.sound);
@@ -142,8 +147,30 @@ void runRequest(const Req& r, uint32_t now, float sfxVol) {
     v.key = r.sound << 3 | (uint32_t)k;
     v.tag = r.tag;
     v.startMs = now;
+    v.endMs = 0;
+    // a cast sound shorter than the cast repeats until SPELL_GO / failure stops it (the safety end: cast time + 0.8 s)
+    if (r.tag && r.loopMs && (uint64_t)c->samples * 1000 < (uint64_t)c->rate * r.loopMs) {
+        v.wb.looping = true;
+        v.endMs = now + r.loopMs + 800;
+    }
     ndspChnWaveBufAdd(ch, &v.wb);
     ++g_worldPlayed;
+}
+
+// sdmc:/3ds/w3dproto/log_music.txt (stage 5.43): when a music track starts, ends or is cut, how long it played and why -
+// so that "the music ends too fast" can be told apart (end of file / decoder gave up / the zone changed / fade out).
+void logMusic(const char* what, const Voice& v, const std::string& other = std::string()) {
+    static int lines = 0;
+    if (v.ch != kMusicCh || lines >= 300) return;
+    FILE* f = fopen("sdmc:/3ds/w3dproto/log_music.txt", lines ? "ab" : "wb");
+    if (!f) return;
+    ++lines;
+    const std::string& path = v.playing.empty() ? other : v.playing;
+    const size_t slash = path.find_last_of('/');
+    fprintf(f, "%8u ms  %-6s %s  played %.1f s  end=%d  vol %.2f\n", (unsigned)osGetTime() - (unsigned)g_t0, what,
+            slash == std::string::npos ? path.c_str() : path.c_str() + slash + 1,
+            v.s.rate() ? (double)v.s.framesRead() / v.s.rate() : 0.0, v.s.endReason(), v.vol);
+    fclose(f);
 }
 
 void setMix(int ch, float v) {
@@ -153,6 +180,7 @@ void setMix(int ch, float v) {
 }
 
 void stopVoice(Voice& v) {
+    if (v.started) logMusic(v.ended ? "ended" : "cut", v);
     ndspChnWaveBufClear(v.ch);
     v.s.close();
     v.playing.clear();
@@ -170,6 +198,7 @@ bool startVoice(Voice& v, const std::string& path) {
     ndspChnSetFormat(v.ch, v.s.channels() == 2 ? NDSP_FORMAT_STEREO_PCM16 : NDSP_FORMAT_MONO_PCM16);
     v.started = true;
     v.ended = false;
+    logMusic("start", v);
     return true;
 }
 
@@ -218,6 +247,7 @@ void threadMain(void*) {
         const float dt = std::min(0.2f, (nowT - last) / 1000.0f);
         last = nowT;
         const uint32_t now = (uint32_t)nowT;
+        const u64 busy0 = svcGetSystemTick();
         LightLock_Lock(&g_lock);
         const uint32_t map = g_map;
         const float x = g_x, y = g_y, mv = g_musicVol, av = g_ambVol;
@@ -231,6 +261,8 @@ void threadMain(void*) {
         }
         LightLock_Unlock(&g_lock);
         for (int i = 0; i < nb; ++i) runRequest(batch[i], now, sfxVol);
+        for (int i = 0; i < kWorldChN - kWorldCh0; ++i)   // a looping precast whose stop never came
+            if (g_wv[i].endMs && (int32_t)(now - g_wv[i].endMs) >= 0) { ndspChnWaveBufClear(kWorldCh0 + i); g_wv[i].endMs = 0; g_wv[i].tag = 0; }
         if (g_music.loaded()) {
             const time_t t = time(nullptr);
             const struct tm* lt = localtime(&t);
@@ -243,6 +275,12 @@ void threadMain(void*) {
             m.wanted = inWorld && mv > 0 ? g_dir.music() : std::string();
             a.wanted = inWorld && av > 0 ? g_dir.ambience() : std::string();
             m.gain = mv * g_dir.musicVolume();
+            if (!inWorld && mv > 0 && g_music.glue()) {   // the login / character screens: their theme, looping
+                const snd::SoundSet* gs = g_music.glue();
+                m.wanted = m.playing.find("/music/glue_") != std::string::npos ? m.playing : g_music.path(gs->files[0]);
+                m.gain = mv * gs->volume;
+            }
+            m.loop = !inWorld;
             a.gain = av * g_dir.ambienceVolume();
             steer(m, 1, dt);
             steer(a, 1, dt);
@@ -253,12 +291,14 @@ void threadMain(void*) {
             }
             feed(a);
         }
+        g_busyUs += (uint32_t)((svcGetSystemTick() - busy0) * 1000000ull / SYSCLOCK_ARM11);
         LightEvent_WaitTimeout(&g_wake, 15 * 1000000LL);   // a sound request wakes it at once
     }
 }
 }  // namespace
 
 bool init(const char* soundDir) {
+    g_t0 = osGetTime();
     if (R_FAILED(ndspInit())) {
         snprintf(g_status, sizeof g_status, "sound: off (no sdmc:/3ds/dspfirm.cdc - run DSP1)");
         return false;
@@ -287,8 +327,9 @@ bool init(const char* soundDir) {
         bool n3ds = false;
         APT_CheckNew3DS(&n3ds);
         if (n3ds) g_thread = threadCreate(threadMain, nullptr, 48 * 1024, prio - 2, 2, false);
-        if (!g_thread && R_SUCCEEDED(APT_SetAppCpuTimeLimit(30))) g_thread = threadCreate(threadMain, nullptr, 48 * 1024, prio - 2, 1, false);
-        if (!g_thread) g_thread = threadCreate(threadMain, nullptr, 48 * 1024, prio - 1, 0, false);
+        if (g_thread) g_core = 2;
+        if (!g_thread && R_SUCCEEDED(APT_SetAppCpuTimeLimit(30))) { g_thread = threadCreate(threadMain, nullptr, 48 * 1024, prio - 2, 1, false); if (g_thread) g_core = 1; }
+        if (!g_thread) { g_thread = threadCreate(threadMain, nullptr, 48 * 1024, prio - 1, 0, false); if (g_thread) g_core = 0; }
     }
     return true;
 }
@@ -371,24 +412,44 @@ static void push(const Req& r) {
     if (!g_ok || !g_thread) return;
     LightLock_Lock(&g_lock);
     const int next = (g_reqHead + 1) % 64;
+    ++g_requests;
     if (next != g_reqTail) {   // full: drop
         g_reqs[g_reqHead] = r;
         g_reqHead = next;
+    } else {
+        ++g_dropped;
     }
     LightLock_Unlock(&g_lock);
     LightEvent_Signal(&g_wake);
 }
 
-void playAt(uint32_t sound, float x, float y, float z, bool self, uint64_t tag, float gain) {
+void playAt(uint32_t sound, float x, float y, float z, bool self, uint64_t tag, float gain, uint32_t loopMs) {
     if (!sound || !g_world.loaded()) return;
-    push({sound, x, y, z, self, false, tag, gain});
+    push({sound, x, y, z, self, false, tag, gain, loopMs});
 }
 
-void stopTag(uint64_t tag) { push({0, 0, 0, 0, false, true, tag}); }
+void stopTag(uint64_t tag) { push({0, 0, 0, 0, false, true, tag, 1.0f, 0}); }
 
 const char* soundsTxt() { return g_soundsTxt.c_str(); }
 
 const char* status() { return g_status; }
+
+void stats(Stats* o) {
+    *o = Stats();
+    o->on = g_ok;
+    if (!g_ok) return;
+    o->core = g_core;
+    o->sfxBytes = (uint32_t)g_sfx.bytes();
+    for (const Voice& v : g_voice) if (v.mem) o->streamBytes += (uint32_t)((size_t)kBufs * kBufFrames * 2 * sizeof(int16_t));
+    o->cacheBytes = (uint32_t)g_cacheBytes;          // (written by the sound thread: a snapshot)
+    o->cacheClips = (uint32_t)g_cache.size();
+    o->cacheMisses = g_misses;
+    o->cacheFails = g_fails;
+    for (int i = 0; i < kWorldChN - kWorldCh0; ++i) o->worldPlaying += ndspChnIsPlaying(kWorldCh0 + i) ? 1 : 0;
+    o->busyUs = g_busyUs;
+    o->requests = g_requests;
+    o->requestsDropped = g_dropped;
+}
 uint32_t area() { return g_area; }
 
 }  // namespace audio

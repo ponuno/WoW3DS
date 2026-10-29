@@ -37,6 +37,37 @@ private:
     std::vector<Talent> talents_;
 };
 
+// skills.txt (SkillLine.dbc, stage 6.19): the names, categories and descriptions behind the skill ids of the player's fields.
+// Categories (SkillCategory): 5 attributes, 6 weapon, 7 class, 8 armor, 9 secondary professions, 10 languages, 11 professions.
+struct SkillLine { uint32_t id = 0; int32_t category = 0; std::string name, description; };
+class SkillTable {
+public:
+    bool load(const char* path);
+    bool loaded() const { return !lines_.empty(); }
+    void add(const SkillLine& s) { lines_[s.id] = s; }
+    const SkillLine* find(uint32_t id) const { auto it = lines_.find(id); return it == lines_.end() ? nullptr : &it->second; }
+private:
+    std::unordered_map<uint32_t, SkillLine> lines_;
+};
+// spelldesc.bin (6.20, converter spelltext.cpp): the descriptions of spells with their numbers filled in. Only the index (12 bytes
+// a spell) lives in memory; the text is read from the file when asked for (a few are kept).
+class SpellDescTable {
+public:
+    ~SpellDescTable();
+    bool load(const char* path);
+    bool loaded() const { return !index_.empty(); }
+    std::string text(uint32_t id) const;   // "" if the spell has none
+    size_t size() const { return index_.size(); }
+private:
+    struct Entry { uint32_t id, off, len; };
+    std::string path_;
+    std::vector<Entry> index_;
+    mutable std::unordered_map<uint32_t, std::string> cache_;
+};
+// The title of a profession's rank from its current maximum (the client's SkillTiers: 75 steps): Apprentice .. Artisan.
+// 0 = no title (the skill has no tiers: weapons, languages).
+int skillRankTier(uint32_t maxValue);   // 1 apprentice (<= 75), 2 journeyman (<= 150), 3 expert (<= 225), 4 artisan (<= 300), 5 master
+
 struct TaxiNode { uint32_t id = 0, map = 0; float x = 0, y = 0, z = 0; std::string name; };
 
 class TaxiTable {
@@ -116,6 +147,35 @@ public:
 private:
     std::unordered_map<uint32_t, std::vector<LockCase>> locks_;
     std::vector<std::pair<uint32_t, uint32_t>> spells_;
+};
+
+// areatriggers.txt (AreaTrigger.dbc, stage 5.28): the invisible zones the client reports to the server (CMSG_AREATRIGGER):
+// dungeon / raid doors, the Deeprun Tram entrances, quest and inn triggers. "A id map x y z radius length width height yaw";
+// radius > 0 is a sphere, else a box turned by yaw (the server's own test, MaNGOS IsPointInAreaTriggerZone).
+struct AreaTrigger { uint32_t id = 0, map = 0; float x = 0, y = 0, z = 0, radius = 0, length = 0, width = 0, height = 0, yaw = 0; };
+class AreaTriggerTable {
+public:
+    bool load(const char* path);
+    bool loaded() const { return !all_.empty(); }
+    void add(const AreaTrigger& t) { all_.push_back(t); }
+    const std::vector<AreaTrigger>& all() const { return all_; }
+    static bool inside(const AreaTrigger& t, const float pos[3]);
+private:
+    std::vector<AreaTrigger> all_;
+};
+// Which triggers we stand in: reports each one once when we walk into it (the stock client does the same), again only
+// after we left it. After a map change / teleport the zones we appear in count as already entered (the exit of a
+// dungeon lies next to its entrance trigger: no ping-pong).
+class AreaTriggerWatch {
+public:
+    // Triggers newly entered at pos on this map (ids appended to 'entered').
+    void update(const AreaTriggerTable& table, uint32_t map, const float pos[3], std::vector<uint32_t>& entered);
+    void rearm() { armed_ = false; }     // the next update only records where we are
+    void reset() { inside_.clear(); armed_ = false; map_ = ~0u; }
+private:
+    std::vector<uint32_t> inside_;
+    bool armed_ = false;
+    uint32_t map_ = ~0u;
 };
 
 }  // namespace w3n

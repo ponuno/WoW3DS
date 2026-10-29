@@ -132,6 +132,24 @@ void WorldObject::positionAt(uint32_t nowMs, float out[3], float* orient) const 
     if (orient) *orient = normalizeAngle(o);
 }
 
+bool WorldObject::goRotation(float q[4]) const {
+    if (type != ObjType::GameObject || fields.size() <= (size_t)UF::GAMEOBJECT_ROTATION + 3) return false;
+    for (int i = 0; i < 4; ++i) {
+        q[i] = fieldF((uint16_t)(UF::GAMEOBJECT_ROTATION + i));
+        if (!std::isfinite(q[i]) || std::fabs(q[i]) > 1.5f) return false;
+    }
+    const float n2 = q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3];
+    if (n2 < 0.5f || n2 > 1.5f) return false;   // not a unit quaternion (all zero before the server sets it)
+    const float inv = 1.0f / std::sqrt(n2);
+    for (int i = 0; i < 4; ++i) q[i] *= inv;
+    return true;
+}
+
+bool WorldObject::goTilt(float q[4]) const {
+    if (!goRotation(q)) return false;
+    return std::fabs(q[0]) > 0.02f || std::fabs(q[1]) > 0.02f;   // ~2.3 degrees
+}
+
 void ObjectTable::tickTransports(uint32_t nowMs) {
     if (!transports.loaded() && !transportsTried_ && !transportsFile_.empty()) {
         transportsTried_ = true;
@@ -141,6 +159,18 @@ void ObjectTable::tickTransports(uint32_t nowMs) {
     if (!transports.loaded()) return;
     for (auto& [g, o] : objs_) {
         if (o.type != ObjType::GameObject || !o.hasTransportProgress) continue;
+        if (o.goType() == 11) {   // elevators and trams (stage 5.41): the key points of TransportAnimation.dbc, not a taxi path
+            const ElevatorAnim* ea = transports.elevator(o.entry());
+            if (!ea) continue;
+            float q[4] = {0, 0, 0, 1};
+            o.goRotation(q);
+            TransportPose p = elevatorPose(*ea, o.transportProgress + (nowMs - o.posMs), o.stationary, q);
+            if (!p.valid) continue;
+            poses_[g] = p;
+            o.mv.x = p.x; o.mv.y = p.y; o.mv.z = p.z; o.mv.o = p.o;
+            o.hasPos = true;
+            continue;
+        }
         const GoInfo* gi = goInfo(o.entry());
         if (!gi || gi->type != 15) continue;
         float speed, accel;
@@ -240,6 +270,8 @@ void ObjectTable::applyNames(WorldObject& o) {
     } else if (o.type == ObjType::Unit) {
         auto it = creatureNames_.find(o.entry());
         if (it != creatureNames_.end()) { o.name = it->second.first; o.subname = it->second.second; }
+        auto rk = creatureRank_.find(o.entry());
+        if (rk != creatureRank_.end()) { o.rank = rk->second.first; o.creatureType = rk->second.second; }
     } else if (o.type == ObjType::GameObject) {
         auto it = goNames_.find(o.entry());
         if (it != goNames_.end()) o.name = it->second;
@@ -262,7 +294,10 @@ bool ObjectTable::parseFields(Reader& r, WorldObject* o) {
             uint32_t idx = (uint32_t)b * 32 + (uint32_t)bit;
             uint32_t v = r.u32();
             if (o && idx < cap) {
+                const bool known = o->fields.size() > UF::GAMEOBJECT_TYPE_ID;   // false while a create block is still being read
                 if (o->fields.size() <= idx) o->fields.resize(idx + 1, 0);
+                if (idx == UF::GAMEOBJECT_STATE && o->type == ObjType::GameObject && known && o->fields[idx] != v)
+                    o->stateChangeMs = nowMs_ ? nowMs_ : 1;   // a change we saw happen (not the first value of a new object)
                 o->fields[idx] = v;
             }
         }
@@ -334,11 +369,13 @@ bool ObjectTable::parseMovementBlock(Reader& r, WorldObject& o, uint32_t nowMs) 
     if (uf & UPDATEFLAG_TRANSPORT) {
         o.transportProgress = r.u32();
         o.hasTransportProgress = true;
+        o.stationary[0] = o.mv.x; o.stationary[1] = o.mv.y; o.stationary[2] = o.mv.z; o.stationary[3] = o.mv.o;   // the create block carries the resting place
     }
     return !r.bad;
 }
 
 bool ObjectTable::parseUpdate(const uint8_t* p, size_t n, uint32_t nowMs) {
+    nowMs_ = nowMs;
     Reader r(p, n);
     uint32_t count = r.u32();
     r.u8();   // has transport
@@ -519,8 +556,14 @@ bool ObjectTable::handle(uint16_t op, const Bytes& data, uint32_t nowMs) {
             r.cstr(); r.cstr(); r.cstr();
             std::string sub = r.cstr();
             creatureNames_[entry] = {name, sub};
+            r.u32();   // type flags
+            const uint32_t ctype = r.u32();
+            r.u32();   // family
+            const uint32_t rank = r.u32();
+            const uint8_t rk = r.bad || rank > 4 ? 0 : (uint8_t)rank, ct = r.bad || ctype > 255 ? 0 : (uint8_t)ctype;
+            creatureRank_[entry] = {rk, ct};
             for (auto& [g, o] : objs_)
-                if (o.type == ObjType::Unit && o.entry() == entry) { o.name = name; o.subname = sub; }
+                if (o.type == ObjType::Unit && o.entry() == entry) { o.name = name; o.subname = sub; o.rank = rk; o.creatureType = ct; }
             stats.creatureAnswers++;
             return true;
         }

@@ -190,7 +190,48 @@ void UnitAnimator::startOneShot(const uint8_t* blob, int seq, uint8_t prio, uint
     seq_ = -4;   // restart the clock
 }
 
+// AnimationData.dbc ids of doors and chests (stage 5.41): 146 Close, 147 Closed, 148 Open, 149 Opened.
+namespace { constexpr uint16_t kAnimClose = W3D_ANIM_CLOSE, kAnimClosed = W3D_ANIM_CLOSED, kAnimOpen = W3D_ANIM_OPEN, kAnimOpened = W3D_ANIM_OPENED; }
+
+AnimChoice UnitAnimator::updateGo(const uint8_t* blob, const CreatureSeen& c, uint32_t nowMs) {
+    AnimChoice a;
+    started_ = true;
+    lastMs_ = nowMs;
+    const bool active = c.goState == 0;
+    const int stand = w3d_find_seq(blob, W3D_ANIM_STAND);
+    const int trans = w3d_find_seq(blob, active ? kAnimOpen : kAnimClose);
+    const int pose = w3d_find_seq(blob, active ? kAnimOpened : kAnimClosed);
+    const float idleT = (float)(nowMs % 1000000u);
+    int s;
+    float t;
+    bool loop = true;
+    const W3dAnimSeq* ts = seqAt(blob, trans);
+    if (ts && ts->durationMs && c.goStateMs && (uint32_t)(nowMs - c.goStateMs) < ts->durationMs) {   // the change we just saw
+        s = trans;
+        t = (float)(uint32_t)(nowMs - c.goStateMs);
+        loop = false;
+    } else if (pose >= 0) {                         // the object's own resting pose for this state
+        s = pose;
+        t = idleT;
+    } else if (trans >= 0 && (active || c.goStateMs)) {   // none: stay at the end of the transition (closed + never changed = the bind pose)
+        s = trans;
+        t = 1e9f;
+        loop = false;
+    } else {
+        s = stand;
+        t = idleT;
+    }
+    a.seq = s;
+    a.loop = loop;
+    a.rate = 1.0f;
+    seq_ = s;
+    timeMs_ = t;
+    if (const W3dAnimSeq* sq = seqAt(blob, s)) a.animId = sq->animId;
+    return a;
+}
+
 AnimChoice UnitAnimator::update(const uint8_t* blob, const CreatureSeen& c, bool riding, uint32_t nowMs) {
+    if (c.isGo) return updateGo(blob, c, nowMs);
     AnimChoice a;
     float dt = started_ ? (float)(int32_t)(nowMs - lastMs_) : 0.0f;
     if (dt < 0 || dt > 1000) dt = 0;
@@ -426,6 +467,7 @@ void CreatureView::update(const std::vector<CreatureSeen>& seen, uint32_t nowMs,
             }
             u.missing = !u.disp;
             u.anim.reset();
+            u.shownMs = 0;   // (6.12: a new or changed display fades in again)
         } else if (c.look && u.eqKey != eqKey) {
             // armour changed (or its item info arrived): build the new display while the old one is still drawn
             if (u.next) streamerReleaseDisplay(u.next);
@@ -451,11 +493,21 @@ void CreatureView::update(const std::vector<CreatureSeen>& seen, uint32_t nowMs,
         }
         if (!u.disp || !u.disp->ready()) continue;
         const uint8_t* blob = u.disp->model->blob;
+        if (!u.shownMs) u.shownMs = nowMs ? nowMs : 1;
         CreatureInstance ci;
         ci.disp = u.disp;
+        {   // stage 6.12: appearing (kFadeMs from the first frame drawn), and fading out at the far edge
+            const uint32_t age = nowMs - u.shownMs;
+            float f = fadeIn && age < kFadeMs ? (float)age / (float)kFadeMs : 1.0f;
+            if (fadeIn) f = std::min(f, c.farFade);
+            ci.fade = f >= 0.97f ? 1.0f : f;
+        }
+        ci.guid = c.guid;
         ci.pos[0] = c.pos[0]; ci.pos[1] = c.pos[1]; ci.pos[2] = c.pos[2];
         ci.yaw = c.yaw;
         ci.scale = c.scale;
+        ci.tilted = c.tilted;
+        if (c.tilted) for (int k = 0; k < 9; ++k) ci.rot[k] = c.rot[k];
         // riding: the mount moves (its own walk / run / jump), the unit sits in its seat
         bool riding = false;
         if (u.mount && u.mount->ready() && !c.dead) {
@@ -469,6 +521,7 @@ void CreatureView::update(const std::vector<CreatureSeen>& seen, uint32_t nowMs,
             AnimChoice ma = u.mountAnim.update(mb, mc, false, nowMs);
             CreatureInstance mi = ci;
             mi.disp = u.mount;
+            mi.guid = 0;
             mi.seq = ma.seq;
             mi.timeMs = u.mountAnim.timeMs();
             mi.loop = ma.loop;
@@ -522,6 +575,20 @@ void CreatureView::update(const std::vector<CreatureSeen>& seen, uint32_t nowMs,
 bool CreatureView::drawn(uint64_t guid) const {
     auto it = units_.find(guid);
     return it != units_.end() && it->second.drawn;
+}
+
+bool CreatureView::missing(uint64_t guid) const {
+    auto it = units_.find(guid);
+    return it != units_.end() && it->second.missing;
+}
+
+bool CreatureView::bounds(uint64_t guid, float bmin[3], float bmax[3]) const {
+    auto it = units_.find(guid);
+    if (it == units_.end() || !it->second.drawn || !it->second.disp || !it->second.disp->model || !it->second.disp->model->h) return false;
+    const W3dCreatureHeader* h = it->second.disp->model->h;
+    const float k = it->second.disp->d.scale > 0.01f ? it->second.disp->d.scale : 1.0f;
+    for (int i = 0; i < 3; ++i) { bmin[i] = h->bmin[i] * k; bmax[i] = h->bmax[i] * k; }
+    return true;
 }
 
 void CreatureView::clear() {
