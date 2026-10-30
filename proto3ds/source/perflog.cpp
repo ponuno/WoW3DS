@@ -954,3 +954,21 @@ void shutdown() {
 }
 
 }  // namespace perf
+
+namespace perf {
+void vramWatch(const char* where) {   // (6.35b; out of the anonymous namespace: perflog.hpp declares it)
+    static u32 last = 0;
+    static const char* lastWhere = "start";
+    static int reported = 0;
+    const u32 f = vramSpaceFree();
+    // a legitimate step frees at most a few textures / one render target; a pool reset frees nearly all 6 MB at once
+    if (last && f > last + (2u << 20) && reported < 3) {
+        ++reported;
+        event("VRAM JUMP: free %lu KB -> %lu KB between \"%s\" and \"%s\" - libctru's VRAM allocator overwritten there", (unsigned long)(last / 1024),
+              (unsigned long)(f / 1024), lastWhere, where);
+    }
+    last = f;
+    lastWhere = where;
+}
+
+}  // namespace perf

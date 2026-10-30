@@ -1899,6 +1899,7 @@ int main() {
         }
         portal.build(hud, kHudW, kHudH);
         perf::lap(perf::kHud);
+        perf::mark("touch screen list");
 
         // --- the touch screen's draw list (game page: GPU; login / debug pages: the console)
         bool bottomDirty = uiPagesArrived();   // (stage 6.2: an icon page read in the background came in: draw it)
@@ -1920,6 +1921,7 @@ int main() {
         }
 
         perf::lap(perf::kTouch);
+        perf::mark("liquid / glue");
         // --- under a liquid's surface? (stage 5.26: fog in the water's colour, short sight)
         {
             LiquidHere lc;
@@ -1938,6 +1940,7 @@ int main() {
         glueModels.clear();
         glueCreatures.clear();
         if (loginUi) {
+            perf::mark("glue: scene setup");
             const LoginFlow::Scene sc = g_login.scene();
             glueStage.set(sc.id);
             // a pack without the scenes (older conversions): the character alone, on the clear colour, seen from the front
@@ -1978,6 +1981,7 @@ int main() {
                     memcpy(c.equip, sc.equip, sizeof c.equip);
                     memcpy(c.equipInv, sc.equipInv, sizeof c.equipInv);
                     glueSeen.assign(1, c);
+                    perf::mark("glue: character view");
                     glueView.update(glueSeen, (uint32_t)(ticksToMs(frameStart - startTick)), glueCreatures);
                     if (!glueCreatures.empty() && glueCreatures[0].disp && glueCreatures[0].disp->ready()) {
                         const W3dCreatureHeader* h = glueCreatures[0].disp->model->h;
@@ -2096,8 +2100,10 @@ int main() {
                 C3D_RenderTargetClear(t, C3D_CLEAR_ALL, loginUi ? 0x05080CFF : rendererClearColor(rs), 0);
                 C3D_FrameDrawOn(t);
                 if (loginUi) {   // the login screens: their scene, then their frames
+                    perf::mark("glue: scene draw");
                     if (glueScene) rendererDrawScene(glueCam, glueFov, glueNear, glueFar, glueModels, &glueCreatures, fc);
                     perf::lap(perf::kWorld);
+                    perf::mark("glue: top screen UI");
                     uiDraw(g_login.glueTop(), kHudW);
                 } else {
                     perf::mark("rendererDraw");
@@ -2111,6 +2117,7 @@ int main() {
             if (stereo) rendererSetEye(0);
             rendererEndFrame();   // stage 6.4: the prepared visibility goes (every eye has used it)
         }
+        perf::mark("touch screen draw");
         if (bottomDirty && bottomT) {   // the touch screen only when its list changed
             C3D_RenderTargetClear(bottomT, C3D_CLEAR_COLOR, 0x080B0EFF, 0);
             C3D_FrameDrawOn(bottomT);
@@ -2122,7 +2129,9 @@ int main() {
         C3D_FrameEnd(fc.kicks ? GX_CMDLIST_FLUSH : 0);   // (stage 6.8: after a kick the last list must be flushed by GSP, see render.cpp)
         perf::mark("after the frame (UI pages, deferred frees, debug page)");
         uiEndFrame();
+        perf::mark("after the frame: streamer (deferred frees)");
         streamerEndFrame();
+        perf::mark("between frames");
         perf::lap(perf::kFlush);
         cpuMsLast = ticksToMs((beforeWait - frameStart) + (svcGetSystemTick() - afterWait));
         if (g_login.online() && !loadingWorld && dt > 0 && dt < 0.5f) {   // stage 5.32: FPS and effect costs for report.txt

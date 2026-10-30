@@ -57,7 +57,10 @@ struct State {
 };
 extern State g_state;
 // Stage 6.6: where the main thread is (a pointer store; the watchdog names it if no frame finishes for 3 s).
-inline void mark(const char* where) { g_state.where = where; }
+// 6.35b: and libctru's VRAM allocator watched at every mark - its pool reset to "all free" (overwritten) is found between the
+// two marks it happened between (perf_events "VRAM JUMP")
+void vramWatch(const char* where);
+inline void mark(const char* where) { vramWatch(where); g_state.where = where; }
 inline void frameStart() {
     if (!g_state.on) return;
     g_state.start = g_state.last = svcGetSystemTick();

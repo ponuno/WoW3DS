@@ -2755,3 +2755,18 @@ blob read after it was freed) writes bone matrices over exactly these globals. M
 - Tests: creature_valid_test in run_player_tests.sh (converter CMDLs valid; 25 / 65535 bones refused); check_glue.py's
   "zone names" check fixed (glue.txt Z lines have had a 4th field since 5.45 - it failed before this change). run_pool_tests
   (streamer with creatures) green; ARM clean.
+
+## Part 89 — the VRAM books still break on the character screen (6.35b, a trap)
+
+8a perf_events: "VRAM BOOKS BROKEN: 5437 KB free + 2222 KB textures + 1050 KB targets + 168 KB portraits > 6144 KB" at 16.0 s,
+0.6 s after the character screen's scene came (glue hitch at 15.4 s); no "CREATURE MODEL REFUSED" - the bone palettes are not it
+(the clamp stays). libctru's vramAlloc re-creates its pools as all free when it finds them empty (first block pointer 0): the
+numbers are that - something zeroes / overwrites libctru's allocator globals.
+- perf::mark now calls `perf::vramWatch(where)`: vramSpaceFree() at every mark; a rise of more than 2 MB between two marks is
+  logged (at most 3 times) as "VRAM JUMP: free A KB -> B KB between "<mark>" and "<mark>"". New marks on the login path:
+  "touch screen list", "liquid / glue", "glue: scene setup", "glue: character view", "glue: scene draw", "glue: top screen UI",
+  "touch screen draw", "after the frame: streamer (deferred frees)", "between frames".
+- tools/armcheck/linkcheck.py: every C++ symbol the ARM objects need is defined in one of them (the compile-only check missed
+  7r's __ctru_heap_size and perf::vramWatch defined inside an anonymous namespace - fixed before shipping this time).
+- run_perf.sh (with a pack) PASS, TSan clean; ARM compile + link check clean.
+- Needed: perf_events.txt with the "VRAM JUMP" line, and the .elf of that build.
