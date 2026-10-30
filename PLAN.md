@@ -2670,3 +2670,14 @@ libctru ndspSetCounter <- ndspInitialize <- ndspInit. The DSP's shared memory wa
 Launcher's exheader, a CIA only from its own. RSF now has (as the devkitPro template) `IORegisterMapping: 1ff00000-1ff7ffff`
 (DSP memory) and `MemoryMapping: 1f000000-1f5fffff:r` (VRAM). ctrtool: "IoMapping 0x1FF00000-0x1FF7FFFF", "StaticMapping
 0x1F000000-0x1F5FFFFF:r". Test CIAs from the 7o .elf rebuilt (124MB and 178MB).
+
+## Part 83 — 178 MB CIA: svcBreak in __system_allocateHeaps (6.32d)
+
+Console (test CIA 178MB, 7o .elf): prefetch abort (svcBreak), PC svcBreak, LR in libctru __system_allocateHeaps line 71 (the
+linear heap's svcControlMemory failed), SP 0x0FFFFFC0 (before main). 7o fixes the heap at 24 MB, so libctru asked ~150 MB of
+linear memory; the linear heap lives in the 128 MB window 0x30000000-0x38000000 (virtual = physical + offset) - too much.
+- heaps.cpp: the linear heap first: region less a 24 MB minimum heap, at most 120 MB, 8 MB less each time the kernel refuses;
+  the normal heap gets the rest (capped at the 96 MB heap area). 124 MB region: ~97 MB linear / 24 MB heap as before; 178 MB:
+  ~120 MB linear / ~55 MB heap.
+- Test CIA 178MB rebuilt from the 7o .elf with __ctru_heap_size patched 24 -> 60 MB (.data word at 0x30B378, file offset
+  0x20C378): libctru then asks ~115 MB linear.
