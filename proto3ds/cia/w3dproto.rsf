@@ -162,6 +162,13 @@ AccessControlInfo:
     KernelSetState: 124
     QueryProcessMemory: 125
 
+  # 6.32c: the DSP's shared memory (ndsp writes there - without it the CIA crashed in ndspInit, a data abort at 0x1FF57FFE) and
+  # VRAM read access, as the devkitPro template; the Homebrew Launcher gave a .3dsx both
+  IORegisterMapping:
+   - 1ff00000-1ff7ffff
+  MemoryMapping:
+   - 1f000000-1f5fffff:r
+
   InterruptNumbers:
   ServiceAccessControl:
    - APT:U

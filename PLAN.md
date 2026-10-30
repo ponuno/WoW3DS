@@ -2662,3 +2662,11 @@ it "snake dev1". Isolation:
   `w3dproto-124.cia` (title 000400000F7D3B00, "w3dproto (124 MB)"), installable next to the 178MB one.
 - main.cpp prints on the touch screen right after consoleInit: region / heap / linear KB and (3dsx) / (CIA).
 - Test CIAs from the user's own 7o .elf sent (178MB and 124MB) - no rebuild needed to see which one boots.
+
+## Part 82 — the CIA crashed in ndspInit (6.32c)
+
+Console (test CIA 124MB from the 7o .elf, title 000400000F7D3B00): data abort "Translation - Page", write to 0x1FF57FFE, PC in
+libctru ndspSetCounter <- ndspInitialize <- ndspInit. The DSP's shared memory was not mapped: a .3dsx gets it from the Homebrew
+Launcher's exheader, a CIA only from its own. RSF now has (as the devkitPro template) `IORegisterMapping: 1ff00000-1ff7ffff`
+(DSP memory) and `MemoryMapping: 1f000000-1f5fffff:r` (VRAM). ctrtool: "IoMapping 0x1FF00000-0x1FF7FFFF", "StaticMapping
+0x1F000000-0x1F5FFFFF:r". Test CIAs from the 7o .elf rebuilt (124MB and 178MB).
