@@ -110,7 +110,10 @@ int idleSeq(const uint8_t* blob, const CreatureSeen& c) {
         if (s >= 0) return s;
     }
     if (c.looting) {
-        s = findSeq(blob, {W3D_ANIM_LOOT, W3D_ANIM_KNEEL_LOOP});
+        // 6.20c: the kneel loop first. "Loot" (50) is the one-shot bend-down of the original (kneel start, the hand
+        // reaching): played as a loop for as long as the window is open it looked like the character picking things up
+        // over and over. The kneeling pose holds still; only a model without it falls back to the one-shot.
+        s = findSeq(blob, {W3D_ANIM_KNEEL_LOOP, W3D_ANIM_LOOT});
         if (s >= 0) return s;
     }
     if (c.inCombat) {
