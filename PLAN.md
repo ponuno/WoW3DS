@@ -2626,3 +2626,17 @@ broke: the bogus gpuCmdBuf fits that.
   -> at most 9 and one shrink. run_holes (far ground / buildings, ASan leaks) green; ARM compile clean.
 - Note: `run_streamer.sh` at PACE_US=0 loads no tiles in 1500 frames on this machine - flaky by timing, the same on 0d03cf6 and
   76af7c0 (not from this change).
+
+## Part 79 — the CIA build: 178 MB on the New 3DS (6.32)
+
+- `proto3ds/cia/w3dproto.rsf` (makerom): SystemModeExt 178MB, CpuSpeed 804MHz, EnableL2Cache, CanAccessCore2 (the IO thread,
+  UI loader and sound run on core 2; without it ctrtool shows "Access Core 2: NO"), AffinityMask 3, DirectSdmc(Write), the usual
+  homebrew syscall / service lists, title id 000400000F7D3A00. Icon / banner / chime made here (plain, ours).
+- `make cia` (MAKEROM= / BANNERTOOL= overridable): bannertool banner + smdh, makerom -f cia from the same .elf; romfs inside.
+- `proto3ds/source/heaps.cpp`: our `__system_allocateHeaps` (libctru's is weak; same code but the split): 150 MB+ free -> 48 MB
+  normal heap, else 24 MB as before (.3dsx under hbmenu: 124 MB region); the rest linear. The main thread's 32 KB stack still
+  comes from the heap's start (stack_adjust.s reads fake_heap_start). main.cpp no longer fixes __ctru_heap_size.
+- Checked here: makerom and bannertool built from source (Project_CTR, 3ds-bannertool); a CIA made from the user's 7o .elf with
+  this RSF, ctrtool: "AppMemory: 178MB", "804MHz", "L2 YES", "Access Core 2: YES", RomFS present. ARM compile clean.
+- Not checked on a console: the CIA starting, swkbd (chat, login) in the 178 MB mode, the 48 MB heap. User steps in
+  proto3ds/cia/README_RU.md (perf_events "memory:" line must say APPLICATION region 182272 KB, heap 49152 KB).

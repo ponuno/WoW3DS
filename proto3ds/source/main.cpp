@@ -55,12 +55,8 @@
      GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB565) | \
      GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
 
-// Memory split: libctru caps the GPU-visible linear heap at 32 MB by default.
-// Fixing the ordinary heap at 24 MB gives everything else (~90 MB on New 3DS)
-// to the linear heap, where terrain, models and texture staging live.
-extern "C" {
-u32 __ctru_heap_size = 24 * 1024 * 1024;
-}
+// Memory split: source/heaps.cpp (6.32) - heap 24 MB under the Homebrew Launcher (124 MB region), 48 MB from the CIA (178 MB);
+// everything else is the linear heap, where terrain, models and texture staging live.
 
 static const char* kOutDir = "sdmc:/3ds/w3dproto";
 static const float kDrawDists[5] = {120, 250, 400, 533, 800};
