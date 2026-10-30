@@ -1005,6 +1005,7 @@ int main() {
             {   // stage 5.45: the zone banner and the names of explored areas (glue.txt "Z" lines, AreaTable)
                 if (!gs.areaName) gs.areaName = zoneNameOf;
                 g_zoneBanner.update(g_login.mapId(), audio::area(), g_login.sessionMs(), zoneNameOf, zoneParentOf);
+                if (g_zoneBanner.zone()) gs.updateDefaultChannels(g_zoneBanner.zone(), zoneNameOf(g_zoneBanner.zone()), g_login.sessionMs());   // the original's General / Trade / LocalDefense / LFG
             }
             if (uiOut.faceYaw && walk) {   // turn to the target (spell, loot, BADFACING); the camera follows
                 charYaw = uiOut.yaw;

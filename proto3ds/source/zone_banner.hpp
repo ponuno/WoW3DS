@@ -17,6 +17,7 @@ public:
     void update(uint32_t mapId, uint32_t area, uint32_t nowMs, const NameFn& name, const ParentFn& parent);
     void reset();                                     // logged out / loading: the next area shows again
     int alpha(uint32_t nowMs) const;                  // 0..255, 0 = nothing to draw
+    uint32_t zone() const { return zone_; }          // the zone the player is in (0 = not known yet)
     const std::string& big() const { return big_; }   // the zone (or the subzone when only that changed)
     const std::string& small() const { return small_; }   // the subzone under a new zone's name
 

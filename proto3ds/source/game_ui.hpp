@@ -145,6 +145,7 @@ public:
     };
     const std::vector<Button>& buttons() const { return buttons_; }   // tap regions of the last draw (PC test)
     // Runs a hotbar slot (pad addressing): spell with soft targeting, item from the bags, fixed set-0 action.
+    void useItemFaced(w3n::GameSession& g, const w3n::InvItem& it, const Input& in, Output& out);
     void useSlot(w3n::GameSession& g, const Input& in, int slot, Output& out);
     bool placing() const { return place_.on; }
     enum : int { kKbBack = 1001, kKbShift = 1002, kKbSymbols = 1003, kKbOk = 1004, kKbCancel = 1005 };   // Act::KeyboardKey args

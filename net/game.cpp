@@ -56,6 +56,10 @@ void GameSession::attach(WorldClient& wc, uint32_t nowMs) {
     reclaimAt_ = corpseAskedMs_ = invScanMs_ = 0;
     lastLife_ = Life::Alive;
     lifeSeen_ = false;
+    channels_.clear();    // the server dropped us from every channel at logout
+    autoZone_ = 0;
+    autoJoined_.clear();
+    autoLfg_ = false;
     itemAsked_.clear();   // the item cache (items_) survives: static data
     itemWanted_.clear();
     spells.clear();

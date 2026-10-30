@@ -292,6 +292,16 @@ void GameUi::confirmPlace(w3n::GameSession& g, const Input& in, Output& out) {
     }
 }
 
+// An item that works on a target (quest items): turn to the selected unit first, as for a spell. Without a target it is
+// sent as before (the server answers with its own error); never blocked here: a self spell we do not recognise must work.
+void GameUi::useItemFaced(w3n::GameSession& g, const w3n::InvItem& it, const Input& in, Output& out) {
+    if (g.itemTargetSpell(it.entry)) {
+        const w3n::WorldObject* t = g.objects.find(g.target());
+        if (t && !t->self && t->hasPos && (t->type == w3n::ObjType::Unit || t->type == w3n::ObjType::Player)) faceTarget(g, in, out);
+    }
+    g.useItem(it, in.nowMs);
+}
+
 void GameUi::useSlot(w3n::GameSession& g, const Input& in, int slot, Output& out) {
     if (!in.bars || slot < 0 || slot >= kPadSlots) return;
     if (slot >= 4 && slot < 8) {   // set 0 face buttons: the fixed actions
@@ -317,7 +327,7 @@ void GameUi::useSlot(w3n::GameSession& g, const Input& in, int slot, Output& out
         w3n::InvItem it;
         if (!in.bars->findItem(g, a.id, &it)) hint("None left: " + g.itemName(a.id), in.nowMs);
         else if (uint32_t gs = g.itemGroundSpell(a.id)) beginPlace(g, in, gs, a.id, out);   // bombs, dummies: on the ground
-        else g.useItem(it, in.nowMs);
+        else useItemFaced(g, it, in, out);
     } else if (a.type == ActionSlot::PetCmd) {
         doAction(g, in, Act::PetCommand, (int)a.id, out);
     } else if (a.type == ActionSlot::PetSpell) {
@@ -1075,7 +1085,7 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
                 bindArmed_ = true;
                 bindWhat_ = {ActionSlot::Item, it.entry};
                 hint("Press a button (or tap a bar cell) for " + g.itemName(it.entry), now);
-            } else if (act == Act::Use) g.useItem(it, now);
+            } else if (act == Act::Use) useItemFaced(g, it, in, out);
             else if (act == Act::Equip) g.equipItem(it, now);
             else if (act == Act::Unequip) g.unequipItem(it, now);
             else if (!confirmed_) confirm(std::string(tr("Destroy ", "Уничтожить ")) + g.itemName(it.entry) +

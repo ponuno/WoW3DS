@@ -2531,3 +2531,9 @@ The in-game START menu got a **Characters** button (before Quit): after a confir
 - Menu: action 13 (the old ones keep their numbers), up to 11 buttons fit the page.
 - Tests: `w3dlogin --relog` against fake_server (run_stage5.sh: "LOGOUT TO THE CHARACTER LIST: PASS"), ui_test `menu_characters`; ARM compile clean.
 - Not checked on a console.
+
+## Part 72 — items used on a target (Lazy Peons) and the default channels (6.26)
+
+- **Use item on NPC / object**: `GameSession::useItem` always sent target mask 0 (self), so a quest item such as Foreman's Blackjack (Awaken Peon) was cast at the player: the item "worked" (stack used / animation) with no effect and no quest credit. Now, when the item's first on-use spell is not a self spell (`@self`) and not a ground spell, CMSG_USE_ITEM names the selected unit/player (TARGET_FLAG_UNIT 0x2) or object (TARGET_FLAG_OBJECT 0x800) with a packed guid; the on-use spell index is the item's first trigger-0 spell. The UI turns to the target first (`useItemFaced`). Nothing is blocked client-side: with no target the old packet goes out and the server answers. Test: `net/tests/useitem_test.cpp`.
+- **Default channels** like the original client: `GameSession::updateDefaultChannels(zone, name)` joins `General - <zone>`, `Trade - <city>` (six capitals only), `LocalDefense - <zone>` and the global `LookingForGroup`; the zone ones are left and joined again on a zone change (numbers as in the original: General 1, Trade 2 ...). Driven by the zone banner's zone (main.cpp); `autoChannels` switches it off; a new session clears the channel list. Names come from glue.txt (the DBC locale): other players' channels match only on the same locale. WorldDefense is not auto-joined. Test: `net/tests/channels_test.cpp`.
+- Not checked on a console / against a real server.

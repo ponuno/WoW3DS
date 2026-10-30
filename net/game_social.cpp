@@ -193,6 +193,21 @@ void GameSession::joinChannel(const std::string& name, const std::string& passwo
     send(CMSG_JOIN_CHANNEL, w.b, nowMs);
 }
 
+void GameSession::updateDefaultChannels(uint32_t zoneId, const std::string& zoneName, uint32_t nowMs) {
+    if (!autoChannels || !zoneId || zoneName.empty() || zoneId == autoZone_ || !wc_) return;
+    // the capitals (AreaTable): Stormwind City, Ironforge, Darnassus, Orgrimmar, Thunder Bluff, Undercity
+    const bool city = zoneId == 1519 || zoneId == 1537 || zoneId == 1657 || zoneId == 1637 || zoneId == 1638 || zoneId == 1497;
+    std::vector<std::string> want;
+    want.push_back("General - " + zoneName);
+    if (city) want.push_back("Trade - " + zoneName);
+    want.push_back("LocalDefense - " + zoneName);
+    for (const std::string& old : autoJoined_) leaveChannel(old, nowMs);   // first the old ones: their numbers are free again
+    autoJoined_ = want;
+    for (const std::string& n : want) joinChannel(n, "", nowMs);
+    if (!autoLfg_) { autoLfg_ = true; joinChannel("LookingForGroup", "", nowMs); }
+    autoZone_ = zoneId;
+}
+
 void GameSession::leaveChannel(const std::string& name, uint32_t nowMs) {
     Writer w;
     w.cstr(name);
