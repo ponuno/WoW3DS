@@ -132,6 +132,14 @@ static void stateMachine() {
     c.casting = 3;
     CHECK(k.id(c) == W3D_ANIM_CHANNEL_CAST_DIRECTED, "channel");
     c.casting = 0;
+    // 6.36: opening / gathering at a game object kneels (the spell-casting hands were shown before)
+    c.casting = 5;
+    CHECK(k.id(c) == W3D_ANIM_KNEEL_START, "gathering: kneels down");
+    CHECK(k.id(c, 1100) == W3D_ANIM_KNEEL_LOOP, "gathering: the kneeling pose while the bar runs");
+    c.casting = 0; c.castGoMs = 9950; c.castGoObject = true; c.castGoDirected = false;
+    CHECK(k.id(c) == W3D_ANIM_KNEEL_END, "the gathering is done: gets up, no spell release");
+    c.castGoObject = false;
+    k.id(c, 1100);
     // emotes: one-shot, cancelled by moving; looping emote state
     c.emoteAnim = 67; c.emoteMs = 10000;
     CHECK(k.id(c) == 67, "wave");
@@ -206,6 +214,8 @@ static void stateMachine() {
     CHECK(w.id(v) == W3D_ANIM_STAND, "no parry: stands");
     v.casting = 1;
     CHECK(w.id(v) == W3D_ANIM_STAND, "no spell animations: stands");
+    v.casting = 5;
+    CHECK(w.id(v) == W3D_ANIM_STAND, "gathering without kneeling animations: stands");
     v.casting = 0;
     v.speed = 3; v.moveFlags = 0x2; v.inCombat = false;
     CHECK(w.id(v) == W3D_ANIM_WALK, "no backwards: walks");
@@ -219,6 +229,20 @@ static void stateMachine() {
     bool loop;
     CHECK(idOf(wolf.data(), creaturePickSeq(wolf.data(), true, 0, false, false, &rate, &loop)) == W3D_ANIM_DEATH && !loop, "pick: dead");
     CHECK(idOf(wolf.data(), creaturePickSeq(wolf.data(), false, 7, false, false, &rate, &loop)) == W3D_ANIM_RUN, "pick: run");
+
+    // 6.36: w3d_seq_animated / the diagnostics for models that cannot move (the hand-made models have no keys: all still)
+    CHECK(!w3d_seq_animated(wolf.data(), 0), "a still stand is not animated");
+    CHECK(!w3d_seq_animated(wolf.data(), -1) && !w3d_seq_animated(wolf.data(), 99), "no such sequence: not animated");
+    {
+        std::vector<uint8_t> m = makeModel({0, 4, 5});
+        W3dCreatureHeader* h = (W3dCreatureHeader*)m.data();
+        W3dAnimSeq* sq = (W3dAnimSeq*)(m.data() + h->offSeqs);
+        sq[0].frames = 10;   // ten frames, but the one bone's channels are all NONE
+        CHECK(!w3d_seq_animated(m.data(), 0), "frames without keyed channels: still");
+        uint32_t* ch = (uint32_t*)(m.data() + sq[0].offChannels);
+        ch[0] = W3D_CHAN_ANIM | 0;   // rotation keyed over time
+        CHECK(w3d_seq_animated(m.data(), 0), "a keyed channel over several frames: animated");
+    }
 
     // the mount seat: bone at rest, scaled 2x, turned 90 degrees
     std::vector<uint8_t> horse = makeModel({0, 4, 5}, true);
@@ -298,7 +322,34 @@ static void sessionSide(const char* log) {
         fillUnitState(s, *s.objects.find(wg), now + 4000, c);
         CHECK(c.swingOff, "the wolf's off hand");
     }
-    std::printf("  session: emote, cast at us / around, release, parry, off hand\n");
+    // 6.36: a cast at a game object (Opening a chest, a quest object): kneeling, and no spell release at the end
+    {
+        const uint64_t go = 0xF110000000000123ull;
+        auto fb = [](float f) { uint32_t u; std::memcpy(&u, &f, 4); return u; };
+        Writer u;
+        u.u32(1); u.u8(0); u.u8(3); u.packedGuid(go); u.u8(5);
+        u.u8(0x40);
+        u.f32(10); u.f32(20); u.f32(30); u.f32(0);
+        u.u8(1); u.u32(1u << UF::GAMEOBJECT_TYPE_ID); u.u32(3);   // a chest
+        (void)fb;
+        CHECK(s.objects.parseUpdate(u.b.data(), u.b.size(), now + 5000), "game object created");
+        CHECK(s.objects.find(go) && s.objects.find(go)->type == ObjType::GameObject, "it is a game object");
+        Writer w;
+        packed(w, mg); packed(w, mg);
+        w.u32(6247); w.u16(0); w.u32(2000);
+        w.u16(0x800); packed(w, go);
+        s.handle(0x131, w.b, now + 5000);
+        fillUnitState(s, *s.objects.find(mg), now + 5500, c);
+        CHECK(c.casting == 5, "opening a chest: casting = at an object (%u)", c.casting);
+        Writer g;
+        packed(g, mg); packed(g, mg);
+        g.u32(6247); g.u16(0); g.u8(0); g.u8(0); g.u16(0x800); packed(g, go);
+        s.handle(0x132, g.b, now + 7000);
+        fillUnitState(s, *s.objects.find(mg), now + 7000, c);
+        CHECK(c.castGoMs == now + 7000 && c.castGoObject && !c.castGoDirected && c.casting == 0, "the release is at an object (%d %d %u)",
+              (int)c.castGoObject, (int)c.castGoDirected, c.casting);
+    }
+    std::printf("  session: emote, cast at us / around, release, parry, off hand, cast at a game object\n");
 }
 
 // Game objects (stage 5.41): doors and chests play Open / Close when their state changes, rest in the pose of the state; corpses and

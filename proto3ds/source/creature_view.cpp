@@ -1,5 +1,7 @@
 #include "creature_view.hpp"
 
+#include <stdio.h>
+
 #include <initializer_list>
 
 #include "w3d_anim.h"
@@ -91,6 +93,8 @@ int idleSeq(const uint8_t* blob, const CreatureSeen& c) {
         case 2: s = findSeq(blob, {W3D_ANIM_READY_SPELL_OMNI, W3D_ANIM_SPELL_PRECAST, W3D_ANIM_READY_SPELL_DIRECTED}); break;
         case 3: s = findSeq(blob, {W3D_ANIM_CHANNEL_CAST_DIRECTED, W3D_ANIM_READY_SPELL_DIRECTED, W3D_ANIM_SPELL_PRECAST}); break;
         case 4: s = findSeq(blob, {W3D_ANIM_CHANNEL_CAST_OMNI, W3D_ANIM_READY_SPELL_OMNI, W3D_ANIM_SPELL_PRECAST}); break;
+        // 6.36: opening / gathering at a game object: kneeling, as the original does (not the spell-casting hands)
+        case 5: s = findSeq(blob, {W3D_ANIM_KNEEL_LOOP, W3D_ANIM_LOOT, W3D_ANIM_READY_SPELL_OMNI, W3D_ANIM_SPELL_PRECAST}); break;
         default: break;
     }
     if (s >= 0) return s;
@@ -247,6 +251,7 @@ AnimChoice UnitAnimator::update(const uint8_t* blob, const CreatureSeen& c, bool
         lastHit_ = c.hitMs;
         lastEmote_ = c.emoteMs;
         lastCastGo_ = c.castGoMs;
+        lastCasting_ = c.casting;
         wasAirborne_ = (c.moveFlags & (kJumping | kFallingFar)) != 0;
     }
     const bool moving = c.speed > 0.1f;
@@ -268,6 +273,13 @@ AnimChoice UnitAnimator::update(const uint8_t* blob, const CreatureSeen& c, bool
             else if (to == 0 && from == 8) s = findSeq(blob, {W3D_ANIM_KNEEL_END});
             if (s >= 0 && !moving) startOneShot(blob, s, kPrioTransition, nowMs);
         }
+        if (c.casting != lastCasting_) {   // 6.36: kneeling down to open / gather something
+            if (c.casting == 5 && lastCasting_ != 5) {
+                int s = findSeq(blob, {W3D_ANIM_KNEEL_START});
+                if (s >= 0 && !moving) startOneShot(blob, s, kPrioTransition, nowMs);
+            }
+            lastCasting_ = c.casting;
+        }
         if (airborne && !wasAirborne_ && !riding) {
             int s = findSeq(blob, {W3D_ANIM_JUMP_START});
             if (s >= 0) startOneShot(blob, s, kPrioTransition, nowMs);
@@ -280,7 +292,8 @@ AnimChoice UnitAnimator::update(const uint8_t* blob, const CreatureSeen& c, bool
             if (s >= 0 && !moving) startOneShot(blob, s, kPrioAttack, nowMs);
         }
         if (c.castGoMs && c.castGoMs != lastCastGo_) {
-            int s = castGoSeq(blob, c.castGoLook, c.castGoDirected);
+            // 6.36: a cast that opened / gathered a game object ends with getting up, not with a spell release
+            int s = c.castGoObject ? findSeq(blob, {W3D_ANIM_KNEEL_END}) : castGoSeq(blob, c.castGoLook, c.castGoDirected);
             if (s >= 0 && !moving) startOneShot(blob, s, kPrioCast, nowMs);
         }
         if (c.hitMs && c.hitMs != lastHit_ && !moving) {
@@ -445,6 +458,39 @@ bool CreatureView::seatPosition(const uint8_t* blob, int seq, float timeMs, bool
     return true;
 }
 
+void CreatureView::noteModel(const uint8_t* blob, uint32_t displayId) {
+    if (noted_.size() >= 512 || !noted_.insert(blob).second) return;
+    const W3dCreatureHeader* h = w3d_creature(blob);
+    char buf[200];
+    const unsigned long disp = displayId, seqs = h->seqCount, bones = h->boneCount;
+    const int stand = w3d_find_seq(blob, W3D_ANIM_STAND);
+    if (h->seqCount == 0)
+        snprintf(buf, sizeof buf, "ANIM MODEL display %lu: no animation sequences (%lu bones) - it stands in its bind pose", disp, bones);
+    else if (stand < 0)
+        snprintf(buf, sizeof buf, "ANIM MODEL display %lu: no Stand sequence (%lu sequences, %lu bones)", disp, seqs, bones);
+    else if (!w3d_seq_animated(blob, stand)) {
+        const W3dAnimSeq* sq = seqAt(blob, stand);
+        snprintf(buf, sizeof buf, "ANIM MODEL display %lu: Stand is a still pose (%lu frames, %lu ms; %lu sequences, %lu bones) - it will not move",
+                 disp, sq ? (unsigned long)sq->frames : 0ul, sq ? (unsigned long)sq->durationMs : 0ul, seqs, bones);
+    } else {
+        return;
+    }
+    if (diag_.size() < 64) diag_.push_back(buf);
+}
+
+// 6.36: a unit that stands still and is shown with something other than its Stand loop (stunned, a stand state, a looping emote,
+// a cast, moving flags without speed): one line per model, so a frozen unit can be told from a still model
+void CreatureView::noteUnit(const CreatureSeen& c) {
+    if (c.isGo || c.dead || c.look || c.speed > 0.1f) return;
+    const bool odd = c.stunned || c.standState || c.loopAnim || c.casting || c.inCombat;
+    if (!odd || notedDisplays_.size() >= 48 || !notedDisplays_.insert(c.displayId).second) return;
+    char buf[200];
+    snprintf(buf, sizeof buf, "ANIM UNIT display %lu: idle is not Stand - stunned %d, stand state %d, looping emote %d, casting %d, in combat %d, move flags 0x%lX",
+             (unsigned long)c.displayId, (int)c.stunned, (int)c.standState, (int)c.loopAnim, (int)c.casting, (int)c.inCombat,
+             (unsigned long)c.moveFlags);
+    if (diag_.size() < 64) diag_.push_back(buf);
+}
+
 void CreatureView::update(const std::vector<CreatureSeen>& seen, uint32_t nowMs, std::vector<CreatureInstance>& out) {
     out.clear();
     ++frame_;
@@ -496,6 +542,7 @@ void CreatureView::update(const std::vector<CreatureSeen>& seen, uint32_t nowMs,
         }
         if (!u.disp || !u.disp->ready()) continue;
         const uint8_t* blob = u.disp->model->blob;
+        if (!c.isGo) { noteModel(blob, c.displayId); noteUnit(c); }
         if (!u.shownMs) u.shownMs = nowMs ? nowMs : 1;
         CreatureInstance ci;
         ci.disp = u.disp;

@@ -4,7 +4,9 @@
 #pragma once
 #include <stdint.h>
 
+#include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "world.h"
@@ -39,9 +41,10 @@ struct CreatureSeen {
     bool swingOff = false;       // with the off hand
     uint32_t hitMs = 0;          // struck in melee ...
     uint8_t hitReact = 0;        // ... 1 wound, 2 critical, 3 dodge, 4 parry, 5 block
-    uint8_t casting = 0;         // 0 no, 1 cast directed, 2 cast omni, 3 channel directed, 4 channel omni
+    uint8_t casting = 0;         // 0 no, 1 cast directed, 2 cast omni, 3 channel directed, 4 channel omni, 5 at a game object (kneels)
     uint32_t castGoMs = 0;       // a spell went off ...
     bool castGoDirected = false;
+    bool castGoObject = false;   // ... at a game object (opening, gathering): the unit gets up from its knees, no spell release
     CastLook castGoLook = CastLook::Spell;
     uint32_t mountDisplay = 0;   // UNIT_FIELD_MOUNTDISPLAYID: riding (the mount is drawn under the unit)
     bool flying = false;         // on a taxi flight (UNIT_FLAG_TAXI_FLIGHT): the mount flies
@@ -84,7 +87,7 @@ private:
     float timeMs_ = 0;
     uint32_t lastMs_ = 0;
     bool started_ = false, wasDead_ = false, firstSeenDead_ = false, wasAirborne_ = false;
-    uint8_t lastStand_ = 0xFF;
+    uint8_t lastStand_ = 0xFF, lastCasting_ = 0;
     uint32_t lastSwing_ = 0, lastHit_ = 0, lastEmote_ = 0, lastCastGo_ = 0;
 };
 
@@ -109,6 +112,9 @@ public:
     // Bind-pose bounds of the model a unit is drawn with, already multiplied by the display scale (not the object scale).
     bool bounds(uint64_t guid, float bmin[3], float bmax[3]) const;
     void clear();
+    // 6.36: models drawn for the first time that cannot animate (no sequences, no Stand, or a Stand that is a still pose):
+    // one line each, for perf_events.txt (the caller drains them)
+    std::vector<std::string> takeDiag() { std::vector<std::string> d; d.swap(diag_); return d; }
     int tracked() const { return (int)units_.size(); }
     int ready() const { return ready_; }
     // Where a mount's rider sits (world space) at this pose; false without a seat.
@@ -132,6 +138,11 @@ private:
         UnitAnimator anim, mountAnim;
     };
     std::unordered_map<uint64_t, Unit> units_;
+    std::vector<std::string> diag_;
+    std::unordered_set<const uint8_t*> noted_;
+    void noteModel(const uint8_t* blob, uint32_t displayId);
+    void noteUnit(const CreatureSeen& c);
+    std::unordered_set<uint32_t> notedDisplays_;
     uint32_t frame_ = 0;
     int ready_ = 0;
 };

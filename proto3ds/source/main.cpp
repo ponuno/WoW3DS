@@ -1719,6 +1719,7 @@ int main() {
             creatureView.fadeIn = padCfg.fadeIn;
             collectCreatures(*game, netMs, cam.pos, true, seen);   // ourselves always: the portrait needs the model
             creatureView.update(seen, netMs, creatures);
+            for (const std::string& d : creatureView.takeDiag()) perf::event("%s", d.c_str());   // 6.36: models that cannot move
             {   // UI stage 8: the units of the two portraits (copies: the list is cut below), then ourselves out of the
                 // world in first person
                 const uint64_t want[2] = {game->selfGuid(), game->target()};

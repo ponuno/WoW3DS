@@ -102,6 +102,7 @@ struct WorldObject {
     // so the door / chest animation plays only for a change we saw happen.
     uint32_t stateChangeMs = 0;
     bool castGoDirected = false;     // at someone else (the hands point) or around itself
+    bool castGoAtObject = false;     // 6.36: at a game object (opening, gathering): the caster kneels instead of casting
     bool taxiFlight() const { return isUnitLike() && (field(UF::UNIT_FLAGS) & 0x00100000u) != 0; }   // UNIT_FLAG_TAXI_FLIGHT
     uint8_t standState() const { return (uint8_t)(field(UF::UNIT_BYTES_1) & 0xFF); }   // 0 stand, 1 sit, 3 sleep, 8 kneel ...
     uint32_t emoteState() const { return field(UF::UNIT_NPC_EMOTESTATE); }             // looping Emotes.dbc id (work, dance)

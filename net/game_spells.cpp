@@ -431,8 +431,22 @@ bool GameSession::handleSpells(uint16_t op, const Bytes& data, uint32_t nowMs) {
                     o->castGoMs = nowMs ? nowMs : 1;
                     o->castGoSpell = spell;
                     o->castGoDirected = false;
-                    for (int i = 0; i < w.nTargets; ++i)
-                        if (w.targets[i] && w.targets[i] != caster) o->castGoDirected = true;
+                    o->castGoAtObject = false;
+                    // 6.36: a cast at a game object (Opening, herb / ore gathering, quest objects): the hit list names the
+                    // object, and so does the target of the cast we saw start
+                    uint64_t started = 0;
+                    if (caster == self_) { if (cast.spell == spell) started = cast.target; }
+                    else if (auto it = unitCasts_.find(caster); it != unitCasts_.end() && it->second.spell == spell) started = it->second.target;
+                    for (int i = 0; i < w.nTargets; ++i) {
+                        if (!w.targets[i] || w.targets[i] == caster) continue;
+                        const WorldObject* t = objects.find(w.targets[i]);
+                        if (t && t->type == ObjType::GameObject) o->castGoAtObject = true;
+                        else o->castGoDirected = true;
+                    }
+                    if (started && started != caster) {
+                        const WorldObject* t = objects.find(started);
+                        if (t && t->type == ObjType::GameObject) { o->castGoAtObject = true; o->castGoDirected = false; }
+                    }
                 }
             }
             if (caster != self_) { unitCasts_.erase(caster); return true; }

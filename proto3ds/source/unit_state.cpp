@@ -90,18 +90,24 @@ void fillUnitState(GameSession& g, const WorldObject& o, uint32_t nowMs, Creatur
     c.swingOff = o.swingOff;
     c.hitMs = o.hitMs;
     c.hitReact = o.hitReact;
-    // casting: a channel (UNIT_CHANNEL_SPELL, at UNIT_FIELD_CHANNEL_OBJECT) or a spell with a cast time
+    // casting: a channel (UNIT_CHANNEL_SPELL, at UNIT_FIELD_CHANNEL_OBJECT) or a spell with a cast time.
+    // 6.36: at a game object (Opening a chest, gathering a herb, a quest object) the unit kneels: casting = 5
+    auto isObject = [&](uint64_t guid) {
+        const WorldObject* t = guid ? g.objects.find(guid) : nullptr;
+        return t && t->type == ObjType::GameObject;
+    };
     c.casting = 0;
     if (o.field(UF::UNIT_CHANNEL_SPELL)) {
         const uint64_t at = (uint64_t)o.field(UF::UNIT_FIELD_CHANNEL_OBJECT) | ((uint64_t)o.field(UF::UNIT_FIELD_CHANNEL_OBJECT + 1) << 32);
-        c.casting = at && at != o.guid ? 3 : 4;
+        c.casting = isObject(at) ? 5 : at && at != o.guid ? 3 : 4;
     } else {
         const CastState cs = g.castOf(o.guid, nowMs);
         if (cs.active && cs.durMs && nowMs - cs.startMs < cs.durMs + 300)
-            c.casting = cs.target && cs.target != o.guid ? 1 : 2;
+            c.casting = isObject(cs.target) ? 5 : cs.target && cs.target != o.guid ? 1 : 2;
     }
     c.castGoMs = o.castGoMs;
     c.castGoDirected = o.castGoDirected;
+    c.castGoObject = o.castGoAtObject;
     c.castGoLook = CastLook::Spell;
     switch (o.castGoSpell) {
         case 75: case 3018: case 2480: case 7918: case 7919: {   // Auto Shot, Shoot (bow / gun / crossbow)

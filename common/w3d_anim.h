@@ -29,6 +29,19 @@ static inline int w3d_find_seq(const uint8_t* blob, uint16_t animId) {
     return -1;
 }
 
+// 6.36: does the sequence move anything? (more than one frame, and at least one bone channel with keys over time) - a still pose
+// is a model that stands like a statue however long it "plays" (diagnostics: perf_events.txt "ANIM MODEL")
+static inline int w3d_seq_animated(const uint8_t* blob, int seq) {
+    const W3dCreatureHeader* h = w3d_creature(blob);
+    if (seq < 0 || (uint32_t)seq >= h->seqCount) return 0;
+    const W3dAnimSeq* sq = (const W3dAnimSeq*)(blob + h->offSeqs) + seq;
+    if (sq->frames < 2 || sq->durationMs == 0) return 0;
+    const uint32_t* ch = (const uint32_t*)(blob + sq->offChannels);
+    for (uint32_t b = 0; b < h->boneCount * 3u; ++b)
+        if (ch[b] != W3D_CHAN_NONE && (ch[b] & W3D_CHAN_ANIM)) return 1;
+    return 0;
+}
+
 static inline void w3d_quat_to_mat(float x, float y, float z, float w, float r[9]) {
     float xx = x * x, yy = y * y, zz = z * z, xy = x * y, xz = x * z, yz = y * z, wx = w * x, wy = w * y, wz = w * z;
     r[0] = 1 - 2 * (yy + zz); r[1] = 2 * (xy - wz);     r[2] = 2 * (xz + wy);
