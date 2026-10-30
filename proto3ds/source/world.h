@@ -102,6 +102,7 @@ struct Instance {
     uint32_t animMs = 0;             // stage 5.35: age of an animated effect (Model::fxAnim)
     uint8_t lod = 0;                 // stage 6.12: the level drawn this frame (renderer; 0 = full)
     uint16_t bldg = 0;               // stage 6.11: 1 + index in Tile::bldgs of the building (WMO groups sharing one transform), 0 = none
+    uint16_t owner = 0;              // 6.33: 1 + the building whose doodad (tree, lamp, bench of the WMO) it is: shown only with it
     float fade = 1.0f;               // stage 6.11: opacity this frame (the renderer sets it while the instance appears / at the edge)
 };
 

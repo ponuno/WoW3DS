@@ -2681,3 +2681,17 @@ linear memory; the linear heap lives in the 128 MB window 0x30000000-0x38000000 
   ~120 MB linear / ~55 MB heap.
 - Test CIA 178MB rebuilt from the 7o .elf with __ctru_heap_size patched 24 -> 60 MB (.data word at 0x30B378, file offset
   0x20C378): libctru then asks ~115 MB linear.
+
+## Part 84 — trees hanging in the air in Stormwind (6.33)
+
+User (CIA running, Stormwind): trees hang in the air; buildings and the ground appear only close by. The city's floor is WMO
+groups, shown only when the whole building is (6.11, or kBldgWaitMs after its first group). A WMO's doodads (trees, lamps -
+placeWmo writes them right after its groups) were ordinary instances, drawn as soon as their model was in.
+- `findBuildings` also gives every lone placement after a building run an owner: the latest run (since the first one) whose
+  group-centre box widened by 40 yd holds it (the converter writes the ADT's doodads first, then each WMO: groups, doodads).
+  `Instance::owner`; collectInstance skips it while the owner is closed and fades it in with it; the particle emitters (lamp
+  flames) wait too. No reconversion.
+- Test: run_holes.sh "WMO DOODAD OWNERS": the house's two placed doodads are owned (the barrel's model is missing in the data),
+  nothing else, no owner points at a missing building or a building group. ARM compile clean.
+- Open: the slow appearance of the city itself (tile complete avg 7 s / max 21 s in the 7o report) - needs a report / perf log
+  from the CIA; the far shells (6.29) cover it only in packs converted with the 7o+ converter.

@@ -520,6 +520,9 @@ static inline void collectInstance(const Tile* t, Instance& in, const Frustum& f
     if (m->meshHidden) return;           // 6.17: an emitter volume (its particles come from the tile's instances, not from here)
     const Tile::Bldg* bg = in.bldg && in.bldg <= t->bldgs.size() && m->building && !m->interior ? &t->bldgs[in.bldg - 1] : nullptr;
     if (bg && !bg->open) return;         // stage 6.11: a building is shown whole (or when a lagging group is given up on)
+    // 6.33: a WMO's doodad only with its building (a building's own group that turned out a doodad-like model counts too)
+    const Tile::Bldg* og = in.owner && in.owner <= t->bldgs.size() ? &t->bldgs[in.owner - 1] : nullptr;
+    if (og && !og->open) return;
     if (in.radius <= 0) in.radius = m->h->radius * in.scale;
     if (in.radius <= 0) return;
     if (!rs.doodads && !m->building) return;
@@ -538,6 +541,7 @@ static inline void collectInstance(const Tile* t, Instance& in, const Frustum& f
     if (g_fadeOn && !m->interior && !m->fx && !m->fxAnim.a) {
         uint32_t born = laterMs(m->drawableMs, t->readyMs);
         if (bg) born = laterMs(born, bg->openMs);
+        if (og) born = laterMs(born, og->openMs);   // (6.33: fades in with its building)
         const uint32_t age = g_nowMs - born;
         if (age < kFadeMs) fade = (float)age * (1.0f / (float)kFadeMs);
         if (!m->building) {   // a small doodad dissolves over the last 25% of its distance instead of popping out
@@ -1301,6 +1305,7 @@ static void fxSimulate(const Camera& cam, const C3D_Mtx& view, const RenderSetti
             for (const Instance& in : t->instances) {
                 const Model* m = in.model;
                 if (!m->fx || !m->drawable) continue;
+                if (in.owner && in.owner <= t->bldgs.size() && !t->bldgs[in.owner - 1].open) continue;   // 6.33: lamps' flames with their building
                 const float dx = in.pos[0] - cam.pos[0], dy = in.pos[1] - cam.pos[1], dz = in.pos[2] - cam.pos[2];
                 if (dx * dx + dy * dy + dz * dz > range * range) continue;
                 fx::Source s;

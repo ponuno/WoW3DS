@@ -1002,8 +1002,17 @@ void buildChunks(Tile* t) {
 // a building: probably (the doodads of the ADT might line up that way too; once a model is read, only its WMO groups count -
 // updateBuildings). bldgOf[i] = the run's number (1-based), 0 = a lone model.
 constexpr float kBldgSpan = 250.0f;
-void findBuildings(const W3dPlacement* p, uint32_t n, std::vector<uint16_t>& bldgOf, int firstId) {
+// 6.33: ownerOf[i] = the building whose doodad placement i is (0: none). The converter writes a tile's ADT doodads first, then
+// every WMO: its groups, then its doodads (placeWmo) - so a lone placement after a building run is that WMO's doodad. It is
+// given to the building run (of those since the first one) whose group centres' box, widened by kOwnerMargin, holds it,
+// the latest such run first (a WMO spread over more than kBldgSpan is several runs). Shown only once that building is: before
+// 6.33 Stormwind's trees and lamps stood in the air while the city's own floor (WMO groups) was still being read.
+constexpr float kOwnerMargin = 40.0f;
+void findBuildings(const W3dPlacement* p, uint32_t n, std::vector<uint16_t>& bldgOf, std::vector<uint16_t>& ownerOf, int firstId) {
     bldgOf.assign(n, 0);
+    ownerOf.assign(n, 0);
+    struct Run { uint16_t id; float lo[3], hi[3]; };
+    std::vector<Run> runs;
     int id = firstId;
     for (uint32_t i = 0; i < n;) {
         uint32_t j = i + 1;
@@ -1016,7 +1025,22 @@ void findBuildings(const W3dPlacement* p, uint32_t n, std::vector<uint16_t>& bld
         }
         if (distinct && id < 65535) {
             ++id;
-            for (uint32_t k = i; k < j; ++k) bldgOf[k] = (uint16_t)id;
+            Run r;
+            r.id = (uint16_t)id;
+            for (int c = 0; c < 3; ++c) { r.lo[c] = p[i].pos[c]; r.hi[c] = p[i].pos[c]; }
+            for (uint32_t k = i; k < j; ++k) {
+                bldgOf[k] = (uint16_t)id;
+                for (int c = 0; c < 3; ++c) { r.lo[c] = std::min(r.lo[c], p[k].pos[c]); r.hi[c] = std::max(r.hi[c], p[k].pos[c]); }
+            }
+            runs.push_back(r);
+        } else if (!runs.empty()) {   // lone placements after a building: its doodads, probably
+            for (uint32_t k = i; k < j; ++k)
+                for (size_t q = runs.size(); q-- > 0;) {
+                    const Run& r = runs[q];
+                    bool in = true;
+                    for (int c = 0; c < 3 && in; ++c) in = p[k].pos[c] >= r.lo[c] - kOwnerMargin && p[k].pos[c] <= r.hi[c] + kOwnerMargin;
+                    if (in) { ownerOf[k] = r.id; break; }
+                }
         }
         i = j;
     }
@@ -1223,9 +1247,9 @@ void onJobDone(Job* j) {
                     const W3dPlacement* p = (const W3dPlacement*)(t->plcm + sizeof ph);
                     t->instances.reserve(ph.count);
                     std::unordered_map<uint32_t, Model*> local;
-                    std::vector<uint16_t> bldgOf;   // stage 6.11: 1 + the building of each placement, 0 = a lone model
+                    std::vector<uint16_t> bldgOf, ownerOf;   // stage 6.11: 1 + the building of each placement, 0 = a lone model; 6.33: owners
                     t->bldgs.clear();
-                    findBuildings(p, ph.count, bldgOf, (int)t->bldgs.size());
+                    findBuildings(p, ph.count, bldgOf, ownerOf, (int)t->bldgs.size());
                     for (u32 i = 0; i < ph.count; ++i) {
                         Model*& m = local[p[i].modelId];
                         const uint8_t cls = bldgOf[i] ? kClsBldModel : kClsObject;
@@ -1240,6 +1264,7 @@ void onJobDone(Job* j) {
                         if (!m) continue;
                         Instance in;
                         in.bldg = bldgOf[i];
+                        in.owner = ownerOf[i];
                         in.model = m;
                         memcpy(in.pos, p[i].pos, sizeof in.pos);
                         memcpy(in.rot, p[i].rot, sizeof in.rot);

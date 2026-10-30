@@ -45,6 +45,8 @@ static size_t g_foFrames = 0, g_foWrong = 0, g_foHiddenFrames = 0;   // 6.29: fa
 static size_t g_pk[5] = {0, 0, 0, 0, 0};   // submesh problems by kind: not ready, index range, texture, vertex index, radius/position
 
 static int g_maxRingTiles = 0;   // 6.31
+static std::map<int, int> g_ownMax;   // 6.33: owned doodads per tile (most seen)
+static size_t g_ownWrong = 0;
 int main(int argc, char** argv) {
     if (argc < 2) return 2;
     PackIndex index;
@@ -386,6 +388,15 @@ int main(int argc, char** argv) {
                 if (c.displayId == 987654321u && !c.look && view.drawn(c.guid)) ++crtProblems;
         }
         maxModels = std::max(maxModels, (size_t)streamerStats().models);
+        for (Tile* t : streamerReadyTiles()) {   // 6.33: owned doodads (a WMO's own) - their building exists, they are no building group
+            int owned = 0;
+            for (const Instance& in : t->instances) {
+                if (!in.owner) continue;
+                ++owned;
+                if (in.owner > t->bldgs.size() || in.bldg) ++g_ownWrong;
+            }
+            g_ownMax[t->ty * 64 + t->tx] = std::max(g_ownMax[t->ty * 64 + t->tx], owned);
+        }
         if (dist > 450.0f) g_maxRingTiles = std::max(g_maxRingTiles, (int)streamerReadyTiles().size());   // 6.31
         if (f % 25 == 0) {   // stage 6 (perf log): the memory walk agrees with the running texture totals
             StreamMemory m;
@@ -647,6 +658,16 @@ int main(int argc, char** argv) {
     std::printf("tile chunks: %zu checked, %zu problems\n", chunksSeen, chunkProblems);
     std::printf("buildings: %zu groups seen, %zu problems, %zu complete tiles with a closed building; found %u, opened with every group %u, late %u, closed now %d\n",
                 bldgGroups, bldgProblems, bldgCompleteClosed, s.bldgFound, s.bldgOpenedFull, s.bldgOpenedLate, s.bldgClosed);
+    {   // 6.33: WMO doodads owned by their building
+        int total = 0;
+        for (auto& [k, n] : g_ownMax) total += n;
+        std::printf("wmo doodads owned by their building: %d (tiles %zu), wrong %zu\n", total, g_ownMax.size(), g_ownWrong);
+        if (const char* oe = std::getenv("OWNED_EXPECT")) {
+            const bool good = total == std::atoi(oe) && g_ownWrong == 0;
+            std::printf("WMO DOODAD OWNERS: %s\n", good ? "PASS" : "FAIL");
+            if (!good) ++problems;
+        }
+    }
     {   // 6.31: the heap reserve - with little heap left (W3D_HEAP_FREE_MB) the 5 x 5 ring of the far draw distance stays 3 x 3
         std::printf("ring at 533+ yd: at most %d tiles ready; heap shrinks %u, COLL in linear memory %u\n", g_maxRingTiles, (unsigned)s.heapShrinks,
                     (unsigned)s.collHeapMiss);
