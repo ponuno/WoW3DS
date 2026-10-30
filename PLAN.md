@@ -2480,3 +2480,6 @@ FPS при `--terrain-centers`.
 - Исправление: `w3d_hole_terrain_usable` (common/w3d_collision.h): в дыре земля используется, только если под ногами нет пола здания (коллизия отсутствует или ещё не загружена) и она не выше ног. Есть пол — персонаж опускается на него, как в оригинале.
 - Тесты: run_slope.sh (новая группа «terrain over an ADT hole»), run_holes.sh — PASS.
 - ARM-проверка восстановлена (зависимости заново склонированы в /home/claude/deps): все proto3ds/source/*.cpp и net/*.cpp компилируются под mpcore. Найдена и исправлена ошибка этапа UI 14 (charsheet.hpp: лямбда возвращала `unsigned int` и `uint32_t`, а в devkitARM это `unsigned long`) — в 7f клиент бы не собрался.
+- Windows-сборка снова возможна в песочнице: релиз llvm-mingw 20240619 (ucrt) скачивается с GitHub; `cmake -DCMAKE_SYSTEM_NAME=Windows` с
+  x86_64-w64-mingw32-clang++, FETCHCONTENT_SOURCE_DIR_* на локальные клоны (glm, meshoptimizer, rg-etc1, WoWee, StormLib). Собраны
+  w3dconv.exe (со StormLib), w3dgui.exe, w3dpreview.exe — зависят только от системных DLL (UCRT, Windows 10+). Пак: w3dconv-win64-7g.zip.
