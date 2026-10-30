@@ -1455,8 +1455,8 @@ int main() {
                             if (o.type != w3n::ObjType::GameObject || !o.hasPos) continue;
                             const float ddx = o.mv.x - pl[0], ddy = o.mv.y - pl[1];
                             if (ddx * ddx + ddy * ddy > 36.0f) continue;
-                            perf::event("  object near: entry %u display %u type %u state %u at %.1f %.1f %.1f%s", o.entry(), o.displayId(),
-                                        o.goType(), o.goState(), o.mv.x, o.mv.y, o.mv.z,
+                            perf::event("  object near: entry %u display %u type %u state %u at %.1f %.1f %.1f%s", (unsigned)o.entry(), (unsigned)o.displayId(),
+                                        (unsigned)o.goType(), (unsigned)o.goState(), o.mv.x, o.mv.y, o.mv.z,
                                         game->objects.transports.staticDeck(o.displayId()) ? " (platform)" : "");
                         }
                     }

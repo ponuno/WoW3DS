@@ -911,10 +911,10 @@ void shutdown() {
                  kb(s.minLinFree), kb(s.minVramFree), kb(s.minVramLargest), kb(s.minHeapFree), s.maxCmdBuf, s.maxGpu);
         o += b;
         snprintf(b, sizeof b, "shortages (whole session): staging %lu, models %lu, creatures %lu, water %lu, uploads %lu, COLL %lu; "
-                              "textures to linear (VRAM full) %lu (%.0f KB); white textures peak %lu; read queue peak %lu\n",
+                              "textures to linear (VRAM full) %lu (%.0f KB); moved out of VRAM for 3D / wide %lu; white textures peak %lu; read queue peak %lu\n",
                  (unsigned long)st.oomStaging, (unsigned long)st.oomModel, (unsigned long)st.oomCreature, (unsigned long)st.oomWater,
                  (unsigned long)st.oomUpload, (unsigned long)st.collFailed, (unsigned long)st.texVramMiss, kb((double)st.texVramMissBytes),
-                 (unsigned long)s.maxWhite, (unsigned long)s.maxQueue);
+                 (unsigned long)st.texEvicted, (unsigned long)s.maxWhite, (unsigned long)s.maxQueue);
         o += b;
         snprintf(b, sizeof b, "SD card: %lu reads, %.1f MB, %.1f s reading (%.0f KB/s while reading), %lu failed\n", (unsigned long)st.ioReads,
                  st.ioBytes / 1048576.0, st.ioReadMs / 1000.0, st.ioReadMs > 1 ? kb((double)st.ioBytes) / (st.ioReadMs / 1000.0) : 0.0,

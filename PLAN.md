@@ -2546,3 +2546,14 @@ The in-game START menu got a **Characters** button (before Quit): after a confir
 - **GameUi::refuse(g, text)**: the touch screen's "why not" hint (no target, none left, choose a reward first, target a player first, no pet, trade slots ...) also goes to the red line at the top.
 - 3D: the stereoscopic separation at the slider's maximum 0.12 -> 0.30 yd (main.cpp `iod`).
 - Tests: hud_test `W3D_NOTICES=1` draws the lines, XP and numbers; ui/net suites unchanged green. Not checked on a console.
+
+## Part 74 — noise textures after 3D / wide (6.28)
+
+Photo: on the character screen after "Characters" the scene (Durotar rocks, the troll and its gear) was drawn with noise textures.
+Cause found in `streamerEvictVram` (stage 6.5/6.9): when a render target for 3D (right eye) or 800x240 does not fit, the farthest
+textures are moved from VRAM to linear memory with a GX texture copy. The new linear block is cacheable and may hold dirty CPU cache
+lines from its previous use; the GPU writes the copy into RAM, a later write-back of such a line puts old bytes over the texture -
+noise, permanently, for every texture moved. The character screen shows textures shared with the world (rocks, the player's body and
+armour), which had been moved. Fix: `GSPGPU_FlushDataCache` on the block before the copy, `GSPGPU_InvalidateDataCache` after.
+report.txt "shortages" line: "moved out of VRAM for 3D / wide N" (StreamStats::texEvicted). Not reproduced on a console: if noise
+appears with N = 0 the cause is elsewhere.

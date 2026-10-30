@@ -2075,8 +2075,15 @@ uint32_t streamerEvictVram(const uint32_t* blocks, int n) {
         C3D_Tex lin;
         if (!C3D_TexInitWithParams(&lin, NULL, p)) break;   // no linear memory either
         const u32 total = texTotalSize(t->tex);
+        // 6.28: the new block is cacheable linear memory that may still have dirty lines in the CPU's data cache (whatever
+        // used it before). The GPU writes the copy straight into RAM; a dirty line written back later puts the old bytes
+        // over it - textures turned to noise after switching to 3D / 800x240 (the photo on the character screen: the
+        // world's textures shared with the scene). Write the lines back and drop them before the copy, drop again after.
+        GSPGPU_FlushDataCache(lin.data, total);
         // outside a frame this waits for the GPU first (C3Di_SafeTextureCopy): the old copy is no longer read after it
         C3D_SyncTextureCopy((u32*)t->tex.data, 0, (u32*)lin.data, 0, total, 8);
+        GSPGPU_InvalidateDataCache(lin.data, total);
+        ++g_stats.texEvicted;
         lin.param = t->tex.param;   // filters, wrap and mip settings as they were
         lin.border = t->tex.border;
         lin.lodParam = t->tex.lodParam;

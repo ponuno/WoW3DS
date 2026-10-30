@@ -284,6 +284,7 @@ struct StreamStats {
     u32 oomLastSize = 0, oomLastFree = 0;
     u32 texVramMiss = 0;                // textures that went to linear memory because VRAM was full
     uint64_t texVramMissBytes = 0;
+    uint32_t texEvicted = 0;          // 6.28: textures moved from VRAM to linear memory for a render target (3D / wide)
     u32 collHeapMiss = 0;               // COLL that did not fit in the normal heap (went to linear memory)
     // stage 6.11: buildings (placements sharing a transform) shown whole
     u32 bldgFound = 0, bldgOpenedFull = 0, bldgOpenedLate = 0;   // groups parsed / opened with every group in / opened by the timeout
