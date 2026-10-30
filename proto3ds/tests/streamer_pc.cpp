@@ -652,7 +652,7 @@ int main(int argc, char** argv) {
                     (unsigned)s.collHeapMiss);
         if (const char* he = std::getenv("HEAP_EXPECT")) {
             const bool small = !std::strcmp(he, "small");
-            const bool good = small ? (s.heapShrinks > 0 && g_maxRingTiles <= 9) : (s.heapShrinks == 0 && g_maxRingTiles > 9);
+            const bool good = s.tileLoads > 0 && (small ? (s.heapShrinks > 0 && g_maxRingTiles <= 9 && g_maxRingTiles > 0) : (s.heapShrinks == 0 && g_maxRingTiles > 9));
             std::printf("HEAP RESERVE (%s): %s\n", he, good ? "PASS" : "FAIL");
             if (!good) ++problems;
         }

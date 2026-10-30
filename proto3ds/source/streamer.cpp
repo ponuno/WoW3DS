@@ -32,6 +32,9 @@
 #include <deque>
 #include <unordered_map>
 
+extern "C" {
+extern u32 __ctru_heap_size;   // (global scope: inside the anonymous namespace GCC took it for a namespace member - 7r link error)
+}
 #ifdef W3D_PC_TEST
 void pcTestIoDelay(int file, uint32_t offset, uint32_t size);   // tests/streamer_pc.cpp: an SD card's speed (SD_KBPS)
 #endif
@@ -264,7 +267,6 @@ constexpr float kCollLoadDist = 200.0f, kCollDropDist = 320.0f;   // yards from 
 constexpr u32 kCollHeapReserve = 6u << 20;   // COLL goes to the heap only if this much stays free after it (else linear memory)
 constexpr u32 kHeapLow = 3u << 20;           // under this the wanted ring shrinks to 3 x 3 tiles
 constexpr u32 kHeapOk = 5u << 20;            // ... and grows back above this
-extern "C" u32 __ctru_heap_size;
 static u32 heapFreeNow() {
 #ifdef W3D_PC_TEST
     static const u32 fake = (u32)tunable("W3D_HEAP_FREE_MB", 64.0f) << 20;   // (tests: the heap left, as asked)

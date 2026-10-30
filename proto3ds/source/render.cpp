@@ -256,7 +256,7 @@ struct Frustum {
 };
 
 struct BindCache {
-    GpuTex* unit[2] = {nullptr, nullptr};
+    GpuTex* unit[3] = {nullptr, nullptr, nullptr};   // (6.32: was [2] - the terrain's third texture (5.47) wrote past it)
     void bind(int u, GpuTex* t, FrameCounters& fc) {
         if (unit[u] == t) return;
         C3D_TexBind(u, &t->tex);

@@ -285,7 +285,7 @@ void GameUi::drawMap(w3n::GameSession& g, const Input& in) {
     const float yardsPerPx = 60.0f * 2 / mh;
     auto toScreen = [&](float x, float y, int* sx, int* sy) {
         if (mv.ok()) {
-            float u, v;
+            float u = u0, v = v0;
             worldToUv(x, y, &u, &v);
             *sx = mx + (int)((u - u0) / span * mw);
             *sy = my + (int)((v - v0) / span * mh);

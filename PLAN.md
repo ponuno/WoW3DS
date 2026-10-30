@@ -2640,3 +2640,15 @@ broke: the bogus gpuCmdBuf fits that.
   this RSF, ctrtool: "AppMemory: 178MB", "804MHz", "L2 YES", "Access Core 2: YES", RomFS present. ARM compile clean.
 - Not checked on a console: the CIA starting, swkbd (chat, login) in the 178 MB mode, the 48 MB heap. User steps in
   proto3ds/cia/README_RU.md (perf_events "memory:" line must say APPLICATION region 182272 KB, heap 49152 KB).
+
+## Part 80 — 7r link fix and the user's build warnings (6.32b)
+
+- devkitARM link error: `undefined reference to (anonymous namespace)::__ctru_heap_size` - the `extern "C"` declaration in
+  streamer.cpp sat inside `namespace {`; GCC mangled it as a namespace member (clang, used by tools/armcheck, does not, and
+  armcheck only compiles). Moved to global scope. Checked: no object of proto3ds/source + net has an undefined `_GLOBAL__N_`
+  symbol (llvm-nm over the armcheck objects).
+- From the user's build log: `render.cpp BindCache::unit[2]` was indexed with 2 for the terrain's third texture (5.47) - a write
+  past the array on the stack of drawTerrain every frame with a three-texture batch. Now unit[3].
+- `-Wmaybe-uninitialized` in game_ui_tabs.cpp (map u / v) and w3d_collision.h (qx / qy): initialised.
+- run_streaming.sh heap reserve: PACE_US 2000 (1500 frames at 200 us were 0.3 s - no tile loaded, the check passed empty) and
+  the check needs tile loads; full: 25 tiles at 800 yd, 2 MB heap: 9 and one shrink.

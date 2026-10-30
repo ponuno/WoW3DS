@@ -291,7 +291,7 @@ static inline int w3d_wall_push(const W3dWallCand* walls, int count, float* x, f
             float px[W3D_WALL_MAX_POLY], py[W3D_WALL_MAX_POLY];
             int m = w3d_clip_slab(c->x, c->y, c->z, zLow, zHigh, px, py);
             if (m < 2) continue;
-            float qx, qy;
+            float qx = lx, qy = ly;
             int inside = w3d_poly_closest(px, py, m, lx, ly, &qx, &qy);
             float dx = lx - qx, dy = ly - qy, d2 = dx * dx + dy * dy;
             if (d2 >= r * r) continue;

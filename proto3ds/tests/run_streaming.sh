@@ -24,6 +24,6 @@ CAM_WALK=0.3 SD_KBPS=1500 PACE_US=3000 "$OUT/streamer_tsan" "$OUT/city.w3dp" 800
 echo "STREAMING ORDER: PASS"
 # 6.31: the heap reserve (5 x 5 tiles: the far draw distance's ring). Plenty of heap: 5 x 5; 2 MB left: 3 x 3 (the synthetic pack has no COLL)
 "$B/w3dconv" --synthetic --tiles 30 46 34 50 -o "$OUT/wide.w3dp" > "$OUT/wide.log" 2>&1
-HEAP_EXPECT=full PACE_US=200 "$OUT/streamer_asan" "$OUT/wide.w3dp" 1500 | grep -E "ring at|HEAP RESERVE|STREAMER"
-W3D_HEAP_FREE_MB=2 HEAP_EXPECT=small PACE_US=200 "$OUT/streamer_asan" "$OUT/wide.w3dp" 1500 | grep -E "ring at|HEAP RESERVE|STREAMER" | tee "$OUT/heap.log"
+HEAP_EXPECT=full PACE_US=2000 "$OUT/streamer_asan" "$OUT/wide.w3dp" 1500 | grep -E "ring at|HEAP RESERVE|STREAMER"
+W3D_HEAP_FREE_MB=2 HEAP_EXPECT=small PACE_US=2000 "$OUT/streamer_asan" "$OUT/wide.w3dp" 1500 | grep -E "ring at|HEAP RESERVE|STREAMER" | tee "$OUT/heap.log"
 grep -q "HEAP RESERVE (small): PASS" "$OUT/heap.log"
