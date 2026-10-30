@@ -151,6 +151,9 @@ int main(int argc, char** argv) {
         else if (a == "--doodad-coll-tris") o.doodadCollTris = std::atoi(next());
         else if (a == "--no-exact-ground") o.exactGround = false;
         else if (a == "--no-far-lod") o.noFarLod = true;
+        else if (a == "--no-far-objects") o.noFarObjects = true;
+        else if (a == "--far-obj-min") o.farObjMin = (float)std::atof(next());
+        else if (a == "--far-obj-tris") o.farObjTris = std::max(12, std::atoi(next()));
         else if (a == "--terrain-centers") o.terrainCenters = true;
         else if (a == "--no-terrain-centers") o.terrainCenters = false;
         else if (a == "--creatures") o.creatures = true;
@@ -369,6 +372,7 @@ int main(int argc, char** argv) {
     progress(true, "liquids of %zu tiles ...", st.liquids.size());
     emitLiquids(o, o.synthetic ? nullptr : &data, pack, st);
     emitFarLod(o, o.synthetic ? nullptr : &data, pack, st);
+    emitFarObjects(o, pack, st);
     if ((o.creatures || o.players || o.transports || o.gameobjects) && !o.synthetic) {
         std::printf(o.creatures ? "creatures...\n" : "players...\n");
         convertCreatures(o, data, pack, st);

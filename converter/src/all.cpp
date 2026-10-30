@@ -53,6 +53,8 @@ void resetMapState(ConvStats& st) {
     st.seenWmoUid.clear();
     st.collTris.clear();
     st.liquids.clear();
+    st.farObjs.clear();   // (a dungeon's building is not a far object: nothing is left over for the next map)
+    st.farShells.clear();
 }
 
 }  // namespace
@@ -171,6 +173,7 @@ int convertAll(const Options& oIn, const DataDir& data, const AllOptions& ao, Ui
         emitLiquids(m, &data, mp, st);
         trace("map %u (%s): far ground", id, dir.c_str());
         emitFarLod(m, &data, mp, st);
+        emitFarObjects(m, mp, st);
         trace("map %u (%s): writing", id, dir.c_str());
         if (st.tiles == tilesBefore) {
             std::printf("  map %u (%s): nothing converted\n", id, dir.c_str());

@@ -254,6 +254,9 @@ struct StreamStats {
     int farTiles = 0;                // 6.24: tiles of the far ground (0: the pack has none)
     int farDrawn = 0;                // ... drawn last frame (where the detailed ground was not there)
     int farCached = 0;               // ... with a vertex buffer
+    int farObjects = 0;              // 6.29: far buildings of the map (0: the pack has none)
+    int farObjDrawn = 0;             // ... drawn last frame (their tile not loaded, or the real building not shown yet)
+    int farObjTiles = 0;             // ... tiles with a vertex buffer
     u32 floorHolds = 0;              // 6.16: floor queries with nothing under the feet and a surface far above (kept the height)
     int players = 0;                 // player displays (distinct looks) alive
     u32 composites = 0;              // body textures composited so far
@@ -340,6 +343,10 @@ const std::vector<Tile*>& streamerReadyTiles();
 // 6.24: the far ground (w3d_farlod.h): the tiles to draw this frame - within maxDist of the camera, without detailed ground.
 // False when the pack has none or its atlas is not uploaded yet. The vertex buffers stay valid until the next call.
 struct FarDraw { const W3dTerrainVertex* verts; float origin[3]; float center[3]; float radius; };
+// 6.29: the far buildings (w3d_farobj.h): per tile, one buffer of every shell; a draw is a range of its indices (the whole tile
+// while it is not loaded, else the buildings it does not show yet). x / y scale W3D_FAROBJ_XY_SCALE, z zScale.
+struct FarObjDraw { const W3dTerrainVertex* verts; const uint16_t* idx; uint32_t count; float origin[3]; float center[3]; float radius; };
+bool streamerFarObjectDraws(const float cam[3], float maxDist, std::vector<FarObjDraw>& out, GpuTex** palette, float* zScale);
 bool streamerFarDraws(const float cam[3], float maxDist, std::vector<FarDraw>& out, GpuTex** atlas, const uint16_t** indices,
                       float* zScale);
 const StreamStats& streamerStats();

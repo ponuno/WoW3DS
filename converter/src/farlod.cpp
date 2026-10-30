@@ -96,6 +96,8 @@ bool readWdl(const DataDir* data, const std::string& map, std::vector<std::array
 
 }  // namespace
 
+bool farMeanColour(const DataDir* data, const std::string& path, float rgb[3]) { return meanColour(data, path, rgb); }
+
 void collectFarTile(const Options& o, const DataDir* data, const wowee::pipeline::ADTTerrain& adt, ConvStats& st) {
     ConvStats::FarSrc f;
     bool any = false;

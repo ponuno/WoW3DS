@@ -64,6 +64,9 @@ struct Options {
     bool noDoodadColl = false;  // no M2 doodad collision (fences, trunks, bridges) in COLL
     int doodadCollTris = 0;     // collision triangle budget per doodad model (0 = keep all; 6.18b: the 96 of before cut fences and bridges)
     bool noFarLod = false;      // 6.24: no FARL entry (--no-far-lod)
+    bool noFarObjects = false;  // 6.29: no FARO entry (--no-far-objects)
+    float farObjMin = 20.0f;    // 6.29: buildings at least this large (yards, the longest side) get a far shell (--far-obj-min)
+    int farObjTris = 300;       // 6.29: triangle budget of a far shell (--far-obj-tris)
     bool exactGround = true;    // 6.18a: a GRND entry per tile (the ADT's 145 heights + holes: the walker's ground); --no-exact-ground
     bool terrainCenters = true;    // 6.18a: the squares' centre vertices in the drawn ground too (LOD 0; +50% triangles); --terrain-centers
     // Creatures (stage 5.3): every CreatureDisplayInfo row -> CDSP + CMDL (skinned, animated)
@@ -279,6 +282,13 @@ struct ConvStats {
     struct FarSrc { float h[289]; float rgb[256][3]; bool haveColor = false; };
     std::unordered_map<uint32_t, FarSrc> far;
     size_t farTiles = 0, farFromWdl = 0, farBytes = 0;
+    // 6.29: the far buildings (farobj.cpp): a shell per large WMO (its own space) and every placement of one, written by
+    // emitFarObjects() after the tiles
+    struct FarShellSrc { std::vector<float> pos, nrm, rgb; std::vector<uint32_t> idx; float radius = 0; };
+    std::map<std::string, FarShellSrc> farShells;
+    struct FarObjSrc { std::string key; float pos[3], rot[3]; uint32_t groupModel; float groupPos[3]; int tile; };   // tile: of the PLCM holding its groups
+    std::vector<FarObjSrc> farObjs;
+    size_t farObjects = 0, farShellsOut = 0, farShellTris = 0, farObjBytes = 0;
     size_t collSource = 0, collWalkable = 0, collWalls = 0, collPieces = 0, collBytes = 0, collMaxTileBytes = 0;
     // M2 bounding (collision) triangles in model space, 3 vertices x 3 floats each, by model id.
     std::unordered_map<uint32_t, std::vector<float>> m2Coll;
@@ -441,6 +451,12 @@ void emitLiquids(const Options& o, const DataDir* data, PackWriter& pack, ConvSt
 // (adds the WDL's heights for the map's other tiles).
 void collectFarTile(const Options& o, const DataDir* data, const wowee::pipeline::ADTTerrain& adt, ConvStats& st);
 void emitFarLod(const Options& o, const DataDir* data, PackWriter& pack, ConvStats& st);
+// 6.29: far buildings. buildFarShell(): triangles (9 floats each, WMO space) with a colour each (3 floats) -> the shell (false:
+// smaller than o.farObjMin or nothing left); emitFarObjects() once per map after the tiles (FARO entry + its palette).
+bool farMeanColour(const DataDir* data, const std::string& path, float rgb[3]);
+bool buildFarShell(const std::vector<float>& tris, const std::vector<float>& triRgb, float minExtent, int maxTris,
+                   ConvStats::FarShellSrc& out);
+void emitFarObjects(const Options& o, PackWriter& pack, ConvStats& st);
 // Kind (W3dLiquid) of a WMO group's MLIQ the way the server's extractor resolves it (vMaNGOS vmapextract), -1 = none.
 int wmoLiquidKind(uint32_t rootFlags, uint32_t rootId, uint32_t groupFlags, uint32_t groupLiquid, const uint8_t* tiles,
                   size_t tileCount);

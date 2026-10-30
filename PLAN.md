@@ -2557,3 +2557,24 @@ noise, permanently, for every texture moved. The character screen shows textures
 armour), which had been moved. Fix: `GSPGPU_FlushDataCache` on the block before the copy, `GSPGPU_InvalidateDataCache` after.
 report.txt "shortages" line: "moved out of VRAM for 3D / wide N" (StreamStats::texEvicted). Not reproduced on a console: if noise
 appears with N = 0 the cause is elsewhere.
+
+## Part 75 — far buildings (FARO, 6.29)
+
+WoW 1.12 has no far versions of WMOs: buildings appeared only when their tile and groups were read. The converter now makes them.
+- **Converter** (`converter/src/farobj.cpp`, `wmo.cpp`): for every WMO whose longest side is >= `--far-obj-min` (20 yd), a shell
+  from the outside groups' drawn triangles (no interior-only groups, no additive glows) by vertex clustering on a grid over the
+  building, the grid coarsened until the shell fits `--far-obj-tris` (300); a cluster sits at the mean of its vertices, coloured
+  with the area-weighted mean texture colour of the triangles around it (`farMeanColour`, the far ground's), with an averaged
+  normal; collapsed and doubled triangles are dropped. Every placement goes into the map's FARO entry (`common/w3d_farobj.h`) by
+  the tile whose PLCM holds its groups, with the first group's model id and placed position (how the client knows the real one is
+  shown). Palette: RGB565 128 x N, a 4x4 cell per colour (4-bit channels, 3-bit beyond 1024). `--no-far-objects` leaves it out.
+- **Client** (`streamer.cpp streamerFarObjectDraws`, `render.cpp`): the entry stays in memory; per tile one vertex/index buffer
+  of all its shells (terrain vertices: x / y from the tile corner in `W3D_FAROBJ_XY_SCALE` = 4 x the far ground's, z in zScale;
+  r = baked light, uv = the palette cell), built at most two a frame, LRU 64. Drawn with the far ground's shader, culling off:
+  the whole tile while it is not loaded; for a loaded tile only the buildings whose first group is not shown yet (its Bldg not
+  open, or a one-group building whose model is not drawable). report.txt: "far buildings (6.29): N in the map, D drawn ...".
+- Tests: `far_shell_test` (16000-triangle tower -> 254 within the box, colours kept, budget kept, small sheds skipped),
+  `farobj_test` in run_far_tests.sh (objects match their PLCM placements, shells inside/covering the house and tower, the
+  client's tile builder vs w3d_farobj_place, palette, --no-far-objects), run_holes.sh "FAR BUILDINGS (streamer)" (drawn while not
+  shown, never from a tile that shows all its buildings, buffers alive under ASan). ARM compile clean.
+- Not seen on a console; trees / large doodads are not covered (next: impostors).

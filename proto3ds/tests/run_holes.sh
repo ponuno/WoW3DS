@@ -36,3 +36,11 @@ grep "far ground" "$OUT/far.log"
 grep -q "far ground: 3 tiles, drawn in [1-9][0-9]* frames, 0 wrong" "$OUT/far.log"
 grep -q "far ground: 1 tiles, drawn in [0-9]* frames, 0 wrong" "$OUT/holes.log"
 echo "FAR (streamer): PASS"
+# 6.29: the far buildings through the streamer (converter/tests/gen_wmo_data.py, every building shelled): drawn while their tile is
+# not shown, never from a tile that shows all its buildings, the buffers alive (ASan)
+python3 "$T/../../converter/tests/gen_wmo_data.py" "$OUT/W" "$OUT/w.json" > /dev/null
+"$B/w3dconv" --data "$OUT/W" --map Test --tiles 32 48 33 48 --far-obj-min 5 -o "$OUT/fo.w3dp" > "$OUT/conv_fo.log" 2>&1
+FAROBJ_EXPECT=4 "$OUT/holes" "$OUT/fo.w3dp" 600 > "$OUT/fo.log" 2>&1 || true
+grep "far buildings" "$OUT/fo.log"
+grep -q "far buildings: 4 in the map, drawn in [1-9][0-9]* frames, hidden behind the real ones in [1-9][0-9]*, 0 wrong" "$OUT/fo.log"
+echo "FAR BUILDINGS (streamer): PASS"

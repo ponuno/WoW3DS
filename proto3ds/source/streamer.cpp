@@ -17,6 +17,7 @@
 #include "w3d_ground.h"
 #include "w3d_liquid.h"
 #include "w3d_farlod.h"
+#include "w3d_farobj.h"
 
 #include <fcntl.h>
 #include <math.h>
@@ -1521,6 +1522,53 @@ void farLoad() {
     g_stats.farTiles = (int)g_farHd->tileCount;
 }
 
+// ------------------------------------------------------------------ 6.29: the far buildings
+std::vector<uint8_t> g_foBlob;
+const W3dFarObjHeader* g_foHd = nullptr;
+GpuTex* g_foTex = nullptr;
+struct FarObjVB {
+    W3dTerrainVertex* v = nullptr;
+    uint16_t* i = nullptr;
+    uint32_t idxCount = 0;
+    std::vector<uint32_t> objStart;   // first index of each object of the tile (+ the end)
+    uint32_t used = 0;
+    float center[3] = {0, 0, 0}, radius = 0;
+};
+std::unordered_map<int, FarObjVB> g_foVB;   // [tileY * 64 + tileX]
+constexpr size_t kFarObjCache = 64;
+
+void farObjLoad() {
+    const uint32_t size = streamerEntrySize(W3D_ENTRY_FAROBJ, 0);
+    if (!size) return;
+    g_foBlob.resize(size);
+    if (!streamerReadEntry(W3D_ENTRY_FAROBJ, 0, g_foBlob.data(), size) || !w3d_farobj_valid(g_foBlob.data(), size)) {
+        g_foBlob.clear();
+        return;
+    }
+    g_foHd = (const W3dFarObjHeader*)g_foBlob.data();
+    const float here[3] = {0, 0, 0};
+    AnchorScope as(here, kClsTile);
+    g_foTex = acquireTex(g_foHd->paletteTexId);
+    g_stats.farObjects = (int)g_foHd->objectCount;
+}
+
+void farObjFree(FarObjVB& vb, bool now) {
+    if (now) { if (vb.v) linearFree(vb.v); if (vb.i) linearFree(vb.i); }
+    else { if (vb.v) deferFree(FreeKind::Linear, vb.v); if (vb.i) deferFree(FreeKind::Linear, vb.i); }
+    vb.v = nullptr;
+    vb.i = nullptr;
+}
+
+void farObjUnload() {
+    for (auto& [k, vb] : g_foVB) farObjFree(vb, true);
+    g_foVB.clear();
+    if (g_foTex) releaseTex(g_foTex);
+    g_foTex = nullptr;
+    g_foBlob.clear();
+    g_foHd = nullptr;
+    g_stats.farObjects = g_stats.farObjDrawn = g_stats.farObjTiles = 0;
+}
+
 void farUnload() {
     for (auto& [k, vb] : g_farVB) if (vb.v) linearFree(vb.v);
     g_farVB.clear();
@@ -1594,6 +1642,122 @@ bool streamerFarDraws(const float cam[3], float maxDist, std::vector<FarDraw>& o
     return !out.empty();
 }
 
+bool streamerFarObjectDraws(const float cam[3], float maxDist, std::vector<FarObjDraw>& out, GpuTex** palette, float* zScale) {
+    out.clear();
+    g_stats.farObjDrawn = 0;
+    if (!g_foHd || !g_foTex || g_foTex->state != AssetState::Ready || g_foTex == &g_white) return false;
+    const float zs = g_farHd ? g_farHd->zScale : 0.25f;
+    static uint32_t frame = 0;
+    ++frame;
+    static const Tile* loaded[64 * 64];
+    memset(loaded, 0, sizeof loaded);
+    for (const Tile* t : g_ready)
+        if (t->tx >= 0 && t->tx < 64 && t->ty >= 0 && t->ty < 64) loaded[t->ty * 64 + t->tx] = t;
+    const W3dFarObject* objs = w3d_farobj_objects(g_foBlob.data());
+    const W3dFarShell* shells = w3d_farobj_shells(g_foBlob.data());
+    const float TS = W3D_FAR_TILE_SIZE;
+    const int ctx = (int)floorf(32.0f - cam[1] / TS), cty = (int)floorf(32.0f - cam[0] / TS);
+    const int r = (int)ceilf(maxDist / TS) + 2;   // (a building may stand well beyond its tile)
+    int built = 0;
+    static std::vector<std::pair<uint32_t, uint32_t>> shown;   // building groups a loaded tile shows: (model id, instance index)
+    for (int ty = std::max(0, cty - r); ty <= std::min(63, cty + r); ++ty)
+        for (int tx = std::max(0, ctx - r); tx <= std::min(63, ctx + r); ++tx) {
+            const int k = ty * 64 + tx;
+            const uint32_t first = g_foHd->tileStart[k], count = g_foHd->tileStart[k + 1] - first;
+            if (!count) continue;
+            auto it = g_foVB.find(k);
+            if (it == g_foVB.end() || !it->second.v) {
+                if (built >= 2) continue;   // at most two new buffers a frame (a few thousand vertices each)
+                uint32_t nv = 0, ni = 0;
+                for (uint32_t i = 0; i < count; ++i) { nv += shells[objs[first + i].shell].vertCount; ni += shells[objs[first + i].shell].indexCount; }
+                if (!nv || nv > 65535) continue;
+                FarObjVB vb;
+                vb.v = (W3dTerrainVertex*)linearAlloc(nv * sizeof(W3dTerrainVertex));
+                vb.i = (uint16_t*)linearAlloc(ni * sizeof(uint16_t));
+                if (!vb.v || !vb.i) { farObjFree(vb, true); continue; }
+                vb.objStart.resize(count + 1);
+                w3d_farobj_build_tile(g_foBlob.data(), tx, ty, zs, vb.v, nv, vb.i, ni, &vb.idxCount, vb.objStart.data());
+                GSPGPU_FlushDataCache(vb.v, nv * sizeof(W3dTerrainVertex));
+                GSPGPU_FlushDataCache(vb.i, ni * sizeof(uint16_t));
+                // the sphere around the tile's buildings
+                float lo[3] = {1e9f, 1e9f, 1e9f}, hi[3] = {-1e9f, -1e9f, -1e9f};
+                for (uint32_t i = 0; i < count; ++i) {
+                    const W3dFarObject& o = objs[first + i];
+                    const float rad = shells[o.shell].radius;
+                    for (int q = 0; q < 3; ++q) { lo[q] = std::min(lo[q], o.pos[q] - rad); hi[q] = std::max(hi[q], o.pos[q] + rad); }
+                }
+                float r2 = 0;
+                for (int q = 0; q < 3; ++q) { vb.center[q] = 0.5f * (lo[q] + hi[q]); r2 += 0.25f * (hi[q] - lo[q]) * (hi[q] - lo[q]); }
+                vb.radius = sqrtf(r2);
+                it = g_foVB.insert_or_assign(k, std::move(vb)).first;
+                ++built;
+            }
+            FarObjVB& vb = it->second;
+            // the coarse cut: the buildings' sphere within the draw distance
+            const float dx = vb.center[0] - cam[0], dy = vb.center[1] - cam[1];
+            if (sqrtf(dx * dx + dy * dy) - vb.radius > maxDist) continue;
+            vb.used = frame;
+            float minX, minY;
+            w3d_far_tile_origin(tx, ty, &minX, &minY);
+            FarObjDraw d;
+            d.verts = vb.v;
+            d.origin[0] = minX; d.origin[1] = minY; d.origin[2] = 0;
+            memcpy(d.center, vb.center, sizeof d.center);
+            d.radius = vb.radius;
+            const Tile* t = loaded[k];
+            if (!t) {   // the tile is not there: all of its buildings
+                d.idx = vb.i;
+                d.count = vb.idxCount;
+                if (d.count) out.push_back(d);
+                g_stats.farObjDrawn += (int)count;
+                continue;
+            }
+            // a loaded tile: the buildings it does not show yet, each found by its first group's placement - shown when that group
+            // is: its Tile::Bldg is open, or (a one-group building, no Bldg) its model is drawable
+            shown.clear();
+            for (uint32_t m = 0; m < t->instances.size(); ++m) {
+                const Instance& in = t->instances[m];
+                if (!in.model || !in.model->building) continue;
+                const bool vis = in.bldg ? (in.bldg <= t->bldgs.size() && t->bldgs[in.bldg - 1].open) : in.model->drawable;
+                if (vis) shown.push_back({in.model->id, m});
+            }
+            uint32_t runStart = 0, runEnd = 0;
+            auto flush = [&]() {
+                if (runEnd > runStart) { FarObjDraw e = d; e.idx = vb.i + runStart; e.count = runEnd - runStart; out.push_back(e); }
+                runStart = runEnd = 0;
+            };
+            for (uint32_t i = 0; i < count; ++i) {
+                const W3dFarObject& o = objs[first + i];
+                bool open = false;
+                for (const auto& [mid, m] : shown) {
+                    if (mid != o.groupModel) continue;
+                    const Instance& in = t->instances[m];
+                    if (fabsf(in.pos[0] - o.groupPos[0]) < 0.05f && fabsf(in.pos[1] - o.groupPos[1]) < 0.05f &&
+                        fabsf(in.pos[2] - o.groupPos[2]) < 0.05f) { open = true; break; }
+                }
+                const uint32_t a = vb.objStart[i], b = vb.objStart[i + 1];
+                if (open || a == b) { flush(); continue; }
+                if (runEnd == a && runEnd > runStart) runEnd = b;
+                else { flush(); runStart = a; runEnd = b; }
+                ++g_stats.farObjDrawn;
+            }
+            flush();
+        }
+    // drop the least recently used buffers beyond the cap (never one drawn this frame)
+    while (g_foVB.size() > kFarObjCache) {
+        auto old = g_foVB.end();
+        for (auto it = g_foVB.begin(); it != g_foVB.end(); ++it)
+            if (it->second.used != frame && (old == g_foVB.end() || it->second.used < old->second.used)) old = it;
+        if (old == g_foVB.end()) break;
+        farObjFree(old->second, false);
+        g_foVB.erase(old);
+    }
+    g_stats.farObjTiles = (int)g_foVB.size();
+    *palette = g_foTex;
+    *zScale = zs;
+    return !out.empty();
+}
+
 bool streamerInit(PackIndex* index, char* err, size_t errLen) {
     g_index = index;
     g_quit = false;   // a map change shuts the streamer down and starts it again on the next pack
@@ -1646,6 +1810,7 @@ bool streamerInit(PackIndex* index, char* err, size_t errLen) {
         if (g_thread) g_stats.workerCore = 0;
     }
     farLoad();   // 6.24 (after the worker: the atlas is read like any texture)
+    farObjLoad();   // 6.29
     return true;
 }
 
@@ -1665,6 +1830,7 @@ void streamerShutdown() {
     }
     // Complete every outstanding job (unrun ones as failed) through the normal path,
     // so assets orphaned while loading are freed exactly as during play.
+    farObjUnload();   // 6.29
     farUnload();   // 6.24: (the atlas is released before the jobs are drained: a read still running frees it on completion)
     // Completions may submit follow-up jobs (display -> model -> textures): loop until drained.
     for (;;) {

@@ -43,6 +43,7 @@ enum W3dEntryType {
     W3D_ENTRY_GLUE      = W3D_FOURCC('G', 'L', 'U', 'E'),   // stage 5.29: a login / character screen scene (W3dGlueScene)
     W3D_ENTRY_SPELLFX   = W3D_FOURCC('S', 'V', 'F', 'X'),   // stage 5.33: spell visuals -> effect models (w3d_fx.h, id 0)
     W3D_ENTRY_FARLOD    = W3D_FOURCC('F', 'A', 'R', 'L'),   // stage 6.24: the map's far ground (w3d_farlod.h, id 0)
+    W3D_ENTRY_FAROBJ    = W3D_FOURCC('F', 'A', 'R', 'O'),   // stage 6.29: the map's far buildings (w3d_farobj.h, id 0)
 };
 
 // ---------------------------------------------------------------- pack sets (stage 5.27)
@@ -65,7 +66,7 @@ typedef struct {
 // Entry types that belong to a map (by tile id); everything else goes to the pool.
 static inline int w3d_is_tile_entry(uint32_t type) {
     return type == W3D_ENTRY_TERRAIN || type == W3D_ENTRY_PLACEMENT || type == W3D_ENTRY_WATER || type == W3D_ENTRY_LIQUID ||
-           type == W3D_ENTRY_COLLISION || type == W3D_ENTRY_GROUND || type == W3D_ENTRY_FARLOD;
+           type == W3D_ENTRY_COLLISION || type == W3D_ENTRY_GROUND || type == W3D_ENTRY_FARLOD || type == W3D_ENTRY_FAROBJ;
 }
 
 typedef struct {

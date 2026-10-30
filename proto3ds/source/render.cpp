@@ -4,6 +4,7 @@
 // matrices in float32 from (object - camera), because PICA200 uniforms are
 // float24 and absolute coordinates (~17000 yd) would visibly jitter.
 #include "w3d_farlod.h"
+#include "w3d_farobj.h"
 #include "world.h"
 
 #include <array>
@@ -393,6 +394,38 @@ void drawTerrain(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, cons
                 ++fc.drawCalls;
                 fc.tris += W3D_FAR_INDICES / 3;
             }
+        }
+    }
+    // 6.29: the far buildings - coarse shells of the large buildings whose tile is not loaded or that their tile does not show
+    // yet, with the far ground's shader (palette on both units); drawn from both sides (a shell is not closed everywhere)
+    {
+        static std::vector<FarObjDraw> fo;
+        GpuTex* pal = nullptr;
+        float zs = 0.25f;
+        if (streamerFarObjectDraws(cam.pos, fr.maxDist, fo, &pal, &zs)) {
+            setTerrainEnv(2);
+            bc.bind(0, pal, fc);
+            bc.bind(1, pal, fc);
+            C3D_CullFace(GPU_CULL_NONE);
+            const W3dTerrainVertex* boundV = nullptr;
+            for (const FarObjDraw& d : fo) {
+                if (!fr.sphere(d.center, d.radius)) continue;
+                if (d.verts != boundV) {
+                    C3D_BufInfo* buf = C3D_GetBufInfo();
+                    BufInfo_Init(buf);
+                    BufInfo_Add(buf, d.verts, sizeof(W3dTerrainVertex), 3, 0x210);
+                    C3D_Mtx mv;
+                    camRelative(&mv, view, d.origin, cam.pos);
+                    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_terrainSh.uMV, &mv);
+                    C3D_FVUnifSet(GPU_VERTEX_SHADER, g_terrainSh.uScale, W3D_FAROBJ_XY_SCALE, W3D_FAROBJ_XY_SCALE, zs, W3D_FAR_UV_SCALE);
+                    C3D_FVUnifSet(GPU_VERTEX_SHADER, g_terrainSh.uOffset, 0, 0, 0, 0);
+                    boundV = d.verts;
+                }
+                C3D_DrawElements(GPU_TRIANGLES, d.count, C3D_UNSIGNED_SHORT, d.idx);
+                ++fc.drawCalls;
+                fc.tris += d.count / 3;
+            }
+            C3D_CullFace(GPU_CULL_BACK_CCW);
         }
     }
     for (Tile* t : streamerReadyTiles()) {

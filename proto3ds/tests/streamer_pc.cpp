@@ -41,6 +41,7 @@ void pcTestIoDelay(int file, uint32_t offset, uint32_t size) {
 }
 
 static size_t g_farFrames = 0, g_farOverlap = 0;
+static size_t g_foFrames = 0, g_foWrong = 0, g_foHiddenFrames = 0;   // 6.29: far buildings
 static size_t g_pk[5] = {0, 0, 0, 0, 0};   // submesh problems by kind: not ready, index range, texture, vertex index, radius/position
 
 int main(int argc, char** argv) {
@@ -131,6 +132,38 @@ int main(int argc, char** argv) {
                     (void)probe;
                 }
             }
+        }
+        {   // 6.29: the far buildings - never drawn from a tile that shows all of its buildings, the ranges inside live buffers
+            static std::vector<FarObjDraw> fo;
+            GpuTex* pal = nullptr;
+            float zs = 0;
+            const bool any = streamerFarObjectDraws(cam, dist, fo, &pal, &zs);
+            if (any) ++g_foFrames;
+            // a tile "shows everything": every building group of it is shown (its Bldg open, or a one-group building drawable)
+            auto showsAll = [](const Tile* t) {
+                bool any = false;
+                for (const Instance& in : t->instances) {
+                    if (!in.model || !in.model->building) continue;
+                    any = true;
+                    if (in.bldg ? !(in.bldg <= t->bldgs.size() && t->bldgs[in.bldg - 1].open) : !in.model->drawable) return false;
+                }
+                return any;
+            };
+            for (const FarObjDraw& d : fo) {
+                if (!d.verts || !d.idx || !d.count || d.count % 3 || !pal || zs <= 0) ++g_foWrong;
+                const int tx = (int)std::floor(32.0f - (d.origin[1] + 1.0f) / kTileSize), ty = (int)std::floor(32.0f - (d.origin[0] + 1.0f) / kTileSize);
+                for (Tile* t : streamerReadyTiles())
+                    if (t->tx == tx && t->ty == ty && showsAll(t)) {
+                        if (!g_foWrong && std::getenv("FAROBJ_DEBUG")) std::printf("wrong: tile %d_%d, draw of %u indices\n", tx, ty, d.count);
+                        ++g_foWrong;
+                    }
+                volatile uint16_t probe = d.idx[d.count - 1];   // ASan: the buffers are alive
+                volatile int16_t probeV = d.verts[probe].z;
+                (void)probeV;
+            }
+            // a frame where a tile shows all its buildings and nothing of it is drawn far: the shells did go
+            for (Tile* t : streamerReadyTiles())
+                if (showsAll(t)) { ++g_foHiddenFrames; break; }
         }
         {   // stage 5.32: the effects of what is near, as render.cpp drawFx does (models freed meanwhile must take their
             // particles with them: ASan would catch a particle reading a freed blob)
@@ -465,6 +498,12 @@ int main(int argc, char** argv) {
         std::printf("terrain holes: %d uncovered points (membrane checks %d), ground checks %d, %d wrong\n", uncovered, membraneChecks,
                     groundChecks, holeBad);
         problems += holeBad;
+    }
+    if (const char* fe = std::getenv("FAROBJ_EXPECT")) {   // 6.29: the far buildings
+        const StreamStats& ss = streamerStats();
+        std::printf("far buildings: %d in the map, drawn in %zu frames, hidden behind the real ones in %zu, %zu wrong\n", ss.farObjects,
+                    g_foFrames, g_foHiddenFrames, g_foWrong);
+        if (ss.farObjects != std::atoi(fe) || g_foWrong || !g_foFrames || !g_foHiddenFrames) { std::printf("far buildings FAIL\n"); ++problems; }
     }
     if (const char* fe = std::getenv("FAR_EXPECT")) {   // 6.24: the pack's far ground: its tiles, frames it was drawn in, overlaps
         const StreamStats& ss = streamerStats();
