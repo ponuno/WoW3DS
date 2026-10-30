@@ -834,6 +834,14 @@ void second(const Context& c) {
         event("HEAP LOW: %lu KB of %lu KB left (COLL %lu KB, heights %lu KB, instances %lu KB, other %lu KB)", (unsigned long)(heapFree / 1024),
               (unsigned long)(__ctru_heap_size / 1024), (unsigned long)(m.collHeapBytes / 1024), (unsigned long)(m.heightBytes / 1024),
               (unsigned long)(m.instanceBytes / 1024), (unsigned long)((heapUsed > heapKnown ? heapUsed - heapKnown : 0) / 1024));
+    {   // 6.31: the streamer's ring shrinks for want of heap
+        static bool shrunk = false;
+        if (s.heapShrunk != shrunk) {
+            shrunk = s.heapShrunk;
+            event(shrunk ? "HEAP: %lu KB left - tiles kept to the 3 x 3 around the camera until there is room (COLL goes to linear memory)"
+                         : "HEAP: %lu KB free again - the full ring of tiles is back", (unsigned long)(s.heapFree / 1024));
+        }
+    }
     const uint32_t oomNow = (s.oomStaging - ps.oomStaging) + (s.oomModel - ps.oomModel) + (s.oomCreature - ps.oomCreature) +
                             (s.oomWater - ps.oomWater) + (s.oomUpload - ps.oomUpload) + (s.collFailed - ps.collFailed);
     if (oomNow)

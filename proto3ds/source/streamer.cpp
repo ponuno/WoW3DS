@@ -21,6 +21,7 @@
 #include "crash.hpp"
 
 #include <fcntl.h>
+#include <malloc.h>
 #include <math.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -259,6 +260,20 @@ struct CollLoad {
     bool linear;
 };
 constexpr float kCollLoadDist = 200.0f, kCollDropDist = 320.0f;   // yards from the camera to the tile's edge
+// 6.31: the normal heap's reserves (see StreamStats::heapFree)
+constexpr u32 kCollHeapReserve = 6u << 20;   // COLL goes to the heap only if this much stays free after it (else linear memory)
+constexpr u32 kHeapLow = 3u << 20;           // under this the wanted ring shrinks to 3 x 3 tiles
+constexpr u32 kHeapOk = 5u << 20;            // ... and grows back above this
+extern "C" u32 __ctru_heap_size;
+static u32 heapFreeNow() {
+#ifdef W3D_PC_TEST
+    static const u32 fake = (u32)tunable("W3D_HEAP_FREE_MB", 64.0f) << 20;   // (tests: the heap left, as asked)
+    return fake;
+#else
+    const struct mallinfo mi = mallinfo();
+    return __ctru_heap_size > (u32)mi.uordblks ? __ctru_heap_size - (u32)mi.uordblks : 0;
+#endif
+}
 
 void freeColl(uint8_t* p, bool linear) {
     if (linear) linearFree(p);
@@ -1479,7 +1494,15 @@ void processDeferred() {
 // The map's FARL entry stays in memory for the whole visit; vertex buffers (linear memory, 4.6 KB) are made for the tiles
 // actually drawn and the least recently used are dropped beyond kFarCache.
 namespace {
-std::vector<uint8_t> g_farBlob;
+// 6.31: the map-wide blobs live in linear memory (CPU-only data, but the normal heap is the scarce one)
+struct LinBlob {
+    uint8_t* p = nullptr;
+    uint32_t n = 0;
+    uint8_t* data() const { return p; }
+    bool resize(uint32_t size) { clear(); p = (uint8_t*)linearAlloc(size); n = p ? size : 0; return p != nullptr; }
+    void clear() { if (p) linearFree(p); p = nullptr; n = 0; }
+};
+LinBlob g_farBlob;
 const W3dFarHeader* g_farHd = nullptr;
 GpuTex* g_farTex = nullptr;
 uint16_t* g_farIdx = nullptr;          // linear: the shared index list
@@ -1491,7 +1514,7 @@ constexpr size_t kFarCache = 96;
 void farLoad() {
     const uint32_t size = streamerEntrySize(W3D_ENTRY_FARLOD, 0);
     if (!size) return;
-    g_farBlob.resize(size);
+    if (!g_farBlob.resize(size)) return;
     if (!streamerReadEntry(W3D_ENTRY_FARLOD, 0, g_farBlob.data(), size) || !w3d_far_valid(g_farBlob.data(), size)) {
         g_farBlob.clear();
         return;
@@ -1508,7 +1531,7 @@ void farLoad() {
 }
 
 // ------------------------------------------------------------------ 6.29: the far buildings
-std::vector<uint8_t> g_foBlob;
+LinBlob g_foBlob;
 const W3dFarObjHeader* g_foHd = nullptr;
 GpuTex* g_foTex = nullptr;
 struct FarObjVB {
@@ -1525,7 +1548,7 @@ constexpr size_t kFarObjCache = 64;
 void farObjLoad() {
     const uint32_t size = streamerEntrySize(W3D_ENTRY_FAROBJ, 0);
     if (!size) return;
-    g_foBlob.resize(size);
+    if (!g_foBlob.resize(size)) return;
     if (!streamerReadEntry(W3D_ENTRY_FAROBJ, 0, g_foBlob.data(), size) || !w3d_farobj_valid(g_foBlob.data(), size)) {
         g_foBlob.clear();
         return;
@@ -1989,7 +2012,8 @@ void streamerUpdate(const float camPos[3], float drawDist, bool uploadsLater) {
             const W3dEntry* ce = g_index->find(W3D_ENTRY_COLLISION, w3d_tile_id(t->tx, t->ty));
             if (!ce) continue;
             bool linear = false;
-            uint8_t* buf = (uint8_t*)malloc(ce->size);
+            uint8_t* buf = nullptr;
+            if (heapFreeNow() > ce->size + kCollHeapReserve) buf = (uint8_t*)malloc(ce->size);   // 6.31: never the heap's last MBs
             if (!buf) { buf = (uint8_t*)linearAlloc(ce->size); linear = true; ++g_stats.collHeapMiss; }
             if (!buf) { ++g_stats.collFailed; g_stats.oomLastSize = ce->size; g_stats.oomLastFree = linearSpaceFree(); continue; }
             t->collLoad = new CollLoad{t, buf, ce->size, linear};
@@ -2008,7 +2032,13 @@ void streamerUpdate(const float camPos[3], float drawDist, bool uploadsLater) {
     int cty = (int)floorf(32.0f - camPos[0] / kTileSize);
     int r = drawDist > 450.0f ? 2 : 1;
     if ((2 * r + 1) * (2 * r + 1) > g_slotCount) r = 1;
-    const int keep = r + 1;
+    // 6.31: the normal heap running dry (tiles' heights, instances, models' tables grow with the ring): back to 3 x 3 and the
+    // tiles beyond it are released, until there is room again
+    g_stats.heapFree = heapFreeNow();
+    if (!g_stats.heapShrunk && g_stats.heapFree < kHeapLow) { g_stats.heapShrunk = true; ++g_stats.heapShrinks; }
+    else if (g_stats.heapShrunk && g_stats.heapFree > kHeapOk) g_stats.heapShrunk = false;
+    if (g_stats.heapShrunk) r = 1;
+    const int keep = g_stats.heapShrunk ? 1 : r + 1;
 
     for (TileExt* t : std::vector<TileExt*>(g_tiles)) {
         if (t->doomed) continue;
@@ -2028,7 +2058,7 @@ void streamerUpdate(const float camPos[3], float drawDist, bool uploadsLater) {
     // 6.24: read ahead - the tiles around the point 300 yards in front of the camera that lie beyond the wanted ring (still
     // within 'keep', so they are not released again): by the time the walker gets there their ground is in. Only into free
     // terrain slots (never evicting for it), after everything of the ring.
-    if (g_haveFwd) {
+    if (g_haveFwd && !g_stats.heapShrunk) {
         const float px = camPos[0] + g_fwd[0] * 300.0f, py = camPos[1] + g_fwd[1] * 300.0f;
         const int ptx = (int)floorf(32.0f - py / kTileSize), pty = (int)floorf(32.0f - px / kTileSize);
         for (int dx = -1; dx <= 1; ++dx)

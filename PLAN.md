@@ -2609,3 +2609,20 @@ ours sets the GPU command buffer; GPUCMD_Split keeps pointer and size consistent
 - `crashCheckCmdBuf()` every frame after C3D_FrameBegin: libctru's pointer / size must be citro3d's buffer; else one event in
   perf_events.txt (corruption found the frame it happens, not at the crash).
 - Needed from the user: crash.txt, perf_events.txt / perf.csv / report.txt of that session (perf_prev_* if the game was restarted).
+
+## Part 78 — the crash at 533 yd was the normal heap running dry (6.31b)
+
+User's perf_events.txt (7o, Stormwind): draw distance 533 at 41.2 s, `HEAP LOW: 944 KB of 24576 KB left (COLL 10291 KB, heights
+1170 KB, instances 898 KB, other 8164 KB)` at 48.3 s, the crash seconds later (the .dmp sent was the HOME menu's, not ours).
+COLL took the heap (malloc) as long as malloc said yes and went to linear memory only after a failure - down to the last MB; then
+something that does not check malloc (libctru's linear allocator keeps its blocks and address tree on the heap, citro3d, STL)
+broke: the bogus gpuCmdBuf fits that.
+- `streamer.cpp`: `heapFreeNow()` (mallinfo, once a frame -> `StreamStats::heapFree`). COLL goes to the heap only if 6 MB stay
+  free after it (else linear memory, 53 MB free at the start). Under 3 MB free the wanted ring shrinks to 3 x 3 (tiles beyond
+  are released, no read-ahead) until 5 MB are free again: `heapShrunk / heapShrinks`, an event in perf_events.txt ("HEAP: ... kept
+  to the 3 x 3"), a line in report.txt ("heap (6.31): ...").
+- The far ground (FARL) and far buildings (FARO) blobs moved from the heap to linear memory (`LinBlob`).
+- Test: `run_streaming.sh` "heap reserve": a 5 x 5 synthetic pack, plenty of heap -> up to 18 tiles at 800 yd; `W3D_HEAP_FREE_MB=2`
+  -> at most 9 and one shrink. run_holes (far ground / buildings, ASan leaks) green; ARM compile clean.
+- Note: `run_streamer.sh` at PACE_US=0 loads no tiles in 1500 frames on this machine - flaky by timing, the same on 0d03cf6 and
+  76af7c0 (not from this change).

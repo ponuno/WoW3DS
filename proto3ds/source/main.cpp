@@ -416,6 +416,8 @@ static void writeReport(const Bench* b, float drawDist, const RenderSettings& rs
     fprintf(f, "  linear used since start %lu KB, VRAM used %lu KB\n",
             (unsigned long)((g_report.linearAtStart - linearSpaceFree()) / 1024),
             (unsigned long)((g_report.vramAtStart - vramSpaceFree()) / 1024));
+    fprintf(f, "  heap (6.31): %lu KB free now, tiles kept to 3 x 3 for want of it %lu times%s, COLL in linear memory %lu times\n",
+            (unsigned long)(s.heapFree / 1024), (unsigned long)s.heapShrinks, s.heapShrunk ? " (now)" : "", (unsigned long)s.collHeapMiss);
     fprintf(f, "tile loads so far: %lu, ground shown after avg %.0f ms, max %.0f ms (request -> terrain drawn)\n", (unsigned long)s.tileLoads,
             s.tileLoads ? s.sumTileMs / s.tileLoads : 0.0, s.maxTileMs);
     fprintf(f, "  complete (every model and texture): %lu tiles, avg %.0f ms, max %.0f ms; models waiting for textures now %d\n",

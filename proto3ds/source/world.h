@@ -294,6 +294,12 @@ struct StreamStats {
     uint64_t texVramMissBytes = 0;
     uint32_t texEvicted = 0;          // 6.28: textures moved from VRAM to linear memory for a render target (3D / wide)
     u32 collHeapMiss = 0;               // COLL that did not fit in the normal heap (went to linear memory)
+    // 6.31: the normal heap (24 MB) is kept from running dry: COLL takes it only above a reserve, and under kHeapLow the wanted
+    // ring shrinks to 3 x 3 tiles (7o crashed in Stormwind at 533 yd with 944 KB left: libctru / citro3d do not survive a
+    // failed malloc)
+    u32 heapFree = 0;                   // measured once a frame (mallinfo)
+    bool heapShrunk = false;            // the ring is 3 x 3 for want of heap now
+    u32 heapShrinks = 0;                // times it happened
     // stage 6.11: buildings (placements sharing a transform) shown whole
     u32 bldgFound = 0, bldgOpenedFull = 0, bldgOpenedLate = 0;   // groups parsed / opened with every group in / opened by the timeout
     int bldgClosed = 0;                 // closed now (their groups hidden until the rest arrive)

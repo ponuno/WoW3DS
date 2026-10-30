@@ -44,6 +44,7 @@ static size_t g_farFrames = 0, g_farOverlap = 0;
 static size_t g_foFrames = 0, g_foWrong = 0, g_foHiddenFrames = 0;   // 6.29: far buildings
 static size_t g_pk[5] = {0, 0, 0, 0, 0};   // submesh problems by kind: not ready, index range, texture, vertex index, radius/position
 
+static int g_maxRingTiles = 0;   // 6.31
 int main(int argc, char** argv) {
     if (argc < 2) return 2;
     PackIndex index;
@@ -385,6 +386,7 @@ int main(int argc, char** argv) {
                 if (c.displayId == 987654321u && !c.look && view.drawn(c.guid)) ++crtProblems;
         }
         maxModels = std::max(maxModels, (size_t)streamerStats().models);
+        if (dist > 450.0f) g_maxRingTiles = std::max(g_maxRingTiles, (int)streamerReadyTiles().size());   // 6.31
         if (f % 25 == 0) {   // stage 6 (perf log): the memory walk agrees with the running texture totals
             StreamMemory m;
             streamerMemory(&m);
@@ -645,6 +647,16 @@ int main(int argc, char** argv) {
     std::printf("tile chunks: %zu checked, %zu problems\n", chunksSeen, chunkProblems);
     std::printf("buildings: %zu groups seen, %zu problems, %zu complete tiles with a closed building; found %u, opened with every group %u, late %u, closed now %d\n",
                 bldgGroups, bldgProblems, bldgCompleteClosed, s.bldgFound, s.bldgOpenedFull, s.bldgOpenedLate, s.bldgClosed);
+    {   // 6.31: the heap reserve - with little heap left (W3D_HEAP_FREE_MB) the 5 x 5 ring of the far draw distance stays 3 x 3
+        std::printf("ring at 533+ yd: at most %d tiles ready; heap shrinks %u, COLL in linear memory %u\n", g_maxRingTiles, (unsigned)s.heapShrinks,
+                    (unsigned)s.collHeapMiss);
+        if (const char* he = std::getenv("HEAP_EXPECT")) {
+            const bool small = !std::strcmp(he, "small");
+            const bool good = small ? (s.heapShrinks > 0 && g_maxRingTiles <= 9) : (s.heapShrinks == 0 && g_maxRingTiles > 9);
+            std::printf("HEAP RESERVE (%s): %s\n", he, good ? "PASS" : "FAIL");
+            if (!good) ++problems;
+        }
+    }
     bool ok = problems == 0 && leakLin == 0 && leakTex == 0 && s.tileLoads > 0 && walkBad == 0 && chunkProblems == 0 && chunksSeen > 0 && bldgProblems == 0 && bldgCompleteClosed == 0;
     std::printf("STREAMER: %s\n", ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;
