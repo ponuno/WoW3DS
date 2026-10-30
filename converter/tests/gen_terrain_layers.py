@@ -14,7 +14,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import terrain_rough as rough
 
 out = sys.argv[1]
-ROUGH = len(sys.argv) > 2 and sys.argv[2] == "rough"
+ROUGH = len(sys.argv) > 2 and sys.argv[2] in ("rough", "seams")
+# 6.30 "seams": rough ground and a patchwork of base textures (every 4x4-chunk region split into several batches, as in Durotar)
+SEAMS = len(sys.argv) > 2 and sys.argv[2] == "seams"
 
 def chunk(magic, payload):
     return magic[::-1].encode() + struct.pack("<I", len(payload)) + payload
@@ -49,6 +51,8 @@ data += chunk("MWMO", b"") + chunk("MWID", b"") + chunk("MDDF", b"") + chunk("MO
 for cy in range(16):
     for cx in range(16):
         lay = layout.get((cy, cx), [(0, None)])
+        if SEAMS:
+            lay = [((cx * 7 + cy * 3 + (cx * cy) % 5) % 4, None)]
         mcly = b""; mcal = b""
         for tex, a in lay:
             if a is None:

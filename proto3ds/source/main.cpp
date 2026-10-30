@@ -33,6 +33,7 @@
 #include "ui_style.hpp"
 #include "ui_assets.hpp"
 #include "ui_render.hpp"
+#include "crash.hpp"
 #include "perflog.hpp"
 
 #include <math.h>
@@ -559,6 +560,7 @@ static void fail(const char* msg) {
 }
 
 int main() {
+    crashInstall();   // 6.31: crash.txt on a CPU exception
     osSetSpeedupEnable(true);  // 804 MHz + L2 on New 3DS
     gfxInitDefault();
     romfsInit();
@@ -2051,6 +2053,7 @@ int main() {
                 g_kickBroken = true;
             }
         }
+        crashCheckCmdBuf();   // 6.31
         lastBegin = svcGetSystemTick();
         u64 afterWait = svcGetSystemTick();
         perf::lap(perf::kWait);

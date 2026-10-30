@@ -44,8 +44,7 @@ std::vector<W3dMat34> g_pose;   // scratch: bone matrices of the creature being 
 C3D_Mtx g_proj;
 float g_near = 1.0f, g_far = 400.0f, g_skyRadius = 300.0f;
 float g_fogX = 0.0f, g_fogY = 1.0f;   // visibility = clamp(g_fogY - dist * g_fogX, 0, 1)
-// Terrain LOD switch distances (yards from the camera to a batch's bounding sphere).
-constexpr float kLod1Dist = 40.0f, kLod2Dist = 140.0f;
+// Terrain LOD switch distances: W3D_TERRAIN_LOD1_DIST / LOD2_DIST (w3d_terrain_lod.h, by region since 6.30).
 
 // Object marker: an elongated diamond whose front tip shows the facing (model layout).
 W3dModelVertex* g_markerV = nullptr;
@@ -441,6 +440,11 @@ void drawTerrain(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, cons
         C3D_FVUnifSet(GPU_VERTEX_SHADER, g_terrainSh.uScale, h->posScale[0], h->posScale[1], h->posScale[2], W3D_TERRAIN_UV_SCALE);
         C3D_FVUnifSet(GPU_VERTEX_SHADER, g_terrainSh.uOffset, h->posOffset[0], h->posOffset[1], h->posOffset[2], 0);
         const uint16_t* idx = (const uint16_t*)(t->terr + h->offIndices);
+        // 6.30: the LOD of each region (all its batches alike: skirts are only on region borders)
+        int8_t regLod[W3D_TERRAIN_REGIONS];
+        const bool byRegion = t->batchRegion.size() == h->batchCount;
+        for (int r = 0; r < W3D_TERRAIN_REGIONS; ++r)
+            regLod[r] = byRegion && t->regions[r].used ? (int8_t)w3d_terrain_region_lod(&t->regions[r], h->origin, cam.pos) : 0;
         for (u32 i = 0; i < h->batchCount; ++i) {
             const W3dTerrainBatch& b = t->batches[i];
             float c[3], r2 = 0;
@@ -451,10 +455,14 @@ void drawTerrain(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, cons
             }
             float rad = sqrtf(r2);
             if (!fr.sphere(c, rad)) continue;
-            // LOD by distance from the camera to the batch's bounding sphere.
-            float dx = c[0] - cam.pos[0], dy = c[1] - cam.pos[1], dz = c[2] - cam.pos[2];
-            float d = sqrtf(dx * dx + dy * dy + dz * dz) - rad;
-            int lod = d < kLod1Dist ? 0 : d < kLod2Dist ? 1 : 2;
+            int lod;
+            if (byRegion) {
+                lod = regLod[t->batchRegion[i]];   // (capped by the coarsest level all the region's batches keep their ground at, 6.13)
+            } else {   // (no caps yet: the batch's own sphere)
+                float dx = c[0] - cam.pos[0], dy = c[1] - cam.pos[1], dz = c[2] - cam.pos[2];
+                float d = sqrtf(dx * dx + dy * dy + dz * dz) - rad;
+                lod = d < W3D_TERRAIN_LOD1_DIST ? 0 : d < W3D_TERRAIN_LOD2_DIST ? 1 : 2;
+            }
             if (rs.forceLod >= 0) lod = rs.forceLod;
             if (i < t->batchMaxLod.size() && lod > t->batchMaxLod[i]) lod = t->batchMaxLod[i];   // stage 6.13: no ground lost at holes
             bc.bind(0, t->ttex[b.tex0], fc);

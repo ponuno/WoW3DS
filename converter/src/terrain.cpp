@@ -397,6 +397,51 @@ bool emitTile(const Options& o, const wowee::pipeline::ADTTerrain& adt, const st
         }
     harmonizeSplats(splat, g);
 
+    // ---- 6.30: the blocks of every chunk at every LOD, first (a block of s x s vertex steps; one touching a hole is split into
+    // halves down to single steps - 6.13). Where a block meets smaller ones (in its chunk, or across the border of a neighbouring
+    // chunk at the same LOD) their corners lie on its edges: drawn as two triangles it left T-junctions there and the sky showed
+    // through. Such a block is drawn as a fan around its centre through every corner on its edges.
+    struct Block { int i, j, sz; };
+    std::vector<std::array<std::vector<Block>, W3D_TERRAIN_LODS>> blocks(256);
+    std::vector<std::array<std::vector<uint8_t>, W3D_TERRAIN_LODS>> corner(256);   // g x g: a block corner there
+    for (int cy = 0; cy < 16; ++cy)
+        for (int cx = 0; cx < 16; ++cx) {
+            const auto& ch = adt.getChunk(cx, cy);
+            if (!ch.hasHeightMap()) continue;
+            for (int lod = 0; lod < W3D_TERRAIN_LODS; ++lod) {
+                const int s = lodStep[lod];
+                auto& out = blocks[cy * 16 + cx][lod];
+                auto& cg = corner[cy * 16 + cx][lod];
+                cg.assign((size_t)g * g, 0);
+                std::function<void(int, int, int)> block = [&](int i, int j, int sz) {
+                    bool hole = false;
+                    for (int qy = j * step; qy < (j + sz) * step && !hole; ++qy)
+                        for (int qx = i * step; qx < (i + sz) * step && !hole; ++qx) hole = ch.isHole(qy, qx);
+                    if (hole) {
+                        if (sz == 1) return;
+                        const int h = sz / 2;
+                        block(i, j, h); block(i + h, j, h); block(i, j + h, h); block(i + h, j + h, h);
+                        return;
+                    }
+                    out.push_back({i, j, sz});
+                    cg[j * g + i] = cg[j * g + i + sz] = cg[(j + sz) * g + i] = cg[(j + sz) * g + i + sz] = 1;
+                };
+                for (int j = 0; j + s < g; j += s)
+                    for (int i = 0; i + s < g; i += s) block(i, j, s);
+            }
+        }
+    // a block corner at vertex (i, j) of chunk (cx, cy) or at the same place of a neighbouring chunk of this tile
+    auto cornerAt = [&](int cx, int cy, int lod, int i, int j) {
+        if (corner[cy * 16 + cx][lod][j * g + i]) return true;
+        auto at = [&](int nx, int ny, int ni, int nj) {
+            if (nx < 0 || ny < 0 || nx > 15 || ny > 15) return false;
+            const auto& c = corner[ny * 16 + nx][lod];
+            return !c.empty() && c[nj * g + ni];
+        };
+        return (i == 0 && at(cx - 1, cy, g - 1, j)) || (i == g - 1 && at(cx + 1, cy, 0, j)) ||
+               (j == 0 && at(cx, cy - 1, i, g - 1)) || (j == g - 1 && at(cx, cy + 1, i, 0));
+    };
+
     for (int cy = 0; cy < 16; ++cy)
         for (int cx = 0; cx < 16; ++cx) {
             const auto& ch = adt.getChunk(cx, cy);
@@ -461,10 +506,24 @@ bool emitTile(const Options& o, const wowee::pipeline::ADTTerrain& adt, const st
             };
             for (int e = 0; e < 4; ++e) {
                 if (!onBorder[e]) continue;
+                // 6.30: deep enough for the largest step between this edge at one LOD and at another (the neighbouring region may be
+                // drawn coarser or finer): on steep hills a fixed 4 yd left gaps of up to 8 yd at the region borders
+                float dev = 0;
+                for (int lod = 1; lod < W3D_TERRAIN_LODS; ++lod) {
+                    const int s = lodStep[lod];
+                    for (int k = 0; k < g; ++k) {
+                        const int a = (k / s) * s, b2 = std::min(a + s, g - 1);
+                        if (a == b2) continue;
+                        const float ha = verts[edgeVert(e, a)].p[2], hb = verts[edgeVert(e, b2)].p[2];
+                        const float chord = ha + (hb - ha) * (float)(k - a) / (float)(b2 - a);
+                        dev = std::max(dev, std::fabs(verts[edgeVert(e, k)].p[2] - chord));
+                    }
+                }
+                const float depth = std::max(kSkirtDepth, dev + 1.0f);
                 skirtBase[e] = (uint32_t)verts.size();
                 for (int k = 0; k < g; ++k) {
                     TVert v = verts[edgeVert(e, k)];
-                    v.p[2] -= kSkirtDepth;
+                    v.p[2] -= depth;
                     verts.push_back(v);
                 }
             }
@@ -472,18 +531,8 @@ bool emitTile(const Options& o, const wowee::pipeline::ADTTerrain& adt, const st
             LodLists& L = lists[{(cy / 4) * 4 + cx / 4, t0, t1, t2}];
             for (int lod = 0; lod < W3D_TERRAIN_LODS; ++lod) {
                 const int s = lodStep[lod];
-                // A block of s x s vertex steps; one touching a hole is split into halves down to single steps (6.13: it was
-                // dropped whole - beyond 140 yd the ground around every building's footprint vanished, objects hung in the air)
-                std::function<void(int, int, int)> block = [&](int i, int j, int sz) {
-                    bool hole = false;
-                    for (int qy = j * step; qy < (j + sz) * step && !hole; ++qy)
-                        for (int qx = i * step; qx < (i + sz) * step && !hole; ++qx) hole = ch.isHole(qy, qx);
-                    if (hole) {
-                        if (sz == 1) return;
-                        const int h = sz / 2;
-                        block(i, j, h); block(i + h, j, h); block(i, j + h, h); block(i + h, j + h, h);
-                        return;
-                    }
+                for (const Block& bk : blocks[cy * 16 + cx][lod]) {
+                    const int i = bk.i, j = bk.j, sz = bk.sz;
                     uint32_t a = base + j * g + i, b = a + sz, c = a + sz * g, d = c + sz;
                     if (centers && lod == 0 && sz == 1) {   // four triangles around the centre, as the game draws the square
                         const uint32_t m = centerBase + j * (g - 1) + i;
@@ -491,13 +540,33 @@ bool emitTile(const Options& o, const wowee::pipeline::ADTTerrain& adt, const st
                         pushTri(L[lod], {m, b, d});
                         pushTri(L[lod], {m, d, c});
                         pushTri(L[lod], {m, c, a});
-                        return;
+                        continue;
                     }
-                    pushTri(L[lod], {a, c, b});
-                    pushTri(L[lod], {b, c, d});
-                };
-                for (int j = 0; j + s < g; j += s)
-                    for (int i = 0; i + s < g; i += s) block(i, j, s);
+                    // 6.30: the corners of smaller blocks on its edges (walked round: (i, j) -> (i + sz, j) -> (i + sz, j + sz) -> (i, j + sz))
+                    std::vector<uint32_t> ring;
+                    bool tj = false;
+                    if (sz > 1) {
+                        const int di[4] = {1, 0, -1, 0}, dj[4] = {0, 1, 0, -1};
+                        int pi = i, pj = j;
+                        for (int side = 0; side < 4; ++side)
+                            for (int k = 0; k < sz; ++k) {
+                                const bool isCorner = k == 0;
+                                if (isCorner || cornerAt(cx, cy, lod, pi, pj)) {
+                                    ring.push_back(base + (uint32_t)(pj * g + pi));
+                                    tj |= !isCorner;
+                                }
+                                pi += di[side];
+                                pj += dj[side];
+                            }
+                    }
+                    if (!tj) {
+                        pushTri(L[lod], {a, c, b});
+                        pushTri(L[lod], {b, c, d});
+                        continue;
+                    }
+                    const uint32_t m = base + (uint32_t)((j + sz / 2) * g + i + sz / 2);
+                    for (size_t k = 0; k < ring.size(); ++k) pushTri(L[lod], {m, ring[k], ring[(k + 1) % ring.size()]});
+                }
                 for (int e = 0; e < 4; ++e) {
                     if (!onBorder[e]) continue;
                     for (int k = 0; k + s < g; k += s) {

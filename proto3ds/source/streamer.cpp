@@ -18,6 +18,7 @@
 #include "w3d_liquid.h"
 #include "w3d_farlod.h"
 #include "w3d_farobj.h"
+#include "crash.hpp"
 
 #include <fcntl.h>
 #include <math.h>
@@ -388,32 +389,13 @@ void buildHeightField(Tile* t) {
 }
 
 // Stage 6.13: a terrain batch's LOD 2 may cover less ground than its LOD 1 (older packs: a 16-yd block touching a hole was
-// dropped whole). Compares the ground area (x/y, the skirts are vertical and add nothing) of each level; where a coarser one
-// lost more than 1% the batch is drawn no coarser than the finer one.
-static double terrainArea(const W3dTerrainVertex* v, uint32_t vcount, const uint16_t* idx, uint32_t first, uint32_t count) {
-    double a = 0;
-    for (uint32_t k = first; k + 2 < first + count; k += 3) {
-        const uint16_t i0 = idx[k], i1 = idx[k + 1], i2 = idx[k + 2];
-        if (i0 >= vcount || i1 >= vcount || i2 >= vcount) continue;
-        const double ax = v[i1].x - v[i0].x, ay = v[i1].y - v[i0].y, bx = v[i2].x - v[i0].x, by = v[i2].y - v[i0].y;
-        a += fabs(ax * by - ay * bx);
-    }
-    return a;
-}
+// dropped whole): such a batch is drawn no coarser than the finer level. 6.30: and the regions the LOD is picked by.
 void terrainLodCaps(Tile* t) {
     const W3dTerrainHeader* th = (const W3dTerrainHeader*)t->terr;
-    const W3dTerrainBatch* b = (const W3dTerrainBatch*)(t->terr + th->offBatches);
-    const W3dTerrainVertex* v = (const W3dTerrainVertex*)(t->terr + th->offVertices);
-    const uint16_t* idx = (const uint16_t*)(t->terr + th->offIndices);
     t->batchMaxLod.assign(th->batchCount, W3D_TERRAIN_LODS - 1);
-    for (u32 i = 0; i < th->batchCount; ++i) {
-        double prev = terrainArea(v, th->vertexCount, idx, b[i].firstIndex[0], b[i].indexCount[0]);
-        for (int l = 1; l < W3D_TERRAIN_LODS; ++l) {
-            const double a = terrainArea(v, th->vertexCount, idx, b[i].firstIndex[l], b[i].indexCount[l]);
-            if (a < prev * 0.99) { t->batchMaxLod[i] = (uint8_t)(l - 1); break; }
-            prev = a;
-        }
-    }
+    t->batchRegion.assign(th->batchCount, 0);
+    w3d_terrain_batch_max_lod(t->terr, t->batchMaxLod.data());
+    w3d_terrain_regions(t->terr, t->batchMaxLod.data(), t->batchRegion.data(), t->regions);
 }
 
 void runJob(Job* j) {
@@ -441,6 +423,9 @@ void runJob(Job* j) {
 }
 
 void workerMain(void*) {
+#ifndef W3D_PC_TEST
+    crashInstall();   // 6.31: crash.txt if this thread crashes
+#endif
     while (!g_quit) {
         LightEvent_Wait(&g_wake);
         for (;;) {

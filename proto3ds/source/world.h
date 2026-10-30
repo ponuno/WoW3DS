@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "w3d_format.h"
+#include "w3d_terrain_lod.h"
 #include "w3d_character.h"
 #include "w3d_fx.h"
 #include "hud.hpp"
@@ -191,6 +192,10 @@ struct Tile {
     // every 16-yd LOD-2 block that touched a hole (a building's footprint) - beyond 140 yd the ground around Stormwind's houses
     // vanished and lamps / trees hung in the air over the sky. Filled by the IO thread with the height field.
     std::vector<uint8_t> batchMaxLod;
+    // Stage 6.30: every batch of a 4x4-chunk region is drawn at the region's LOD (w3d_terrain_lod.h; skirts are only on region
+    // borders - per batch, mixed ground left cracks between chunks).
+    std::vector<uint8_t> batchRegion;
+    W3dTerrainRegion regions[W3D_TERRAIN_REGIONS];
     // water (optional, linear memory)
     uint8_t* water = nullptr;
     const W3dWaterHeader* wh = nullptr;

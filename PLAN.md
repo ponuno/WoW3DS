@@ -2578,3 +2578,34 @@ WoW 1.12 has no far versions of WMOs: buildings appeared only when their tile an
   client's tile builder vs w3d_farobj_place, palette, --no-far-objects), run_holes.sh "FAR BUILDINGS (streamer)" (drawn while not
   shown, never from a tile that shows all its buildings, buffers alive under ASan). ARM compile clean.
 - Not seen on a console; trees / large doodads are not covered (next: impostors).
+
+## Part 76 — seams in the ground between terrain LODs (6.30)
+
+Console photo (Durotar): short white dashes on the ground at 40-200 yd - the sky through cracks. `converter/tests/terrain_seam_test.cpp`
+(hills + a patchwork of textures + holes, `gen_terrain_layers.py seams`) found three causes:
+- **The client** picked each batch's LOD by its own box, but a batch is (4x4-chunk region, texture triple): one region of mixed
+  ground is several batches, and skirts are only on region borders. Two chunks side by side got LOD 1 and LOD 2: T-junctions with
+  nothing under them (12368 crack points in the test, worst 8.9 yd). Now `common/w3d_terrain_lod.h`: the LOD of a region (union of
+  its batches' boxes, same 40 / 140 yd), capped by the coarsest level every batch of it keeps its ground at (6.13 caps).
+  `Tile::batchRegion / regions` filled by the IO thread (`terrainLodCaps`). Works with old packs (no reconversion for this part).
+- **Skirts 4 yd deep** were too short on steep hills at region borders (gaps up to 8.4 yd): the converter now makes each edge's
+  skirt as deep as the largest step between its LOD levels + 1 yd (at least 4).
+- **Blocks split at holes** (6.13) left T-junctions inside the chunk and against the neighbouring chunk: a block with smaller
+  blocks' corners on its edges is now a fan around its centre through them (`terrain.cpp`, blocks of all chunks first).
+- Test: `run_terrain_tests.sh` - region choice 0 cracks over 121 cameras; negative control: the old per-batch choice still cracks.
+  `run_ground_tests`, `run_far_tests`, `run_holes`, `run_wmo_tests`, `run_pool_tests` green; ARM compile clean.
+- User: reconvert (all.bat with the 7p converter) for the skirts and the hole fans; the client part works at once.
+
+## Part 77 — crash at 533 yd in Stormwind (6.31, diagnostics)
+
+Luma screen (7o): data abort, write to 0x301BFB98 = R2 + R0 * 4. With the user's w3dproto.elf (llvm-symbolizer): PC in libctru
+`GPUCMD_Add` (gpu.c:33), from `shaderProgramConfigure` <- `C3Di_UpdateContext` (a shader switch). libctru's size check passed
+(no svcBreak: LR still the caller), so the command buffer did not overflow: gpuCmdBuf itself pointed at a 1 MB section the process
+does not have mapped ("Translation - Section"). Cause not found from the registers (citro3d's 2 MB buffer from C3D_Init; nothing of
+ours sets the GPU command buffer; GPUCMD_Split keeps pointer and size consistent).
+- `proto3ds/source/crash.cpp`: libctru `threadOnException` handler (main thread + streamer worker): on a CPU exception it writes
+  `sdmc:/3ds/w3dproto/crash.txt` (fault, registers, the main thread's last perf mark, frames, gpuCmdBuf / size / offset against
+  citro3d's buffer, linear heap and heap ranges, 64 stack words for llvm-symbolizer), then svcBreak. No heap use in the handler.
+- `crashCheckCmdBuf()` every frame after C3D_FrameBegin: libctru's pointer / size must be citro3d's buffer; else one event in
+  perf_events.txt (corruption found the frame it happens, not at the crash).
+- Needed from the user: crash.txt, perf_events.txt / perf.csv / report.txt of that session (perf_prev_* if the game was restarted).
