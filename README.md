@@ -34,7 +34,7 @@ server).
 
 Not done yet: Warden (servers that require it will drop the connection), a lot of other minor HUD and UI stuff, a lot of not so minor gameplay stuff
 
-## Installation (the release `.3dsx` + the converter pack)
+## Installation (the release `cia` + the converter pack)
 
 ### What you need
 
