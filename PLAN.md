@@ -2734,3 +2734,24 @@ triangles. Water to the horizon up to 15k triangles. (perf.csv: login + 30 s of 
   longer counts it as detailed). Horizon off: no change (such tiles were beyond the draw distance anyway).
 - Test: run_holes "FAR": with detailDist 40 yd, 150 far draws over loaded tiles wholly beyond it, 0 for a tile within it
   (the camera's); the old checks unchanged. ARM clean. Not measured on the console yet.
+
+## Part 88 — textures broken on entering the world: libctru's VRAM allocator overwritten (6.35)
+
+User (7z CIA): textures broken right on entering the world. report.txt "VRAM used 4194098 KB" (negative: more free than at the
+start). perf.csv: at 16.7 s (character screen) VRAM free jumped 1 KB -> 5784 KB while the streamer still had 648 textures /
+4869 KB in VRAM - free + booked > the 6 MB there is: new textures went over live ones. Not a double free (libctru's vramFree
+ignores unknown pointers) - the allocator's state itself was overwritten.
+The .bss of the user's .elf: citro3d's `C3D_FVUnif` (2 x 96 x 16 bytes, 0x32A154..0x32AD54) is followed directly by libctru's
+sLinearPool / sAddrMap / sVramPoolA/B / sAddrMap (0x32AD58..0x32AD8C), console state, gfx state and gpuCmdBuf / Size / Offset
+(0x32AE78..0x32AE80). The 533-yd crash (Part 77) wrote through gpuCmdBuf = 0x301B0210 - as a float 5.6e-10, a typical bone
+matrix element. The only uniform upload with a data-driven length is the skinning palette (render.cpp, C3D_FVUnifWritePtr with
+p.count * 3 from the CMDL blob; the shader has bones[72] = 24 bones): a palette count over 24 (a damaged / stale blob, or a
+blob read after it was freed) writes bone matrices over exactly these globals. Most likely cause (not proven on the console).
+- `w3d_creature_valid` (w3d_format.h): submeshes / palettes / textures / indices inside the blob, every palette <= 24 bones,
+  submesh ranges inside the indices. The streamer refuses a CMDL that fails it (not drawn; StreamStats badCreatureModels /
+  lastBadCreature -> perf_events "CREATURE MODEL REFUSED").
+- render.cpp: the palette upload is clamped to W3D_PALETTE_BONES whatever the blob says.
+- perflog: "VRAM BOOKS BROKEN" event once when free + textures + targets + portraits > 6 MB + 64 KB (with the main thread's mark).
+- Tests: creature_valid_test in run_player_tests.sh (converter CMDLs valid; 25 / 65535 bones refused); check_glue.py's
+  "zone names" check fixed (glue.txt Z lines have had a 4th field since 5.45 - it failed before this change). run_pool_tests
+  (streamer with creatures) green; ARM clean.

@@ -437,6 +437,24 @@ typedef struct {
     uint32_t offAttach;
     uint32_t lodCount, offLods;   // stage 6.12: W3dSubLod[submeshCount] (absent in older blobs: offTex < sizeof)
 } W3dCreatureHeader;
+// 6.35: the parts the renderer indexes without further checks lie inside the blob, every bone palette has at most
+// W3D_PALETTE_BONES bones (the skinning shader has room for that many: a larger count wrote bone matrices past citro3d's
+// uniform array, over libctru's allocators and the GPU command buffer pointer) and every submesh names a palette.
+static inline int w3d_creature_valid(const uint8_t* blob, uint32_t size) {
+    if (!blob || size < sizeof(W3dCreatureHeader)) return 0;
+    const W3dCreatureHeader* h = (const W3dCreatureHeader*)blob;
+    if ((uint64_t)h->offSubmeshes + (uint64_t)h->submeshCount * sizeof(W3dSkinSubmesh) > size) return 0;
+    if ((uint64_t)h->offPalettes + (uint64_t)h->paletteCount * sizeof(W3dBonePalette) > size) return 0;
+    if ((uint64_t)h->offTex + (uint64_t)h->texCount * sizeof(W3dCreatureTex) > size) return 0;
+    if ((uint64_t)h->offIndices + (uint64_t)h->indexCount * 2u > size) return 0;
+    const W3dBonePalette* p = (const W3dBonePalette*)(blob + h->offPalettes);
+    for (uint32_t i = 0; i < h->paletteCount; ++i)
+        if (p[i].count > W3D_PALETTE_BONES) return 0;
+    const W3dSkinSubmesh* s = (const W3dSkinSubmesh*)(blob + h->offSubmeshes);
+    for (uint32_t i = 0; i < h->submeshCount; ++i)
+        if ((uint64_t)s[i].firstIndex + s[i].indexCount > h->indexCount) return 0;
+    return 1;
+}
 static inline const W3dSubLod* w3d_creature_lods(const uint8_t* blob, uint32_t size) {
     const W3dCreatureHeader* h = (const W3dCreatureHeader*)blob;
     if (size < sizeof(W3dCreatureHeader) || h->offTex < sizeof(W3dCreatureHeader) || h->offSubmeshes < sizeof(W3dCreatureHeader))

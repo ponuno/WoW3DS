@@ -1120,8 +1120,11 @@ void drawCreatures(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, co
             }
             if (m.palette != curPal && m.palette < h->paletteCount) {
                 const W3dBonePalette& p = pal[m.palette];
-                C3D_FVec* u = C3D_FVUnifWritePtr(GPU_VERTEX_SHADER, g_skinSh.uBones, p.count * 3);
-                for (int b = 0; b < p.count; ++b) {
+                // 6.35: never more than the shader's bones[] (W3D_PALETTE_BONES * 3 registers) - past it citro3d's
+                // uniform array ends and libctru's allocators and the GPU command buffer pointer follow in memory
+                const int nb = p.count < W3D_PALETTE_BONES ? p.count : W3D_PALETTE_BONES;
+                C3D_FVec* u = C3D_FVUnifWritePtr(GPU_VERTEX_SHADER, g_skinSh.uBones, nb * 3);
+                for (int b = 0; b < nb; ++b) {
                     const float* M = P[p.bones[b] < h->boneCount ? p.bones[b] : 0].m;
                     for (int r = 0; r < 3; ++r) {
                         C3D_FVec& v = u[b * 3 + r];

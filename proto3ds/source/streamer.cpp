@@ -1185,6 +1185,12 @@ void onJobDone(Job* j) {
             g_stats.geomBytes += m->size;
             if (!j->ok) { m->h = nullptr; break; }
             GSPGPU_FlushDataCache(m->blob, m->size);
+            if (!w3d_creature_valid(m->blob, m->size)) {   // 6.35: never drawn (its palettes could write past the uniforms)
+                m->h = nullptr;
+                ++g_stats.badCreatureModels;
+                g_stats.lastBadCreature = m->id;
+                break;
+            }
             m->h = (const W3dCreatureHeader*)m->blob;
             m->lods = w3d_creature_lods(m->blob, m->size);   // stage 6.12
             const W3dCreatureTex* ct = (const W3dCreatureTex*)(m->blob + m->h->offTex);

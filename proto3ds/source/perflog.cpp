@@ -834,6 +834,24 @@ void second(const Context& c) {
         event("HEAP LOW: %lu KB of %lu KB left (COLL %lu KB, heights %lu KB, instances %lu KB, other %lu KB)", (unsigned long)(heapFree / 1024),
               (unsigned long)(__ctru_heap_size / 1024), (unsigned long)(m.collHeapBytes / 1024), (unsigned long)(m.heightBytes / 1024),
               (unsigned long)(m.instanceBytes / 1024), (unsigned long)((heapUsed > heapKnown ? heapUsed - heapKnown : 0) / 1024));
+    {   // 6.35: CMDL blobs refused (a bone palette over 24 bones or parts outside the blob)
+        static u32 bad = 0;
+        if (s.badCreatureModels != bad) {
+            bad = s.badCreatureModels;
+            event("CREATURE MODEL REFUSED: %lu so far, last id %08lx (bad bone palette / offsets: not drawn - reconvert, or the pack is damaged)",
+                  (unsigned long)bad, (unsigned long)s.lastBadCreature);
+        }
+        // 6.35: VRAM's books - free + textures + render targets + portraits cannot exceed the 6 MB: if they do, libctru's VRAM
+        // allocator was overwritten (7z: 5.7 MB "freed" at once on the character screen, then textures drawn over each other)
+        static bool vramBroken = false;
+        const u32 booked = vFree + texVram + c.vramTargets + c.vramPortraits;
+        if (!vramBroken && booked > kVramSize + (64u << 10)) {
+            vramBroken = true;
+            event("VRAM BOOKS BROKEN: %lu KB free + %lu KB textures + %lu KB targets + %lu KB portraits > %lu KB - memory corruption (main thread at \"%s\")",
+                  (unsigned long)(vFree / 1024), (unsigned long)(texVram / 1024), (unsigned long)(c.vramTargets / 1024), (unsigned long)(c.vramPortraits / 1024),
+                  (unsigned long)(kVramSize / 1024), g_state.where ? g_state.where : "?");
+        }
+    }
     {   // 6.31: the streamer's ring shrinks for want of heap
         static bool shrunk = false;
         if (s.heapShrunk != shrunk) {

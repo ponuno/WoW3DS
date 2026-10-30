@@ -303,6 +303,8 @@ struct StreamStats {
     uint64_t texVramMissBytes = 0;
     uint32_t texEvicted = 0;          // 6.28: textures moved from VRAM to linear memory for a render target (3D / wide)
     u32 collHeapMiss = 0;               // COLL that did not fit in the normal heap (went to linear memory)
+    u32 badCreatureModels = 0;          // 6.35: CMDL blobs that failed w3d_creature_valid (not drawn)
+    u32 lastBadCreature = 0;            // ... the last one's id
     // 6.31: the normal heap (24 MB) is kept from running dry: COLL takes it only above a reserve, and under kHeapLow the wanted
     // ring shrinks to 3 x 3 tiles (7o crashed in Stormwind at 533 yd with 944 KB left: libctru / citro3d do not survive a
     // failed malloc)

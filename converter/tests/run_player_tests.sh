@@ -19,6 +19,9 @@ grep -q "players: 1 race/sex models (15 failed), 8 CharSections rows, 7 layers (
 python3 "$T/check_creatures.py" "$OUT/p.w3dp" "$OUT/crt.json" | tail -1
 python3 "$T/check_items.py" "$OUT/p.w3dp" "$OUT/crt.json" | tail -1   # worn items: ITEM / CIMG / MODL, attachments
 python3 "$T/check_glue.py" "$OUT/p.w3dp" "$OUT/crt.json" "$OUT/glue.txt"   # stage 5.29: login / character scenes, glue.txt
+# 6.35: every CMDL passes w3d_creature_valid (the client refuses the rest); a palette over 24 bones is refused
+g++ -std=c++17 -O1 -g -fsanitize=address,undefined -I"$T/../../common" "$T/creature_valid_test.cpp" -o "$OUT/creature_valid_test"
+"$OUT/creature_valid_test" "$OUT/p.w3dp" | tail -1
 g++ -std=c++20 -O1 -g -fsanitize=address,undefined -I"$T/../../common" "$T/char_test.cpp" -o "$OUT/char_test"
 "$OUT/char_test" "$OUT/p.w3dp" "$OUT/crt.json" "$OUT/prev"
 "$B/creature_test" | tail -1
