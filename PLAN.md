@@ -2695,3 +2695,21 @@ placeWmo writes them right after its groups) were ordinary instances, drawn as s
   nothing else, no owner points at a missing building or a building group. ARM compile clean.
 - Open: the slow appearance of the city itself (tile complete avg 7 s / max 21 s in the 7o report) - needs a report / perf log
   from the CIA; the far shells (6.29) cover it only in packs converted with the 7o+ converter.
+
+## Part 85 — the horizon: ground and building shells past the draw distance (6.34)
+
+CIA logs (178 MB: heap 56868 KB, linear 122880 KB; low points 35.6 MB heap / 47 MB linear free): everything within the draw
+distance (250) was loaded 1-2 s after entering the world; past it nothing was drawn at all (far ground / shells were limited to
+the draw distance too) - the city "loads only when you come close". Now:
+- render.cpp: `kHorizonDist` 1200 yd, `g_horizon = max(drawDist, 1200)`; the far plane at horizon * 1.05 + 30 (24-bit depth,
+  ~0.1 yd steps out there); fog from 45% of the draw distance to the horizon (was 55%..100% of the draw distance).
+  `Frustum::horizon` / `sphereFar` (side planes + the horizon): the loaded tiles' terrain batches (LOD 2 out there) and water,
+  the far ground (streamerFarDraws to the horizon) and the far shells. Real buildings / doodads keep the draw distance.
+  Underwater the horizon is the water's fog distance.
+- streamer.cpp `streamerFarObjectDraws(cam, horizon, detailDist, ...)`: on a loaded tile a building whose centre is beyond
+  detailDist (the draw distance) is drawn as its shell (overlap with a few real groups rather than a gap); a tile all beyond it:
+  every shell. kFarCache 128, kFarObjCache 160 (up to 9 x 9 / 11 x 11 tiles to the horizon).
+- Tests: run_holes "far buildings beyond the detail distance": ~630 shell draws from loaded tiles with detailDist 1 yd; the old
+  "never over a shown building" check (detailDist huge) 0 wrong. The "drawn before the tile loads" count races the palette's
+  read (0 in some runs, before this change too) - no longer required. ARM compile clean.
+- Not seen on a console: the GPU cost (up to ~16 far ground tiles in view, 1536 triangles each), the fog look, z-fighting.

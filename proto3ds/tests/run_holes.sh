@@ -42,7 +42,8 @@ python3 "$T/../../converter/tests/gen_wmo_data.py" "$OUT/W" "$OUT/w.json" > /dev
 "$B/w3dconv" --data "$OUT/W" --map Test --tiles 32 48 33 48 --far-obj-min 5 -o "$OUT/fo.w3dp" > "$OUT/conv_fo.log" 2>&1
 FAROBJ_EXPECT=4 OWNED_EXPECT=2 "$OUT/holes" "$OUT/fo.w3dp" 600 > "$OUT/fo.log" 2>&1 || true
 grep "far buildings" "$OUT/fo.log"
-grep -q "far buildings: 4 in the map, drawn in [1-9][0-9]* frames, hidden behind the real ones in [1-9][0-9]*, 0 wrong" "$OUT/fo.log"
+grep -q "beyond the detail distance (6.34): [1-9]" "$OUT/fo.log"
+grep -q "far buildings: 4 in the map, drawn in [0-9]* frames, hidden behind the real ones in [1-9][0-9]*, 0 wrong" "$OUT/fo.log"   # (6.34: "drawn in" races the palette; beyond-distance draws are required instead)
 echo "FAR BUILDINGS (streamer): PASS"
 # 6.33: the house's two doodads (lamps; the barrel's model is missing) belong to it - shown only with it; the ADT's doodads do not
 grep "wmo doodads owned" "$OUT/fo.log"

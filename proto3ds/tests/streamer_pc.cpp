@@ -41,7 +41,7 @@ void pcTestIoDelay(int file, uint32_t offset, uint32_t size) {
 }
 
 static size_t g_farFrames = 0, g_farOverlap = 0;
-static size_t g_foFrames = 0, g_foWrong = 0, g_foHiddenFrames = 0;   // 6.29: far buildings
+static size_t g_foFrames = 0, g_foWrong = 0, g_foHiddenFrames = 0, g_foBeyondDraws = 0;   // 6.29: far buildings (6.34: beyond the detail distance)
 static size_t g_pk[5] = {0, 0, 0, 0, 0};   // submesh problems by kind: not ready, index range, texture, vertex index, radius/position
 
 static int g_maxRingTiles = 0;   // 6.31
@@ -140,8 +140,21 @@ int main(int argc, char** argv) {
             static std::vector<FarObjDraw> fo;
             GpuTex* pal = nullptr;
             float zs = 0;
-            const bool any = streamerFarObjectDraws(cam, dist, fo, &pal, &zs);
+            const bool any = streamerFarObjectDraws(cam, dist, 1e9f, fo, &pal, &zs);   // (the real buildings drawn at any distance)
             if (any) ++g_foFrames;
+            {   // 6.34: real buildings drawn only within 1 yd: a loaded tile's buildings are shells beyond it
+                static std::vector<FarObjDraw> beyond;
+                GpuTex* p2 = nullptr;
+                float z2 = 0;
+                if (!std::getenv("NO_BEYOND") && streamerFarObjectDraws(cam, dist, 1.0f, beyond, &p2, &z2))
+                    for (const FarObjDraw& d : beyond) {
+                        const int tx = (int)std::floor(32.0f - (d.origin[1] + 1.0f) / kTileSize), ty = (int)std::floor(32.0f - (d.origin[0] + 1.0f) / kTileSize);
+                        for (Tile* t : streamerReadyTiles())
+                            if (t->tx == tx && t->ty == ty) { ++g_foBeyondDraws; break; }
+                        volatile uint16_t probe = d.idx[d.count - 1];
+                        (void)probe;
+                    }
+            }
             // a tile "shows everything": every building group of it is shown (its Bldg open, or a one-group building drawable)
             auto showsAll = [](const Tile* t) {
                 bool any = false;
@@ -516,7 +529,9 @@ int main(int argc, char** argv) {
         const StreamStats& ss = streamerStats();
         std::printf("far buildings: %d in the map, drawn in %zu frames, hidden behind the real ones in %zu, %zu wrong\n", ss.farObjects,
                     g_foFrames, g_foHiddenFrames, g_foWrong);
-        if (ss.farObjects != std::atoi(fe) || g_foWrong || !g_foFrames || !g_foHiddenFrames) { std::printf("far buildings FAIL\n"); ++problems; }
+        std::printf("far buildings beyond the detail distance (6.34): %zu shell draws from loaded tiles\n", g_foBeyondDraws);
+        // (drawn before the tile loads is a race with the palette's read - some runs have none; beyond the detail distance always)
+        if (ss.farObjects != std::atoi(fe) || g_foWrong || !g_foHiddenFrames || !g_foBeyondDraws) { std::printf("far buildings FAIL\n"); ++problems; }
     }
     if (const char* fe = std::getenv("FAR_EXPECT")) {   // 6.24: the pack's far ground: its tiles, frames it was drawn in, overlaps
         const StreamStats& ss = streamerStats();

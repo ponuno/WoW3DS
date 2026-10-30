@@ -358,7 +358,9 @@ struct FarDraw { const W3dTerrainVertex* verts; float origin[3]; float center[3]
 // 6.29: the far buildings (w3d_farobj.h): per tile, one buffer of every shell; a draw is a range of its indices (the whole tile
 // while it is not loaded, else the buildings it does not show yet). x / y scale W3D_FAROBJ_XY_SCALE, z zScale.
 struct FarObjDraw { const W3dTerrainVertex* verts; const uint16_t* idx; uint32_t count; float origin[3]; float center[3]; float radius; };
-bool streamerFarObjectDraws(const float cam[3], float maxDist, std::vector<FarObjDraw>& out, GpuTex** palette, float* zScale);
+// 6.34: maxDist = the horizon (far shells are drawn that far); detailDist = how far the real buildings are drawn - beyond it a
+// loaded tile's buildings are shells too
+bool streamerFarObjectDraws(const float cam[3], float maxDist, float detailDist, std::vector<FarObjDraw>& out, GpuTex** palette, float* zScale);
 bool streamerFarDraws(const float cam[3], float maxDist, std::vector<FarDraw>& out, GpuTex** atlas, const uint16_t** indices,
                       float* zScale);
 const StreamStats& streamerStats();

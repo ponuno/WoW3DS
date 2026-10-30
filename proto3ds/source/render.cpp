@@ -43,6 +43,10 @@ C3D_AttrInfo g_terrainAttr, g_modelAttr, g_skinAttr, g_fxAttr;
 std::vector<W3dMat34> g_pose;   // scratch: bone matrices of the creature being drawn
 C3D_Mtx g_proj;
 float g_near = 1.0f, g_far = 400.0f, g_skyRadius = 300.0f;
+// 6.34: the horizon - the ground (detailed of the loaded tiles, far of the others) and the far buildings' shells are drawn this
+// far, past the draw distance (which stays the distance of the real buildings and doodads); the fog ends there
+constexpr float kHorizonDist = 1200.0f;
+float g_horizon = kHorizonDist;
 float g_fogX = 0.0f, g_fogY = 1.0f;   // visibility = clamp(g_fogY - dist * g_fogX, 0, 1)
 // Terrain LOD switch distances: W3D_TERRAIN_LOD1_DIST / LOD2_DIST (w3d_terrain_lod.h, by region since 6.30).
 
@@ -220,6 +224,7 @@ struct Frustum {
     float n[6][3];
     float d[6];
     float maxDist;
+    float horizon;   // 6.34
     void build(const Camera& c, float nearZ) {
         memcpy(cam, c.pos, sizeof cam);
         float f[3];
@@ -244,6 +249,16 @@ struct Frustum {
         d[4] = -nearZ;
         d[5] = c.drawDist;
         maxDist = c.drawDist;
+        horizon = std::max(c.drawDist, g_horizon);
+    }
+    // 6.34: the side planes and the horizon (the ground and the far shells)
+    bool sphereFar(const float c[3], float rad) const {
+        float p[3] = {c[0] - cam[0], c[1] - cam[1], c[2] - cam[2]};
+        float lim = horizon + rad;
+        if (p[0] * p[0] + p[1] * p[1] + p[2] * p[2] > lim * lim) return false;
+        for (int i = 0; i < 5; ++i)
+            if (n[i][0] * p[0] + n[i][1] * p[1] + n[i][2] * p[2] + d[i] < -rad) return false;
+        return true;
     }
     bool sphere(const float c[3], float rad) const {
         float p[3] = {c[0] - cam[0], c[1] - cam[1], c[2] - cam[2]};
@@ -375,12 +390,12 @@ void drawTerrain(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, cons
         GpuTex* atlas = nullptr;
         const uint16_t* fidx = nullptr;
         float zs = 0.25f;
-        if (streamerFarDraws(cam.pos, fr.maxDist, far, &atlas, &fidx, &zs)) {
+        if (streamerFarDraws(cam.pos, fr.horizon, far, &atlas, &fidx, &zs)) {
             setTerrainEnv(2);
             bc.bind(0, atlas, fc);
             bc.bind(1, atlas, fc);
             for (const FarDraw& d : far) {
-                if (!fr.sphere(d.center, d.radius)) continue;
+                if (!fr.sphereFar(d.center, d.radius)) continue;
                 C3D_BufInfo* buf = C3D_GetBufInfo();
                 BufInfo_Init(buf);
                 BufInfo_Add(buf, d.verts, sizeof(W3dTerrainVertex), 3, 0x210);
@@ -401,14 +416,14 @@ void drawTerrain(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, cons
         static std::vector<FarObjDraw> fo;
         GpuTex* pal = nullptr;
         float zs = 0.25f;
-        if (streamerFarObjectDraws(cam.pos, fr.maxDist, fo, &pal, &zs)) {
+        if (streamerFarObjectDraws(cam.pos, fr.horizon, fr.maxDist, fo, &pal, &zs)) {
             setTerrainEnv(2);
             bc.bind(0, pal, fc);
             bc.bind(1, pal, fc);
             C3D_CullFace(GPU_CULL_NONE);
             const W3dTerrainVertex* boundV = nullptr;
             for (const FarObjDraw& d : fo) {
-                if (!fr.sphere(d.center, d.radius)) continue;
+                if (!fr.sphereFar(d.center, d.radius)) continue;
                 if (d.verts != boundV) {
                     C3D_BufInfo* buf = C3D_GetBufInfo();
                     BufInfo_Init(buf);
@@ -454,7 +469,7 @@ void drawTerrain(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, cons
                 r2 += e * e;
             }
             float rad = sqrtf(r2);
-            if (!fr.sphere(c, rad)) continue;
+            if (!fr.sphereFar(c, rad)) continue;   // (6.34: the loaded tiles' ground to the horizon, LOD 2 out there)
             int lod;
             if (byRegion) {
                 lod = regLod[t->batchRegion[i]];   // (capped by the coarsest level all the region's batches keep their ground at, 6.13)
@@ -1205,7 +1220,7 @@ void drawWater(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, const 
                 float e = 0.5f * (b.bmax[k] - b.bmin[k]);
                 r2 += e * e;
             }
-            if (!fr.sphere(c, sqrtf(r2))) continue;
+            if (!fr.sphereFar(c, sqrtf(r2))) continue;   // (6.34: the loaded tiles' water to the horizon, as their ground)
             u32 tex = b.tex;
             const bool animated = b.frames > 1;
             if (animated) {   // fewer frames than the original 30 (--water-frames) are shown longer each
@@ -1531,12 +1546,15 @@ void rendererSetProjection(float drawDist) {
     // A near plane of 1 yd keeps depth precision usable with 24-bit depth;
     // the far plane follows the draw distance so fog and clipping agree.
     g_near = 1.0f;
-    g_far = drawDist * 1.15f + 30.0f;
+    // 6.34: the far plane at the horizon (24-bit depth: ~0.1 yd steps at 1200 yd with the 1 yd near plane)
+    g_horizon = std::max(drawDist, kHorizonDist);
+    g_far = g_horizon * 1.05f + 30.0f;
     g_skyRadius = g_far * 0.9f;
     buildProj();
 
-    // Linear fog by true view distance, from 55% to 100% of the draw distance.
-    const float start = drawDist * 0.55f, end = drawDist;
+    // Linear fog by true view distance: before 6.34 from 55% to 100% of the draw distance; now from 45% of it to the horizon
+    // (the ground and the shells beyond the draw distance melt into the sky there)
+    const float start = drawDist * 0.45f, end = g_horizon;
     g_fogX = 1.0f / (end - start);
     g_fogY = end / (end - start);
 }
@@ -1596,6 +1614,7 @@ static void frameFrustum(const Camera& cam, const RenderSettings& rs, Frustum& f
     if (rs.underwater) {
         fr.maxDist = std::min(fr.maxDist, std::max(rs.waterFogEnd, 6.0f) + 8.0f);
         fr.d[5] = fr.maxDist;
+        fr.horizon = fr.maxDist;
     }
 }
 

@@ -1536,7 +1536,7 @@ uint16_t* g_farIdx = nullptr;          // linear: the shared index list
 struct FarVB { W3dTerrainVertex* v = nullptr; uint32_t used = 0; float zmin = 0, zmax = 0; };
 std::unordered_map<int, FarVB> g_farVB;   // [tileY * 64 + tileX]
 uint32_t g_farFrame = 0;
-constexpr size_t kFarCache = 96;
+constexpr size_t kFarCache = 128;   // (6.34: the horizon at 1200 yd is up to 9 x 9 tiles)
 
 void farLoad() {
     const uint32_t size = streamerEntrySize(W3D_ENTRY_FARLOD, 0);
@@ -1570,7 +1570,7 @@ struct FarObjVB {
     float center[3] = {0, 0, 0}, radius = 0;
 };
 std::unordered_map<int, FarObjVB> g_foVB;   // [tileY * 64 + tileX]
-constexpr size_t kFarObjCache = 64;
+constexpr size_t kFarObjCache = 160;   // (6.34: to the horizon)
 
 void farObjLoad() {
     const uint32_t size = streamerEntrySize(W3D_ENTRY_FAROBJ, 0);
@@ -1677,7 +1677,7 @@ bool streamerFarDraws(const float cam[3], float maxDist, std::vector<FarDraw>& o
     return !out.empty();
 }
 
-bool streamerFarObjectDraws(const float cam[3], float maxDist, std::vector<FarObjDraw>& out, GpuTex** palette, float* zScale) {
+bool streamerFarObjectDraws(const float cam[3], float maxDist, float detailDist, std::vector<FarObjDraw>& out, GpuTex** palette, float* zScale) {
     out.clear();
     g_stats.farObjDrawn = 0;
     if (!g_foHd || !g_foTex || g_foTex->state != AssetState::Ready || g_foTex == &g_white) return false;
@@ -1740,7 +1740,14 @@ bool streamerFarObjectDraws(const float cam[3], float maxDist, std::vector<FarOb
             memcpy(d.center, vb.center, sizeof d.center);
             d.radius = vb.radius;
             const Tile* t = loaded[k];
-            if (!t) {   // the tile is not there: all of its buildings
+            // 6.34: the whole tile beyond the real buildings' distance (its nearest building centre farther than detailDist)
+            bool allBeyond = t != nullptr;
+            for (uint32_t i = 0; i < count && allBeyond; ++i) {
+                const W3dFarObject& o = objs[first + i];
+                const float ox = o.pos[0] - cam[0], oy = o.pos[1] - cam[1], oz = o.pos[2] - cam[2];
+                allBeyond = ox * ox + oy * oy + oz * oz > detailDist * detailDist;
+            }
+            if (!t || allBeyond) {   // the tile is not there (or all of it is beyond the real buildings): all of its buildings
                 d.idx = vb.i;
                 d.count = vb.idxCount;
                 if (d.count) out.push_back(d);
@@ -1764,7 +1771,11 @@ bool streamerFarObjectDraws(const float cam[3], float maxDist, std::vector<FarOb
             for (uint32_t i = 0; i < count; ++i) {
                 const W3dFarObject& o = objs[first + i];
                 bool open = false;
+                // 6.34: a building whose centre is beyond the real buildings' distance is a shell (overlap rather than a gap)
+                const float ox = o.pos[0] - cam[0], oy = o.pos[1] - cam[1], oz = o.pos[2] - cam[2];
+                const bool beyond = ox * ox + oy * oy + oz * oz > detailDist * detailDist;
                 for (const auto& [mid, m] : shown) {
+                    if (beyond) break;
                     if (mid != o.groupModel) continue;
                     const Instance& in = t->instances[m];
                     if (fabsf(in.pos[0] - o.groupPos[0]) < 0.05f && fabsf(in.pos[1] - o.groupPos[1]) < 0.05f &&
