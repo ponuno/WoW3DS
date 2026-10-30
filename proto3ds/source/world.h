@@ -507,6 +507,7 @@ void rendererInit();
 void fxForgetModel(const void* model);   // fx.cpp: a model with effects is being freed
 void rendererShutdown();
 void rendererSetProjection(float drawDist);   // also rebuilds the fog LUT
+void rendererSetHorizon(float yards);         // 6.34b: 0 = off; else the ground / far shells to this distance (then call rendererSetProjection)
 void rendererSetEye(float iod);               // stereoscopic 3D: the projection of one eye (-iod left, +iod right, 0 = mono)
 u32 rendererClearColor(const RenderSettings& rs);
 // Stage 5.29: a login / character screen scene: static models and creatures only (no terrain, sky, water or fog), seen

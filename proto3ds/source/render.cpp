@@ -45,8 +45,9 @@ C3D_Mtx g_proj;
 float g_near = 1.0f, g_far = 400.0f, g_skyRadius = 300.0f;
 // 6.34: the horizon - the ground (detailed of the loaded tiles, far of the others) and the far buildings' shells are drawn this
 // far, past the draw distance (which stays the distance of the real buildings and doodads); the fog ends there
-constexpr float kHorizonDist = 1200.0f;
-float g_horizon = kHorizonDist;
+// (6.34b: a setting - off by default, it costs GPU time: rendererSetHorizon)
+float g_horizonWant = 0.0f;   // 0 = off: the horizon is the draw distance (as before 6.34)
+float g_horizon = 400.0f;
 float g_fogX = 0.0f, g_fogY = 1.0f;   // visibility = clamp(g_fogY - dist * g_fogX, 0, 1)
 // Terrain LOD switch distances: W3D_TERRAIN_LOD1_DIST / LOD2_DIST (w3d_terrain_lod.h, by region since 6.30).
 
@@ -1547,17 +1548,20 @@ void rendererSetProjection(float drawDist) {
     // the far plane follows the draw distance so fog and clipping agree.
     g_near = 1.0f;
     // 6.34: the far plane at the horizon (24-bit depth: ~0.1 yd steps at 1200 yd with the 1 yd near plane)
-    g_horizon = std::max(drawDist, kHorizonDist);
-    g_far = g_horizon * 1.05f + 30.0f;
+    const bool horizonOn = g_horizonWant > drawDist;
+    g_horizon = horizonOn ? g_horizonWant : drawDist;
+    g_far = horizonOn ? g_horizon * 1.05f + 30.0f : drawDist * 1.15f + 30.0f;
     g_skyRadius = g_far * 0.9f;
     buildProj();
 
-    // Linear fog by true view distance: before 6.34 from 55% to 100% of the draw distance; now from 45% of it to the horizon
-    // (the ground and the shells beyond the draw distance melt into the sky there)
-    const float start = drawDist * 0.45f, end = g_horizon;
+    // Linear fog by true view distance: from 55% to 100% of the draw distance; with the horizon (6.34) from 45% of it to the
+    // horizon (the ground and the shells beyond the draw distance melt into the sky there)
+    const float start = drawDist * (horizonOn ? 0.45f : 0.55f), end = g_horizon;
     g_fogX = 1.0f / (end - start);
     g_fogY = end / (end - start);
 }
+
+void rendererSetHorizon(float yards) { g_horizonWant = yards; }
 
 bool rendererUnitPoint(uint64_t guid, int slot, float out[3]) {
     if (slot < 0 || slot > 5) return false;

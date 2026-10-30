@@ -1122,6 +1122,7 @@ void GameUi::drawSettings(const Input& in) {
             y += 19;
         }
     } else {
+        y -= 4;   // 8 rows (6.34b: the horizon)
         label(tr("Language", "Язык"));
         opt(120, 96, "English", c.lang == 0, 100);
         opt(220, 96, "Русский", c.lang == 1, 101);
@@ -1148,6 +1149,10 @@ void GameUi::drawSettings(const Input& in) {
         opt(120, 64, c.perfLog ? tr("Log", "Лог") : tr("no log", "без лога"), c.perfLog, 202);
         opt(186, 64, c.gpuKick ? tr("GPU early", "GPU рано") : tr("GPU end", "GPU конец"), c.gpuKick, 203);
         opt(252, 64, c.vsync ? "VSync" : tr("no VSync", "без VSync"), c.vsync, 204);
+        y += 20;
+        label(tr("Horizon", "Горизонт"));   // 6.34b: the ground and far buildings past the draw distance (costs GPU time)
+        const char* hz[3] = {tr("Off", "Выкл"), "800", "1200"};
+        for (int i = 0; i < 3; ++i) opt(120 + i * 65, 62, hz[i], c.horizon == i, 210 + i);
     }
     // 8 rows on Graphics/sound since the particles (stage 5.32), 7 on Interface since the perf log (stage 6): Debug / Quit
     // stay on the Controls page and in START

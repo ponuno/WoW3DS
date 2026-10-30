@@ -1054,6 +1054,7 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
                 case 204: in.cfg->vsync = !in.cfg->vsync; break;       // stage 6.4
                 case 205: in.cfg->fadeIn = !in.cfg->fadeIn; break;     // stage 6.11 (the renderer reads it every frame)
                 case 70: case 71: case 72: case 73: in.cfg->drawDist = arg - 70; out.graphicsChanged = true; break;
+                case 210: case 211: case 212: in.cfg->horizon = arg - 210; out.graphicsChanged = true; break;   // 6.34b
                 case 80: case 81: case 82: case 83: in.cfg->crowd = arg - 80; out.graphicsChanged = true; break;
                 case 95: case 96: case 97: in.cfg->topMode = arg - 95; out.graphicsChanged = true; break;
                 case 90: in.cfg->doodads = !in.cfg->doodads; out.graphicsChanged = true; break;

@@ -2713,3 +2713,11 @@ the draw distance too) - the city "loads only when you come close". Now:
   "never over a shown building" check (detailDist huge) 0 wrong. The "drawn before the tile loads" count races the palette's
   read (0 in some runs, before this change too) - no longer required. ARM compile clean.
 - Not seen on a console: the GPU cost (up to ~16 far ground tiles in view, 1536 triangles each), the fog look, z-fighting.
+
+## Part 86 — the horizon as a setting (6.34b)
+
+User: "cool, but a bit hungry - make it optional". Settings -> Interface -> Horizon: Off (default) / 800 / 1200 yd
+(`PadConfig::horizon`, pad.txt `horizon`, actions 210-212; the Interface page has 8 rows now, y -= 4 as Graphics/sound).
+`rendererSetHorizon(yards)` (0 = off) before rendererSetProjection: off = exactly as before 6.34 (far plane drawDist * 1.15 +
+30, fog 55%..100% of the draw distance, far ground / shells only inside the draw distance); on = the 6.34 horizon. Applied
+after pad.txt is read and on every graphics change. UI test: 57 scenes, 0 failed (settings_iface shows the row). ARM clean.

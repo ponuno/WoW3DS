@@ -42,6 +42,7 @@ bool PadConfig::load(const char* path) {
         else if (!strcmp(key, "tracker")) questTracker = v != 0;
         else if (!strcmp(key, "language")) lang = v >= 0.5f ? 1 : 0;   // (6.20: the key "lang" of older files, where Russian was the default, is ignored)
         else if (!strcmp(key, "dist") && v >= 0 && v <= 3) drawDist = (int)v;
+        else if (!strcmp(key, "horizon") && v >= 0 && v <= 2) horizon = (int)v;
         else if (!strcmp(key, "crowd") && v >= 0 && v <= 3) crowd = (int)v;
         else if (!strcmp(key, "topmode") && v >= 0 && v <= 2) topMode = (int)v;
         else if (!strcmp(key, "doodads")) doodads = v != 0;
@@ -70,8 +71,8 @@ std::string PadConfig::text() const {
             toggleModifiers ? 1 : 0, invertY ? 1 : 0, camSpeed, questTracker ? 1 : 0);
     n += snprintf(b + n, sizeof b - (size_t)n, "language %d\ndist %d\ncrowd %d\ndoodads %d\nbigtext %d\ndimhud %d\nautotabs %d\n", lang, drawDist, crowd, doodads ? 1 : 0,
             bigText ? 1 : 0, dimHud ? 1 : 0, autoTabs ? 1 : 0);
-    n += snprintf(b + n, sizeof b - (size_t)n, "music %d\nsfx %d\nambience %d\ntopmode %d\neffects %d\nstats %d\nground %d\nperflog %d\ngpuearly %d\nvsync %d\nfadein %d\n", musicVol, sfxVol,
-            ambVol, topMode, effects, showStats ? 1 : 0, groundCast, perfLog ? 1 : 0, gpuKick ? 1 : 0, vsync ? 1 : 0, fadeIn ? 1 : 0);
+    n += snprintf(b + n, sizeof b - (size_t)n, "music %d\nsfx %d\nambience %d\ntopmode %d\neffects %d\nstats %d\nground %d\nperflog %d\ngpuearly %d\nvsync %d\nfadein %d\nhorizon %d\n", musicVol, sfxVol,
+            ambVol, topMode, effects, showStats ? 1 : 0, groundCast, perfLog ? 1 : 0, gpuKick ? 1 : 0, vsync ? 1 : 0, fadeIn ? 1 : 0, horizon);
     return std::string(b, (size_t)std::max(0, std::min(n, (int)sizeof b - 1)));
 }
 

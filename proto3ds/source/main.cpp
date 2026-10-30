@@ -60,6 +60,7 @@
 
 static const char* kOutDir = "sdmc:/3ds/w3dproto";
 static const float kDrawDists[5] = {120, 250, 400, 533, 800};
+static const float kHorizons[3] = {0, 800, 1200};   // 6.34b: Settings -> Interface -> Horizon (off / 800 / 1200 yd)
 
 struct Bench {
     bool running = false;
@@ -716,6 +717,8 @@ int main() {
     char padPath[96];
     snprintf(padPath, sizeof padPath, "%s/pad.txt", kOutDir);
     padCfg.load(padPath);
+    rendererSetHorizon(kHorizons[std::clamp(padCfg.horizon, 0, 2)]);   // 6.34b
+    rendererSetProjection(cam.drawDist);
     ui::g_lang = padCfg.lang;   // 6.20: the language from the first frame on (the main menu too)
     rs.effects = padCfg.effects;
     perf::init(kOutDir, padCfg.perfLog);   // stage 6: perf.csv (a row a second) + perf_events.txt
@@ -1027,6 +1030,7 @@ int main() {
             if (uiOut.graphicsChanged) {   // the Settings tab: draw distance, world objects
                 distIdx = std::clamp(padCfg.drawDist, 0, 3);
                 cam.drawDist = kDrawDists[distIdx];
+                rendererSetHorizon(kHorizons[std::clamp(padCfg.horizon, 0, 2)]);   // 6.34b
                 rendererSetProjection(cam.drawDist);
                 rs.doodads = padCfg.doodads;
                 rs.effects = padCfg.effects;
