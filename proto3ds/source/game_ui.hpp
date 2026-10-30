@@ -57,6 +57,7 @@ public:
         bool blockJump = false;       // the jump button did something else (closed a window) or we are dead
         bool keyboardShown = false;   // the system keyboard ran (the frame took long)
         bool quit = false, freeCamera = false, showDebug = false;
+        bool characters = false;      // START menu "Characters": log out to the character list
         bool configChanged = false, layoutChanged = false;
         bool graphicsChanged = false; // draw distance / crowd / doodads changed in Settings
         bool soundChanged = false;    // a volume changed in Settings

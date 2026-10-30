@@ -369,8 +369,33 @@ void LoginFlow::network() {
             if (world_.state() == w3n::WorldClient::State::Failed) {
                 game_.detach();
                 log_.close();
+                logoutPending_ = false;
                 message(std::string(tr("Disconnected: ", "Соединение потеряно: ")) + world_.error());
                 phase_ = Phase::Menu;
+            } else if (logoutPending_) {
+                const auto st = world_.state();
+                if (world_.takeLogoutRefused()) {   // in combat, for example
+                    logoutPending_ = false;
+                    game_.addSystem(tr("You can't log out now.", "Сейчас нельзя выйти."), sessionMs());
+                } else if (st == w3n::WorldClient::State::CharSelect) {   // the list is here: the character screen
+                    logoutPending_ = false;
+                    game_.detach();
+                    log_.close();
+                    wait_.clear();
+                    waitFixed_ = false;
+                    busy_ = Busy::None;
+                    pending_ = Pending::None;
+                    phase_ = Phase::CharSelect;
+                    ui_.character = 0;
+                    selectByName(charName_);
+                    ui_.touched();
+                } else if (st == w3n::WorldClient::State::Done) {   // the server did not answer in time
+                    logoutPending_ = false;
+                    game_.detach();
+                    log_.close();
+                    message(tr("The server did not answer.", "Сервер не ответил."));
+                    phase_ = Phase::Menu;
+                }
             }
             break;
         default:
@@ -469,6 +494,19 @@ LoginFlow::Scene LoginFlow::scene() const {
         }
     }
     return s;
+}
+
+bool LoginFlow::requestCharacterList() {
+    if (phase_ != Phase::InWorld || logoutPending_ || world_.state() != w3n::WorldClient::State::InWorld) return false;
+    game_.mover.stopAll(sessionMs());
+    game_.update(sessionMs());   // the stop packets leave before the request
+    world_.logout(true);
+    logoutPending_ = true;
+    return true;
+}
+
+void LoginFlow::cancelLogout() {
+    if (logoutPending_ && world_.cancelLogout()) logoutPending_ = false;
 }
 
 void LoginFlow::shutdown() {

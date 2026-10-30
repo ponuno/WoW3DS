@@ -1023,6 +1023,13 @@ int main() {
             if (bars.empty() && !gs.spells.empty() && bars.autofill(gs)) uiOut.layoutChanged = true;
             if (uiOut.layoutChanged && !barsPath.empty()) bars.save(barsPath.c_str());
             if (uiOut.quit) break;
+            if (uiOut.characters) {   // START menu: log out; the timer runs, the character list comes when it ends
+                if (g_login.requestCharacterList()) gs.addSystem(ui::tr("Logging out... move to cancel.", "Выход... двиньтесь, чтобы отменить."), g_login.sessionMs());
+            }
+            if (g_login.logoutPending() && (po.dir || po.jump)) {   // as the original: moving cancels the logout
+                g_login.cancelLogout();
+                gs.addSystem(ui::tr("Logout cancelled.", "Выход отменён."), g_login.sessionMs());
+            }
             if (uiOut.freeCamera) {
                 walk = !walk;
                 if (walk) {   // back into the character

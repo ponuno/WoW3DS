@@ -113,7 +113,11 @@ public:
     void deleteCharacter(uint64_t guid);
     int takeCreateResult() { int r = createResult_; createResult_ = -1; return r; }   // -1 = no answer yet
     int takeDeleteResult() { int r = deleteResult_; deleteResult_ = -1; return r; }
-    void logout();
+    // Sends CMSG_LOGOUT_REQUEST. With toCharacters the connection stays: on SMSG_LOGOUT_COMPLETE the list of characters is
+    // asked for again (state WaitCharEnum, then CharSelect), as the original client's "Log Out". Without, it closes.
+    void logout(bool toCharacters = false);
+    bool cancelLogout();                                   // the timer of a toCharacters logout: back to InWorld
+    bool takeLogoutRefused() { bool v = logoutRefused_; logoutRefused_ = false; return v; }   // the server said no (combat)
     void send(uint32_t opcode, const Bytes& payload);
 
     State state() const { return state_; }
@@ -168,6 +172,7 @@ private:
     std::map<uint16_t, uint32_t> opCounts_;
     uint64_t bytesIn_ = 0, packetsIn_ = 0, packetsOut_ = 0, bytesOut_ = 0;
     bool wardenSeen_ = false;
+    bool logoutToChars_ = false, logoutRefused_ = false;
     int createResult_ = -1, deleteResult_ = -1;
 };
 

@@ -2520,3 +2520,14 @@ FPS при `--terrain-centers`.
   песочнице не успевает загрузить ничего (и до изменений) — не ошибка клиента.
 - Не решает: всплывание зданий/деревьев (дальних версий в 1.12 нет), смену LOD подробной земли вблизи (kLod1Dist 40 / kLod2Dist 140 ярдов).
 - Пользователю: пересобрать клиент и конвертер, прогнать all.bat (нужна запись FARL), в report.txt проверить строку far ground.
+
+## Part 71 — START menu "Characters" (6.25)
+
+The in-game START menu got a **Characters** button (before Quit): after a confirmation the client logs out on the server and returns to the character list on the same connection (no new login).
+
+- `net/client`: `WorldClient::logout(bool toCharacters)`; on `SMSG_LOGOUT_COMPLETE` with the flag it asks for the list again (WaitCharEnum → CharSelect) instead of closing; `cancelLogout()` sends `CMSG_LOGOUT_CANCEL` (0x04E); `takeLogoutRefused()` reports a refusal (combat).
+- `LoginFlow::requestCharacterList()` / `cancelLogout()` / `logoutPending()`: the character stays in the world while the server's timer runs (20 s outside inns); when the list arrives the session detaches and the character screen opens with the same character selected. Refused: a system message in the chat; no answer in 25 s: back to the main menu with a message.
+- main.cpp: moving or jumping during the timer cancels the logout (as the original client).
+- Menu: action 13 (the old ones keep their numbers), up to 11 buttons fit the page.
+- Tests: `w3dlogin --relog` against fake_server (run_stage5.sh: "LOGOUT TO THE CHARACTER LIST: PASS"), ui_test `menu_characters`; ARM compile clean.
+- Not checked on a console.

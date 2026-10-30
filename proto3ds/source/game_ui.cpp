@@ -937,6 +937,7 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
             break;
         case Act::MenuItem:
             if (arg == 9 && !confirmed_) { confirm(tr("Quit the game?", "Выйти из игры?"), Act::MenuItem, 9); break; }
+            if (arg == 13 && !confirmed_) { confirm(tr("Log out to the character list?", "Выйти к списку персонажей?"), Act::MenuItem, 13); break; }
             open_ = Panel::Tabs;
             switch (arg) {
                 case 0: setTab(Tab::Chat); openChat(g, in, out); break;
@@ -948,6 +949,7 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
                 case 6: setTab(Tab::Settings); break;
                 case 8: gamePage_ = false; out.showDebug = true; break;
                 case 9: out.quit = true; break;
+                case 13: out.characters = true; break;
                 case 10: setTab(Tab::Map); break;
                 case 11: setTab(Tab::Social); break;
                 case 12: open_ = Panel::Pet; petFeedList_ = false; petSel_ = -1; break;

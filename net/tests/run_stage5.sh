@@ -272,3 +272,14 @@ grep -q "create Taken: That name is unavailable (0x31)" "$OUT/glue2.log"
 grep -q "delete Testtwo: Character deleted (0x39)" "$OUT/glue2.log"
 ! grep -q "\[1\] Testtwo" <(sed -n '/delete Testtwo/,$p' "$OUT/glue2.log")
 echo "CHARACTER LIST + CREATE + DELETE: PASS"
+# 6.25: the START menu's "Characters": logout on the same connection, the list again, enter again
+PORT7=$((PORT + 60))
+(cd "$N/tests" && timeout 30 python3 -u fake_server.py --port $PORT7 > "$OUT/relog_server.log" 2>&1 &)
+sleep 1
+"$OUT/w3dlogin" 127.0.0.1:$PORT7 TEST PASSWORD --char 0 --stay 1 --relog > "$OUT/relog.log" 2>&1
+grep -E "RELOG" "$OUT/relog.log"
+grep -q "RELOG: back at the character list (2 characters)" "$OUT/relog.log"
+grep -q "RELOG: entered the world again" "$OUT/relog.log"
+grep -q "logged out OK" "$OUT/relog.log"
+[ "$(grep -c 'character list sent' "$OUT/relog_server.log")" -ge 2 ]
+echo "LOGOUT TO THE CHARACTER LIST: PASS"

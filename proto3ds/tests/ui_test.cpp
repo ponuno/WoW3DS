@@ -79,8 +79,10 @@ struct Rig {
         g_shots.push_back({name, c});
     }
     std::vector<std::string> heard;   // every sound event the UI asked for
+    bool sawCharacters = false;       // an update asked for the character list (START menu, 6.25)
     GameUi::Output upd(const GameUi::Input& t) {
         GameUi::Output o = ui.update(s, t, true);
+        sawCharacters |= o.characters;
         for (const char* e : o.sounds) heard.push_back(e);
         return o;
     }
@@ -262,6 +264,30 @@ int main(int argc, char** argv) {
         if (ok && c.expect == 0x15C) ok = r.sent.back().data.size() == 9 && r.sent.back().data[8] == 1;
         if (ok && c.expect == 0x0AB) ok = r.sent.back().data[0] == 255 && r.sent.back().data[1] == 23;
         result(c.name, ok, "tap ->" + r.ops());
+    }
+
+    {   // 6.25: START menu "Characters": a button, a question, then the request for the character list (and Quit stays last)
+        Rig r;
+        r.dir = dir;
+        bool got = r.replay(life, bagsReady);
+        PadOut m;
+        m.menu = true;
+        r.pad(m);
+        r.scratch();
+        int chars = -1, quit = -1, k = 0;
+        for (const GameUi::Button& b : r.ui.buttons()) {
+            if (b.act != GameUi::Act::MenuItem) continue;
+            if (b.arg == 13) chars = k;
+            if (b.arg == 9) quit = k;
+            ++k;
+        }
+        r.draw("menu_characters");
+        r.tap(GameUi::Act::MenuItem, 13);
+        const bool asked = r.ui.panel(r.s) == GameUi::Panel::Confirm && !r.sawCharacters;
+        r.draw("menu_characters_confirm");
+        r.tap(GameUi::Act::ConfirmYes);
+        result("menu_characters", got && chars >= 0 && quit > chars && asked && r.sawCharacters,
+               "button " + std::to_string(chars) + " quit " + std::to_string(quit) + (asked ? " asked" : " NOT asked"));
     }
 
     // ---- stage 5.11: controller intents

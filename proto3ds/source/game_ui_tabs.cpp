@@ -1160,13 +1160,16 @@ void GameUi::drawSettings(const Input& in) {
 // ------------------------------------------------------------------ START menu, the target's menu, buffs
 void GameUi::drawMenu(w3n::GameSession& g) {
     window(4, kTop + 2, kTouchW - 8, kContentH - 4, true);
-    const char* items[11] = {tr("Chat", "Чат"), tr("Bags", "Сумки"), tr("Equipment", "Экипировка"), tr("Spells", "Книга"),
+    const char* items[12] = {tr("Chat", "Чат"), tr("Bags", "Сумки"), tr("Equipment", "Экипировка"), tr("Spells", "Книга"),
                              tr("Quests", "Задания"), tr("Buffs", "Эффекты"), tr("Settings", "Настройки"), tr("Free camera", "Своб. камера"),
-                             tr("Debug page", "Отладка"), tr("Quit", "Выход"), tr("Pet", "Питомец")};
-    for (int i = 0, k = 0; i < 11; ++i) {
-        if (i == 7) continue;   // the free camera is gone (stage 5.31)
-        if (i == 10 && !g.petGuid()) continue;   // UI stage 13: only with a pet (menu action 12)
-        btn(14 + (k % 2) * 148, kTop + 8 + (k / 2) * 27, 142, 24, items[i], Act::MenuItem, i == 10 ? 12 : i, i == 9 ? Style::Danger : Style::Normal);
+                             tr("Debug page", "Отладка"), tr("Quit", "Выход"), tr("Pet", "Питомец"), tr("Characters", "Персонажи")};
+    // the action of each button: 10 is the pet (menu action 12), 11 the character list (menu action 13)
+    static const int kAction[12] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 13};
+    static const int kOrder[11] = {0, 1, 2, 3, 4, 5, 6, 8, 10, 11, 9};   // the free camera is gone (stage 5.31); Quit last
+    int k = 0;
+    for (int i : kOrder) {
+        if (i == 10 && !g.petGuid()) continue;   // UI stage 13: only with a pet
+        btn(14 + (k % 2) * 148, kTop + 8 + (k / 2) * 27, 142, 24, items[i], Act::MenuItem, kAction[i], i == 9 ? Style::Danger : Style::Normal);
         ++k;
     }
     btn(kTouchW - 80, kTabY - 28, 70, 22, tr("Close", "Закрыть"), Act::ClosePanel, 0, Style::Normal, Font::Small);
