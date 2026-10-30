@@ -1470,7 +1470,28 @@ int main() {
                     airborne = jumped = true;
                     plVz = 7.9555473f;
                 }
-                if (!airborne && haveGround && ground < pl[2] - 1.0f) {   // walked off a ledge: fall
+                // 6.22: the ground under the feet may drop away for a frame or two while climbing - the seam between two stair
+                // treads or a building's floor and the terrain, a slope's triangles at a tile edge - and the walker "fell" for
+                // that moment: the jump / fall animation flashed on stairs and slopes (and a fall packet went to the server).
+                // A real ledge stays a ledge: the drop must last LEDGE_HOLD seconds (the height is kept meanwhile, the walker
+                // keeps moving over it) before the fall starts. A flicker that ends sooner is noted in the perf log.
+                static float ledgeT = 0, ledgeDrop = 0;
+                const bool dropNow = !airborne && haveGround && ground < pl[2] - 1.0f;
+                bool holdLedge = false;
+                if (dropNow) {
+                    ledgeT += dt;
+                    ledgeDrop = std::max(ledgeDrop, pl[2] - ground);
+                    holdLedge = ledgeT < 0.12f;
+                } else {
+                    if (ledgeT > 0 && ledgeT < 0.12f)
+                        perf::event("ledge flicker ignored: the ground dropped up to %.1f yd for %.0f ms at %.1f %.1f %.1f", ledgeDrop,
+                                    ledgeT * 1000.0f, pl[0], pl[1], pl[2]);
+                    ledgeT = 0;
+                    ledgeDrop = 0;
+                }
+                if (dropNow && !holdLedge) {   // walked off a ledge: fall
+                    ledgeT = 0;
+                    ledgeDrop = 0;
                     airborne = true;
                     jumped = false;
                     plVz = 0;
@@ -1515,7 +1536,7 @@ int main() {
                             perf::event("land: fell %.1f yd (z %.1f -> %.1f), FALL_LAND sent", fallFromZ - ground, fallFromZ, ground);
                         jumped = false;
                     }
-                } else if (haveGround) {
+                } else if (haveGround && !holdLedge) {
                     pl[2] = ground;
                     if (deepWater()) {   // waded in deep enough: float up to the surface
                         swimState = swim::State();
@@ -1527,7 +1548,7 @@ int main() {
                 }
                 // 6.14: standing on solid ground for a moment makes a safe place; a fall into nothing (no terrain, no floor, no
                 // object under us, 80 yards below the safe place) puts the character back there instead of dropping for ever.
-                if (!airborne && haveGround && !ride.guid && !loadingWorld) {
+                if (!airborne && haveGround && !holdLedge && !ride.guid && !loadingWorld) {
                     groundedFor += dt;
                     if (groundedFor >= 0.4f) { memcpy(safePos, pl, sizeof safePos); safeValid = true; }
                 } else {
