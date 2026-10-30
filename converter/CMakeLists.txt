@@ -35,7 +35,7 @@ file(GLOB MESHOPT_SRC ${meshoptimizer_SOURCE_DIR}/src/*.cpp)
 # Converter core as a static library: the tool and the tests link it.
 add_library(w3dcore STATIC
   src/pack.cpp src/mpq.cpp src/texture.cpp src/model.cpp src/terrain.cpp src/synthetic.cpp src/wmo.cpp
-  src/creature_model.cpp src/creatures.cpp src/items.cpp src/spells.cpp src/spelltext.cpp src/progress.cpp src/ui.cpp src/ui_font.cpp src/texts.cpp src/sound.cpp src/dungeon.cpp src/liquid.cpp src/all.cpp src/crashguard.cpp src/glue.cpp src/spellfx.cpp
+  src/creature_model.cpp src/creatures.cpp src/items.cpp src/spells.cpp src/spelltext.cpp src/progress.cpp src/ui.cpp src/ui_font.cpp src/texts.cpp src/sound.cpp src/dungeon.cpp src/liquid.cpp src/all.cpp src/crashguard.cpp src/glue.cpp src/spellfx.cpp src/farlod.cpp src/farobj.cpp
   ${MESHOPT_SRC}
   ${rgetc1_SOURCE_DIR}/rg_etc1.cpp
   ${wowee_SOURCE_DIR}/src/pipeline/adt_loader.cpp
@@ -81,6 +81,8 @@ if(W3D_TESTS AND NOT MINGW)
   target_link_libraries(skin_simplify_test PRIVATE w3dcore)
   add_executable(lod_thin_test tests/lod_thin_test.cpp)
   target_link_libraries(lod_thin_test PRIVATE w3dcore)
+  add_executable(far_shell_test tests/far_shell_test.cpp)
+  target_link_libraries(far_shell_test PRIVATE w3dcore)
   add_executable(spell_text_test tests/spell_text_test.cpp)
   target_link_libraries(spell_text_test PRIVATE w3dcore)
 endif()

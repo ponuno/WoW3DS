@@ -30,5 +30,5 @@ check("T\tRACE_INFO_HUMAN\tHumans are a test race.\\nSecond line with a \"quote\
 check("T\tCLASS_INFO_WARRIOR\tWarriors hit things." in lines and not any("NOT_A_STRING" in l for l in lines), "GlueStrings: only strings")
 want = "O\t1\t1\t0\t" + "\t".join(f"{d}\t{i}" for d, i in exp["outfit"])
 check(want in lines, "start outfit " + want.replace("\t", " "))
-check("Z\t12\tElwynn Forest" in lines and "Z\t9\tNorthshire Valley" in lines, "zone names")
+check(any(l.startswith("Z\t12\tElwynn Forest") for l in lines) and any(l.startswith("Z\t9\tNorthshire Valley") for l in lines), "zone names")   # (5.45: a 4th field, the parent area)
 print("GLUE:", "PASS" if not bad else f"{bad} FAILED"); sys.exit(1 if bad else 0)

@@ -16,8 +16,12 @@
 #include "w3d_collision.h"
 #include "w3d_ground.h"
 #include "w3d_liquid.h"
+#include "w3d_farlod.h"
+#include "w3d_farobj.h"
+#include "crash.hpp"
 
 #include <fcntl.h>
+#include <malloc.h>
 #include <math.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -28,6 +32,9 @@
 #include <deque>
 #include <unordered_map>
 
+extern "C" {
+extern u32 __ctru_heap_size;   // (global scope: inside the anonymous namespace GCC took it for a namespace member - 7r link error)
+}
 #ifdef W3D_PC_TEST
 void pcTestIoDelay(int file, uint32_t offset, uint32_t size);   // tests/streamer_pc.cpp: an SD card's speed (SD_KBPS)
 #endif
@@ -256,6 +263,19 @@ struct CollLoad {
     bool linear;
 };
 constexpr float kCollLoadDist = 200.0f, kCollDropDist = 320.0f;   // yards from the camera to the tile's edge
+// 6.31: the normal heap's reserves (see StreamStats::heapFree)
+constexpr u32 kCollHeapReserve = 6u << 20;   // COLL goes to the heap only if this much stays free after it (else linear memory)
+constexpr u32 kHeapLow = 3u << 20;           // under this the wanted ring shrinks to 3 x 3 tiles
+constexpr u32 kHeapOk = 5u << 20;            // ... and grows back above this
+static u32 heapFreeNow() {
+#ifdef W3D_PC_TEST
+    static const u32 fake = (u32)tunable("W3D_HEAP_FREE_MB", 64.0f) << 20;   // (tests: the heap left, as asked)
+    return fake;
+#else
+    const struct mallinfo mi = mallinfo();
+    return __ctru_heap_size > (u32)mi.uordblks ? __ctru_heap_size - (u32)mi.uordblks : 0;
+#endif
+}
 
 void freeColl(uint8_t* p, bool linear) {
     if (linear) linearFree(p);
@@ -386,32 +406,13 @@ void buildHeightField(Tile* t) {
 }
 
 // Stage 6.13: a terrain batch's LOD 2 may cover less ground than its LOD 1 (older packs: a 16-yd block touching a hole was
-// dropped whole). Compares the ground area (x/y, the skirts are vertical and add nothing) of each level; where a coarser one
-// lost more than 1% the batch is drawn no coarser than the finer one.
-static double terrainArea(const W3dTerrainVertex* v, uint32_t vcount, const uint16_t* idx, uint32_t first, uint32_t count) {
-    double a = 0;
-    for (uint32_t k = first; k + 2 < first + count; k += 3) {
-        const uint16_t i0 = idx[k], i1 = idx[k + 1], i2 = idx[k + 2];
-        if (i0 >= vcount || i1 >= vcount || i2 >= vcount) continue;
-        const double ax = v[i1].x - v[i0].x, ay = v[i1].y - v[i0].y, bx = v[i2].x - v[i0].x, by = v[i2].y - v[i0].y;
-        a += fabs(ax * by - ay * bx);
-    }
-    return a;
-}
+// dropped whole): such a batch is drawn no coarser than the finer level. 6.30: and the regions the LOD is picked by.
 void terrainLodCaps(Tile* t) {
     const W3dTerrainHeader* th = (const W3dTerrainHeader*)t->terr;
-    const W3dTerrainBatch* b = (const W3dTerrainBatch*)(t->terr + th->offBatches);
-    const W3dTerrainVertex* v = (const W3dTerrainVertex*)(t->terr + th->offVertices);
-    const uint16_t* idx = (const uint16_t*)(t->terr + th->offIndices);
     t->batchMaxLod.assign(th->batchCount, W3D_TERRAIN_LODS - 1);
-    for (u32 i = 0; i < th->batchCount; ++i) {
-        double prev = terrainArea(v, th->vertexCount, idx, b[i].firstIndex[0], b[i].indexCount[0]);
-        for (int l = 1; l < W3D_TERRAIN_LODS; ++l) {
-            const double a = terrainArea(v, th->vertexCount, idx, b[i].firstIndex[l], b[i].indexCount[l]);
-            if (a < prev * 0.99) { t->batchMaxLod[i] = (uint8_t)(l - 1); break; }
-            prev = a;
-        }
-    }
+    t->batchRegion.assign(th->batchCount, 0);
+    w3d_terrain_batch_max_lod(t->terr, t->batchMaxLod.data());
+    w3d_terrain_regions(t->terr, t->batchMaxLod.data(), t->batchRegion.data(), t->regions);
 }
 
 void runJob(Job* j) {
@@ -439,6 +440,9 @@ void runJob(Job* j) {
 }
 
 void workerMain(void*) {
+#ifndef W3D_PC_TEST
+    crashInstall();   // 6.31: crash.txt if this thread crashes
+#endif
     while (!g_quit) {
         LightEvent_Wait(&g_wake);
         for (;;) {
@@ -998,8 +1002,17 @@ void buildChunks(Tile* t) {
 // a building: probably (the doodads of the ADT might line up that way too; once a model is read, only its WMO groups count -
 // updateBuildings). bldgOf[i] = the run's number (1-based), 0 = a lone model.
 constexpr float kBldgSpan = 250.0f;
-void findBuildings(const W3dPlacement* p, uint32_t n, std::vector<uint16_t>& bldgOf, int firstId) {
+// 6.33: ownerOf[i] = the building whose doodad placement i is (0: none). The converter writes a tile's ADT doodads first, then
+// every WMO: its groups, then its doodads (placeWmo) - so a lone placement after a building run is that WMO's doodad. It is
+// given to the building run (of those since the first one) whose group centres' box, widened by kOwnerMargin, holds it,
+// the latest such run first (a WMO spread over more than kBldgSpan is several runs). Shown only once that building is: before
+// 6.33 Stormwind's trees and lamps stood in the air while the city's own floor (WMO groups) was still being read.
+constexpr float kOwnerMargin = 40.0f;
+void findBuildings(const W3dPlacement* p, uint32_t n, std::vector<uint16_t>& bldgOf, std::vector<uint16_t>& ownerOf, int firstId) {
     bldgOf.assign(n, 0);
+    ownerOf.assign(n, 0);
+    struct Run { uint16_t id; float lo[3], hi[3]; };
+    std::vector<Run> runs;
     int id = firstId;
     for (uint32_t i = 0; i < n;) {
         uint32_t j = i + 1;
@@ -1012,7 +1025,22 @@ void findBuildings(const W3dPlacement* p, uint32_t n, std::vector<uint16_t>& bld
         }
         if (distinct && id < 65535) {
             ++id;
-            for (uint32_t k = i; k < j; ++k) bldgOf[k] = (uint16_t)id;
+            Run r;
+            r.id = (uint16_t)id;
+            for (int c = 0; c < 3; ++c) { r.lo[c] = p[i].pos[c]; r.hi[c] = p[i].pos[c]; }
+            for (uint32_t k = i; k < j; ++k) {
+                bldgOf[k] = (uint16_t)id;
+                for (int c = 0; c < 3; ++c) { r.lo[c] = std::min(r.lo[c], p[k].pos[c]); r.hi[c] = std::max(r.hi[c], p[k].pos[c]); }
+            }
+            runs.push_back(r);
+        } else if (!runs.empty()) {   // lone placements after a building: its doodads, probably
+            for (uint32_t k = i; k < j; ++k)
+                for (size_t q = runs.size(); q-- > 0;) {
+                    const Run& r = runs[q];
+                    bool in = true;
+                    for (int c = 0; c < 3 && in; ++c) in = p[k].pos[c] >= r.lo[c] - kOwnerMargin && p[k].pos[c] <= r.hi[c] + kOwnerMargin;
+                    if (in) { ownerOf[k] = r.id; break; }
+                }
         }
         i = j;
     }
@@ -1157,6 +1185,12 @@ void onJobDone(Job* j) {
             g_stats.geomBytes += m->size;
             if (!j->ok) { m->h = nullptr; break; }
             GSPGPU_FlushDataCache(m->blob, m->size);
+            if (!w3d_creature_valid(m->blob, m->size)) {   // 6.35: never drawn (its palettes could write past the uniforms)
+                m->h = nullptr;
+                ++g_stats.badCreatureModels;
+                g_stats.lastBadCreature = m->id;
+                break;
+            }
             m->h = (const W3dCreatureHeader*)m->blob;
             m->lods = w3d_creature_lods(m->blob, m->size);   // stage 6.12
             const W3dCreatureTex* ct = (const W3dCreatureTex*)(m->blob + m->h->offTex);
@@ -1219,9 +1253,9 @@ void onJobDone(Job* j) {
                     const W3dPlacement* p = (const W3dPlacement*)(t->plcm + sizeof ph);
                     t->instances.reserve(ph.count);
                     std::unordered_map<uint32_t, Model*> local;
-                    std::vector<uint16_t> bldgOf;   // stage 6.11: 1 + the building of each placement, 0 = a lone model
+                    std::vector<uint16_t> bldgOf, ownerOf;   // stage 6.11: 1 + the building of each placement, 0 = a lone model; 6.33: owners
                     t->bldgs.clear();
-                    findBuildings(p, ph.count, bldgOf, (int)t->bldgs.size());
+                    findBuildings(p, ph.count, bldgOf, ownerOf, (int)t->bldgs.size());
                     for (u32 i = 0; i < ph.count; ++i) {
                         Model*& m = local[p[i].modelId];
                         const uint8_t cls = bldgOf[i] ? kClsBldModel : kClsObject;
@@ -1236,6 +1270,7 @@ void onJobDone(Job* j) {
                         if (!m) continue;
                         Instance in;
                         in.bldg = bldgOf[i];
+                        in.owner = ownerOf[i];
                         in.model = m;
                         memcpy(in.pos, p[i].pos, sizeof in.pos);
                         memcpy(in.rot, p[i].rot, sizeof in.rot);
@@ -1488,6 +1523,293 @@ void processDeferred() {
 }  // namespace
 
 // ================================================================== API
+// ------------------------------------------------------------------ 6.24: the far ground
+// The map's FARL entry stays in memory for the whole visit; vertex buffers (linear memory, 4.6 KB) are made for the tiles
+// actually drawn and the least recently used are dropped beyond kFarCache.
+namespace {
+// 6.31: the map-wide blobs live in linear memory (CPU-only data, but the normal heap is the scarce one)
+struct LinBlob {
+    uint8_t* p = nullptr;
+    uint32_t n = 0;
+    uint8_t* data() const { return p; }
+    bool resize(uint32_t size) { clear(); p = (uint8_t*)linearAlloc(size); n = p ? size : 0; return p != nullptr; }
+    void clear() { if (p) linearFree(p); p = nullptr; n = 0; }
+};
+LinBlob g_farBlob;
+const W3dFarHeader* g_farHd = nullptr;
+GpuTex* g_farTex = nullptr;
+uint16_t* g_farIdx = nullptr;          // linear: the shared index list
+struct FarVB { W3dTerrainVertex* v = nullptr; uint32_t used = 0; float zmin = 0, zmax = 0; };
+std::unordered_map<int, FarVB> g_farVB;   // [tileY * 64 + tileX]
+uint32_t g_farFrame = 0;
+constexpr size_t kFarCache = 128;   // (6.34: the horizon at 1200 yd is up to 9 x 9 tiles)
+
+void farLoad() {
+    const uint32_t size = streamerEntrySize(W3D_ENTRY_FARLOD, 0);
+    if (!size) return;
+    if (!g_farBlob.resize(size)) return;
+    if (!streamerReadEntry(W3D_ENTRY_FARLOD, 0, g_farBlob.data(), size) || !w3d_far_valid(g_farBlob.data(), size)) {
+        g_farBlob.clear();
+        return;
+    }
+    g_farIdx = (uint16_t*)linearAlloc(W3D_FAR_INDICES * sizeof(uint16_t));
+    if (!g_farIdx) { g_farBlob.clear(); return; }
+    w3d_far_build_indices(g_farIdx);
+    GSPGPU_FlushDataCache(g_farIdx, W3D_FAR_INDICES * sizeof(uint16_t));
+    g_farHd = (const W3dFarHeader*)g_farBlob.data();
+    const float here[3] = {0, 0, 0};
+    AnchorScope as(here, kClsTile);   // small, wanted at once (it hides the holes while the rest loads)
+    g_farTex = acquireTex(g_farHd->texId);
+    g_stats.farTiles = (int)g_farHd->tileCount;
+}
+
+// ------------------------------------------------------------------ 6.29: the far buildings
+LinBlob g_foBlob;
+const W3dFarObjHeader* g_foHd = nullptr;
+GpuTex* g_foTex = nullptr;
+struct FarObjVB {
+    W3dTerrainVertex* v = nullptr;
+    uint16_t* i = nullptr;
+    uint32_t idxCount = 0;
+    std::vector<uint32_t> objStart;   // first index of each object of the tile (+ the end)
+    uint32_t used = 0;
+    float center[3] = {0, 0, 0}, radius = 0;
+};
+std::unordered_map<int, FarObjVB> g_foVB;   // [tileY * 64 + tileX]
+constexpr size_t kFarObjCache = 160;   // (6.34: to the horizon)
+
+void farObjLoad() {
+    const uint32_t size = streamerEntrySize(W3D_ENTRY_FAROBJ, 0);
+    if (!size) return;
+    if (!g_foBlob.resize(size)) return;
+    if (!streamerReadEntry(W3D_ENTRY_FAROBJ, 0, g_foBlob.data(), size) || !w3d_farobj_valid(g_foBlob.data(), size)) {
+        g_foBlob.clear();
+        return;
+    }
+    g_foHd = (const W3dFarObjHeader*)g_foBlob.data();
+    const float here[3] = {0, 0, 0};
+    AnchorScope as(here, kClsTile);
+    g_foTex = acquireTex(g_foHd->paletteTexId);
+    g_stats.farObjects = (int)g_foHd->objectCount;
+}
+
+void farObjFree(FarObjVB& vb, bool now) {
+    if (now) { if (vb.v) linearFree(vb.v); if (vb.i) linearFree(vb.i); }
+    else { if (vb.v) deferFree(FreeKind::Linear, vb.v); if (vb.i) deferFree(FreeKind::Linear, vb.i); }
+    vb.v = nullptr;
+    vb.i = nullptr;
+}
+
+void farObjUnload() {
+    for (auto& [k, vb] : g_foVB) farObjFree(vb, true);
+    g_foVB.clear();
+    if (g_foTex) releaseTex(g_foTex);
+    g_foTex = nullptr;
+    g_foBlob.clear();
+    g_foHd = nullptr;
+    g_stats.farObjects = g_stats.farObjDrawn = g_stats.farObjTiles = 0;
+}
+
+void farUnload() {
+    for (auto& [k, vb] : g_farVB) if (vb.v) linearFree(vb.v);
+    g_farVB.clear();
+    if (g_farTex) releaseTex(g_farTex);
+    g_farTex = nullptr;
+    if (g_farIdx) linearFree(g_farIdx);
+    g_farIdx = nullptr;
+    g_farBlob.clear();
+    g_farHd = nullptr;
+    g_stats.farTiles = g_stats.farDrawn = g_stats.farCached = 0;
+}
+}  // namespace
+
+bool streamerFarDraws(const float cam[3], float maxDist, float detailDist, std::vector<FarDraw>& out, GpuTex** atlas, const uint16_t** indices,
+                      float* zScale) {
+    out.clear();
+    g_stats.farDrawn = 0;
+    if (!g_farHd || !g_farTex || g_farTex->state != AssetState::Ready || g_farTex == &g_white) return false;
+    ++g_farFrame;
+    static bool detailed[64 * 64];
+    memset(detailed, 0, sizeof detailed);
+    for (const Tile* t : g_ready)
+        if (t->tx >= 0 && t->tx < 64 && t->ty >= 0 && t->ty < 64 && !tileBeyond(t->tx, t->ty, cam, detailDist)) detailed[t->ty * 64 + t->tx] = true;
+    const float TS = W3D_FAR_TILE_SIZE;
+    const int ctx = (int)floorf(32.0f - cam[1] / TS), cty = (int)floorf(32.0f - cam[0] / TS);
+    const int r = (int)ceilf(maxDist / TS) + 1;
+    for (int ty = std::max(0, cty - r); ty <= std::min(63, cty + r); ++ty)
+        for (int tx = std::max(0, ctx - r); tx <= std::min(63, ctx + r); ++tx) {
+            if (detailed[ty * 64 + tx]) continue;
+            const W3dFarTile* ft = w3d_far_tile(g_farBlob.data(), tx, ty);
+            if (!ft) continue;
+            float minX, minY;
+            w3d_far_tile_origin(tx, ty, &minX, &minY);
+            // nearest point of the tile's square to the camera (x / y only: a coarse cut, the frustum test follows)
+            const float nx = std::clamp(cam[0], minX, minX + TS) - cam[0], ny = std::clamp(cam[1], minY, minY + TS) - cam[1];
+            if (nx * nx + ny * ny > maxDist * maxDist) continue;
+            FarVB& vb = g_farVB[ty * 64 + tx];
+            if (!vb.v) {
+                vb.v = (W3dTerrainVertex*)linearAlloc(W3D_FAR_VERTS * sizeof(W3dTerrainVertex));
+                if (!vb.v) { g_farVB.erase(ty * 64 + tx); continue; }
+                w3d_far_build_vertices(g_farHd, ft, vb.v);
+                GSPGPU_FlushDataCache(vb.v, W3D_FAR_VERTS * sizeof(W3dTerrainVertex));
+                int16_t lo = 32767, hi = -32767;
+                for (int k = 0; k < W3D_FAR_VERTS; ++k) { lo = std::min(lo, ft->h[k]); hi = std::max(hi, ft->h[k]); }
+                vb.zmin = lo * g_farHd->zScale;
+                vb.zmax = hi * g_farHd->zScale;
+            }
+            vb.used = g_farFrame;
+            FarDraw d;
+            d.verts = vb.v;
+            d.origin[0] = minX; d.origin[1] = minY; d.origin[2] = 0;
+            d.center[0] = minX + TS * 0.5f; d.center[1] = minY + TS * 0.5f; d.center[2] = 0.5f * (vb.zmin + vb.zmax);
+            const float hz = 0.5f * (vb.zmax - vb.zmin);
+            d.radius = sqrtf(2.0f * (TS * 0.5f) * (TS * 0.5f) + hz * hz);
+            out.push_back(d);
+        }
+    // drop the least recently used buffers beyond the cap (never one drawn this frame: the GPU reads it)
+    while (g_farVB.size() > kFarCache) {
+        auto old = g_farVB.end();
+        for (auto it = g_farVB.begin(); it != g_farVB.end(); ++it)
+            if (it->second.used != g_farFrame && (old == g_farVB.end() || it->second.used < old->second.used)) old = it;
+        if (old == g_farVB.end()) break;
+        deferFree(FreeKind::Linear, old->second.v);
+        g_farVB.erase(old);
+    }
+    g_stats.farDrawn = (int)out.size();
+    g_stats.farCached = (int)g_farVB.size();
+    *atlas = g_farTex;
+    *indices = g_farIdx;
+    *zScale = g_farHd->zScale;
+    return !out.empty();
+}
+
+bool streamerFarObjectDraws(const float cam[3], float maxDist, float detailDist, std::vector<FarObjDraw>& out, GpuTex** palette, float* zScale) {
+    out.clear();
+    g_stats.farObjDrawn = 0;
+    if (!g_foHd || !g_foTex || g_foTex->state != AssetState::Ready || g_foTex == &g_white) return false;
+    const float zs = g_farHd ? g_farHd->zScale : 0.25f;
+    static uint32_t frame = 0;
+    ++frame;
+    static const Tile* loaded[64 * 64];
+    memset(loaded, 0, sizeof loaded);
+    for (const Tile* t : g_ready)
+        if (t->tx >= 0 && t->tx < 64 && t->ty >= 0 && t->ty < 64) loaded[t->ty * 64 + t->tx] = t;
+    const W3dFarObject* objs = w3d_farobj_objects(g_foBlob.data());
+    const W3dFarShell* shells = w3d_farobj_shells(g_foBlob.data());
+    const float TS = W3D_FAR_TILE_SIZE;
+    const int ctx = (int)floorf(32.0f - cam[1] / TS), cty = (int)floorf(32.0f - cam[0] / TS);
+    const int r = (int)ceilf(maxDist / TS) + 2;   // (a building may stand well beyond its tile)
+    int built = 0;
+    static std::vector<std::pair<uint32_t, uint32_t>> shown;   // building groups a loaded tile shows: (model id, instance index)
+    for (int ty = std::max(0, cty - r); ty <= std::min(63, cty + r); ++ty)
+        for (int tx = std::max(0, ctx - r); tx <= std::min(63, ctx + r); ++tx) {
+            const int k = ty * 64 + tx;
+            const uint32_t first = g_foHd->tileStart[k], count = g_foHd->tileStart[k + 1] - first;
+            if (!count) continue;
+            auto it = g_foVB.find(k);
+            if (it == g_foVB.end() || !it->second.v) {
+                if (built >= 2) continue;   // at most two new buffers a frame (a few thousand vertices each)
+                uint32_t nv = 0, ni = 0;
+                for (uint32_t i = 0; i < count; ++i) { nv += shells[objs[first + i].shell].vertCount; ni += shells[objs[first + i].shell].indexCount; }
+                if (!nv || nv > 65535) continue;
+                FarObjVB vb;
+                vb.v = (W3dTerrainVertex*)linearAlloc(nv * sizeof(W3dTerrainVertex));
+                vb.i = (uint16_t*)linearAlloc(ni * sizeof(uint16_t));
+                if (!vb.v || !vb.i) { farObjFree(vb, true); continue; }
+                vb.objStart.resize(count + 1);
+                w3d_farobj_build_tile(g_foBlob.data(), tx, ty, zs, vb.v, nv, vb.i, ni, &vb.idxCount, vb.objStart.data());
+                GSPGPU_FlushDataCache(vb.v, nv * sizeof(W3dTerrainVertex));
+                GSPGPU_FlushDataCache(vb.i, ni * sizeof(uint16_t));
+                // the sphere around the tile's buildings
+                float lo[3] = {1e9f, 1e9f, 1e9f}, hi[3] = {-1e9f, -1e9f, -1e9f};
+                for (uint32_t i = 0; i < count; ++i) {
+                    const W3dFarObject& o = objs[first + i];
+                    const float rad = shells[o.shell].radius;
+                    for (int q = 0; q < 3; ++q) { lo[q] = std::min(lo[q], o.pos[q] - rad); hi[q] = std::max(hi[q], o.pos[q] + rad); }
+                }
+                float r2 = 0;
+                for (int q = 0; q < 3; ++q) { vb.center[q] = 0.5f * (lo[q] + hi[q]); r2 += 0.25f * (hi[q] - lo[q]) * (hi[q] - lo[q]); }
+                vb.radius = sqrtf(r2);
+                it = g_foVB.insert_or_assign(k, std::move(vb)).first;
+                ++built;
+            }
+            FarObjVB& vb = it->second;
+            // the coarse cut: the buildings' sphere within the draw distance
+            const float dx = vb.center[0] - cam[0], dy = vb.center[1] - cam[1];
+            if (sqrtf(dx * dx + dy * dy) - vb.radius > maxDist) continue;
+            vb.used = frame;
+            float minX, minY;
+            w3d_far_tile_origin(tx, ty, &minX, &minY);
+            FarObjDraw d;
+            d.verts = vb.v;
+            d.origin[0] = minX; d.origin[1] = minY; d.origin[2] = 0;
+            memcpy(d.center, vb.center, sizeof d.center);
+            d.radius = vb.radius;
+            const Tile* t = loaded[k];
+            // 6.34: the whole tile beyond the real buildings' distance (its nearest building centre farther than detailDist)
+            bool allBeyond = t != nullptr;
+            for (uint32_t i = 0; i < count && allBeyond; ++i) {
+                const W3dFarObject& o = objs[first + i];
+                const float ox = o.pos[0] - cam[0], oy = o.pos[1] - cam[1], oz = o.pos[2] - cam[2];
+                allBeyond = ox * ox + oy * oy + oz * oz > detailDist * detailDist;
+            }
+            if (!t || allBeyond) {   // the tile is not there (or all of it is beyond the real buildings): all of its buildings
+                d.idx = vb.i;
+                d.count = vb.idxCount;
+                if (d.count) out.push_back(d);
+                g_stats.farObjDrawn += (int)count;
+                continue;
+            }
+            // a loaded tile: the buildings it does not show yet, each found by its first group's placement - shown when that group
+            // is: its Tile::Bldg is open, or (a one-group building, no Bldg) its model is drawable
+            shown.clear();
+            for (uint32_t m = 0; m < t->instances.size(); ++m) {
+                const Instance& in = t->instances[m];
+                if (!in.model || !in.model->building) continue;
+                const bool vis = in.bldg ? (in.bldg <= t->bldgs.size() && t->bldgs[in.bldg - 1].open) : in.model->drawable;
+                if (vis) shown.push_back({in.model->id, m});
+            }
+            uint32_t runStart = 0, runEnd = 0;
+            auto flush = [&]() {
+                if (runEnd > runStart) { FarObjDraw e = d; e.idx = vb.i + runStart; e.count = runEnd - runStart; out.push_back(e); }
+                runStart = runEnd = 0;
+            };
+            for (uint32_t i = 0; i < count; ++i) {
+                const W3dFarObject& o = objs[first + i];
+                bool open = false;
+                // 6.34: a building whose centre is beyond the real buildings' distance is a shell (overlap rather than a gap)
+                const float ox = o.pos[0] - cam[0], oy = o.pos[1] - cam[1], oz = o.pos[2] - cam[2];
+                const bool beyond = ox * ox + oy * oy + oz * oz > detailDist * detailDist;
+                for (const auto& [mid, m] : shown) {
+                    if (beyond) break;
+                    if (mid != o.groupModel) continue;
+                    const Instance& in = t->instances[m];
+                    if (fabsf(in.pos[0] - o.groupPos[0]) < 0.05f && fabsf(in.pos[1] - o.groupPos[1]) < 0.05f &&
+                        fabsf(in.pos[2] - o.groupPos[2]) < 0.05f) { open = true; break; }
+                }
+                const uint32_t a = vb.objStart[i], b = vb.objStart[i + 1];
+                if (open || a == b) { flush(); continue; }
+                if (runEnd == a && runEnd > runStart) runEnd = b;
+                else { flush(); runStart = a; runEnd = b; }
+                ++g_stats.farObjDrawn;
+            }
+            flush();
+        }
+    // drop the least recently used buffers beyond the cap (never one drawn this frame)
+    while (g_foVB.size() > kFarObjCache) {
+        auto old = g_foVB.end();
+        for (auto it = g_foVB.begin(); it != g_foVB.end(); ++it)
+            if (it->second.used != frame && (old == g_foVB.end() || it->second.used < old->second.used)) old = it;
+        if (old == g_foVB.end()) break;
+        farObjFree(old->second, false);
+        g_foVB.erase(old);
+    }
+    g_stats.farObjTiles = (int)g_foVB.size();
+    *palette = g_foTex;
+    *zScale = zs;
+    return !out.empty();
+}
+
 bool streamerInit(PackIndex* index, char* err, size_t errLen) {
     g_index = index;
     g_quit = false;   // a map change shuts the streamer down and starts it again on the next pack
@@ -1539,6 +1861,8 @@ bool streamerInit(PackIndex* index, char* err, size_t errLen) {
         g_thread = threadCreate(workerMain, NULL, 32 * 1024, prio + 1, 0, false);
         if (g_thread) g_stats.workerCore = 0;
     }
+    farLoad();   // 6.24 (after the worker: the atlas is read like any texture)
+    farObjLoad();   // 6.29
     return true;
 }
 
@@ -1558,6 +1882,8 @@ void streamerShutdown() {
     }
     // Complete every outstanding job (unrun ones as failed) through the normal path,
     // so assets orphaned while loading are freed exactly as during play.
+    farObjUnload();   // 6.29
+    farUnload();   // 6.24: (the atlas is released before the jobs are drained: a read still running frees it on completion)
     // Completions may submit follow-up jobs (display -> model -> textures): loop until drained.
     for (;;) {
         for (Job* j : g_requests) j->ok = false;
@@ -1730,7 +2056,8 @@ void streamerUpdate(const float camPos[3], float drawDist, bool uploadsLater) {
             const W3dEntry* ce = g_index->find(W3D_ENTRY_COLLISION, w3d_tile_id(t->tx, t->ty));
             if (!ce) continue;
             bool linear = false;
-            uint8_t* buf = (uint8_t*)malloc(ce->size);
+            uint8_t* buf = nullptr;
+            if (heapFreeNow() > ce->size + kCollHeapReserve) buf = (uint8_t*)malloc(ce->size);   // 6.31: never the heap's last MBs
             if (!buf) { buf = (uint8_t*)linearAlloc(ce->size); linear = true; ++g_stats.collHeapMiss; }
             if (!buf) { ++g_stats.collFailed; g_stats.oomLastSize = ce->size; g_stats.oomLastFree = linearSpaceFree(); continue; }
             t->collLoad = new CollLoad{t, buf, ce->size, linear};
@@ -1749,14 +2076,20 @@ void streamerUpdate(const float camPos[3], float drawDist, bool uploadsLater) {
     int cty = (int)floorf(32.0f - camPos[0] / kTileSize);
     int r = drawDist > 450.0f ? 2 : 1;
     if ((2 * r + 1) * (2 * r + 1) > g_slotCount) r = 1;
-    const int keep = r + 1;
+    // 6.31: the normal heap running dry (tiles' heights, instances, models' tables grow with the ring): back to 3 x 3 and the
+    // tiles beyond it are released, until there is room again
+    g_stats.heapFree = heapFreeNow();
+    if (!g_stats.heapShrunk && g_stats.heapFree < kHeapLow) { g_stats.heapShrunk = true; ++g_stats.heapShrinks; }
+    else if (g_stats.heapShrunk && g_stats.heapFree > kHeapOk) g_stats.heapShrunk = false;
+    if (g_stats.heapShrunk) r = 1;
+    const int keep = g_stats.heapShrunk ? 1 : r + 1;
 
     for (TileExt* t : std::vector<TileExt*>(g_tiles)) {
         if (t->doomed) continue;
         if (abs(t->tx - ctx) > keep || abs(t->ty - cty) > keep) releaseTile(t);
     }
 
-    struct Want { int tx, ty; float d2; };
+    struct Want { int tx, ty; float d2; bool ahead; };
     std::vector<Want> want;
     for (int dx = -r; dx <= r; ++dx)
         for (int dy = -r; dy <= r; ++dy) {
@@ -1764,15 +2097,32 @@ void streamerUpdate(const float camPos[3], float drawDist, bool uploadsLater) {
             if (!g_index->hasTile(tx, ty) || findTile(tx, ty)) continue;
             float cxw = (32.0f - ty - 0.5f) * kTileSize, cyw = (32.0f - tx - 0.5f) * kTileSize;
             float ddx = cxw - camPos[0], ddy = cyw - camPos[1];
-            want.push_back({tx, ty, ddx * ddx + ddy * ddy});
+            want.push_back({tx, ty, ddx * ddx + ddy * ddy, false});
         }
-    std::sort(want.begin(), want.end(), [](const Want& a, const Want& b) { return a.d2 < b.d2; });
+    // 6.24: read ahead - the tiles around the point 300 yards in front of the camera that lie beyond the wanted ring (still
+    // within 'keep', so they are not released again): by the time the walker gets there their ground is in. Only into free
+    // terrain slots (never evicting for it), after everything of the ring.
+    if (g_haveFwd && !g_stats.heapShrunk) {
+        const float px = camPos[0] + g_fwd[0] * 300.0f, py = camPos[1] + g_fwd[1] * 300.0f;
+        const int ptx = (int)floorf(32.0f - py / kTileSize), pty = (int)floorf(32.0f - px / kTileSize);
+        for (int dx = -1; dx <= 1; ++dx)
+            for (int dy = -1; dy <= 1; ++dy) {
+                const int tx = ptx + dx, ty = pty + dy;
+                if (std::max(abs(tx - ctx), abs(ty - cty)) != r + 1) continue;   // only the next ring
+                if (!g_index->hasTile(tx, ty) || findTile(tx, ty)) continue;
+                const float cxw = (32.0f - ty - 0.5f) * kTileSize, cyw = (32.0f - tx - 0.5f) * kTileSize;
+                const float ddx = cxw - camPos[0], ddy = cyw - camPos[1];
+                want.push_back({tx, ty, ddx * ddx + ddy * ddy, true});
+            }
+    }
+    std::sort(want.begin(), want.end(), [](const Want& a, const Want& b) { return a.ahead != b.ahead ? !a.ahead : a.d2 < b.d2; });
 
     int loading = 0;
     for (TileExt* t : g_tiles) if (!t->doomed && t->state != TileState::Ready) ++loading;
     for (const Want& w : want) {
         static const int kMaxLoading = (int)tunable("W3D_TILES", 4.0f);
         if (loading >= kMaxLoading) break;   // the read queue puts the nearest tile's contents first (stage 5.30)
+        if (w.ahead && (g_freeSlots.empty() || loading > 0)) break;   // read-ahead: only when the ring is in and a slot is free
         if (g_freeSlots.empty()) {
             // Evict the farthest tile outside the wanted radius.
             TileExt* victim = nullptr;
@@ -1950,8 +2300,15 @@ uint32_t streamerEvictVram(const uint32_t* blocks, int n) {
         C3D_Tex lin;
         if (!C3D_TexInitWithParams(&lin, NULL, p)) break;   // no linear memory either
         const u32 total = texTotalSize(t->tex);
+        // 6.28: the new block is cacheable linear memory that may still have dirty lines in the CPU's data cache (whatever
+        // used it before). The GPU writes the copy straight into RAM; a dirty line written back later puts the old bytes
+        // over it - textures turned to noise after switching to 3D / 800x240 (the photo on the character screen: the
+        // world's textures shared with the scene). Write the lines back and drop them before the copy, drop again after.
+        GSPGPU_FlushDataCache(lin.data, total);
         // outside a frame this waits for the GPU first (C3Di_SafeTextureCopy): the old copy is no longer read after it
         C3D_SyncTextureCopy((u32*)t->tex.data, 0, (u32*)lin.data, 0, total, 8);
+        GSPGPU_InvalidateDataCache(lin.data, total);
+        ++g_stats.texEvicted;
         lin.param = t->tex.param;   // filters, wrap and mip settings as they were
         lin.border = t->tex.border;
         lin.lodParam = t->tex.lodParam;
@@ -2076,9 +2433,10 @@ bool streamerFloorHeight(float wx, float wy, float zFeet, float* out, bool* onFl
     bool haveT = streamerGroundHeightEx(wx, wy, &terrain, &hole);
     // 6.17: in an ADT hole the "terrain" is a membrane filled in over the building's opening (Ironforge's gate): never a floor
     // above the feet - walking in through the gate climbed it step by step and carried the character up the mountain.
-    if (haveT && hole && terrain > zFeet + 0.05f) haveT = false;
     Tile* t = tileAt(wx, wy);
     const uint8_t* coll = t ? t->coll : nullptr;
+    // 6.21: nor where a building's floor lies under the membrane: the opening is open, the walker goes down onto that floor
+    if (haveT && hole && !w3d_hole_terrain_usable(coll, wx, wy, zFeet, kStepHeight, terrain)) haveT = false;
     if (held) *held = false;
     if (!haveT && !coll) return false;
     int f = 0;

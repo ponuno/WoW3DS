@@ -19,6 +19,9 @@
 #include <glm/gtc/quaternion.hpp>
 
 #include <algorithm>
+#include <array>
+#include <cstring>
+#include <map>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -39,6 +42,9 @@ struct WmoAsset {
     // Liquids (stage 5.26): wet MLIQ cells of every group, WMO space, corners in order, with their kind.
     struct LiquidCell { glm::vec3 p[4]; uint8_t kind; };
     std::vector<LiquidCell> liquid;
+    // 6.29: the far shell (buildFarShell), when the building is large enough
+    bool hasShell = false;
+    ConvStats::FarShellSrc shell;
 };
 
 // Root MOHD fields the WoWee loader does not keep: flags (u16 at +60) and the WMO id (u32 at +32).
@@ -306,6 +312,41 @@ static const WmoAsset& loadWmoImpl(PackWriter& pack, const DataDir& data, const 
                         (g.flags & 0x2000) ? "interior" : "exterior");
     }
 
+    // 6.29: the far shell - the outside groups' drawn triangles (no interiors, no additive glows), each with the mean colour
+    // of its material's texture
+    if (!o.noFarObjects && groupsOk) {
+        std::vector<float> tris, rgb;
+        std::map<uint32_t, std::array<float, 3>> matRgb;
+        for (const auto& g : w.groups) {
+            if ((g.flags & 0x2000) && !(g.flags & 0x8)) continue;
+            for (const auto& b : g.batches) {
+                if (b.materialId == 0xFF || b.materialId >= w.materials.size()) continue;
+                const auto& m = w.materials[b.materialId];
+                if (m.blendMode >= 3) continue;
+                auto mc = matRgb.find(b.materialId);
+                if (mc == matRgb.end()) {
+                    std::array<float, 3> c{0.55f, 0.52f, 0.47f};
+                    auto ti = w.textureOffsetToIndex.find(m.texture1);
+                    if (ti != w.textureOffsetToIndex.end() && ti->second < w.textures.size()) farMeanColour(&data, w.textures[ti->second], c.data());
+                    mc = matRgb.emplace(b.materialId, c).first;
+                }
+                for (uint32_t k = b.startIndex; k + 2 < b.startIndex + b.indexCount && k + 2 < g.indices.size(); k += 3) {
+                    const uint16_t i0 = g.indices[k], i1 = g.indices[k + 1], i2 = g.indices[k + 2];
+                    if (i0 >= g.vertices.size() || i1 >= g.vertices.size() || i2 >= g.vertices.size()) continue;
+                    for (uint16_t vi : {i0, i1, i2}) {
+                        const auto& p = g.vertices[vi].position;
+                        tris.insert(tris.end(), {p.x, p.y, p.z});
+                    }
+                    rgb.insert(rgb.end(), mc->second.begin(), mc->second.end());
+                }
+            }
+        }
+        a.hasShell = buildFarShell(tris, rgb, o.farObjMin, o.farObjTris, a.shell);
+        if (a.hasShell && o.verbose)
+            std::printf("    far shell: %zu triangles -> %zu, %zu vertices, radius %.0f yd\n", tris.size() / 9, a.shell.idx.size() / 3,
+                        a.shell.pos.size() / 3, a.shell.radius);
+    }
+
     if (untextured && o.verbose) std::printf("  WMO %s: %zu batches drawn untextured\n", path.c_str(), untextured);
     st.wmoBatchesUntextured += untextured;
 
@@ -525,6 +566,19 @@ void placeWmo(PackWriter& pack, const DataDir& data, const std::string& path, co
                          p.pos[0], p.pos[1], p.pos[2], p.rot[0], p.rot[1], p.rot[2]);
     }
     ++st.wmoPlacements;
+    if (a.hasShell && !a.groups.empty()) {   // 6.29: a far object (emitFarObjects)
+        const std::string key = DataDir::normalize(path);
+        if (!st.farShells.count(key)) st.farShells[key] = a.shell;
+        ConvStats::FarObjSrc f;
+        f.key = key;
+        std::memcpy(f.pos, pos, sizeof f.pos);
+        std::memcpy(f.rot, eulerRad, sizeof f.rot);
+        f.groupModel = a.groups[0].modelId;
+        const glm::vec4 c = W * glm::vec4(a.groups[0].center, 1.0f);
+        f.groupPos[0] = c.x; f.groupPos[1] = c.y; f.groupPos[2] = c.z;
+        f.tile = o.tileY * 64 + o.tileX;   // the tile being converted writes the groups (also for a building whose origin is outside the region)
+        st.farObjs.push_back(f);
+    }
     if (!o.noFloors) addCollisionTris(o, st, a.coll.data(), a.coll.size(), W, false);
     // liquids: each cell goes to the tile under its centre (inside the region)
     for (const auto& c : a.liquid) {

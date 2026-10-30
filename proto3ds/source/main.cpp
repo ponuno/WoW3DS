@@ -33,6 +33,7 @@
 #include "ui_style.hpp"
 #include "ui_assets.hpp"
 #include "ui_render.hpp"
+#include "crash.hpp"
 #include "perflog.hpp"
 
 #include <math.h>
@@ -54,15 +55,12 @@
      GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB565) | \
      GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
 
-// Memory split: libctru caps the GPU-visible linear heap at 32 MB by default.
-// Fixing the ordinary heap at 24 MB gives everything else (~90 MB on New 3DS)
-// to the linear heap, where terrain, models and texture staging live.
-extern "C" {
-u32 __ctru_heap_size = 24 * 1024 * 1024;
-}
+// Memory split: source/heaps.cpp (6.32) - heap 24 MB under the Homebrew Launcher (124 MB region), 48 MB from the CIA (178 MB);
+// everything else is the linear heap, where terrain, models and texture staging live.
 
 static const char* kOutDir = "sdmc:/3ds/w3dproto";
 static const float kDrawDists[5] = {120, 250, 400, 533, 800};
+static const float kHorizons[3] = {0, 800, 1200};   // 6.34b: Settings -> Interface -> Horizon (off / 800 / 1200 yd)
 
 struct Bench {
     bool running = false;
@@ -85,7 +83,10 @@ struct Report {
     double worldMs = 0, fxMs = 0, fxPeakMs = 0, gpuMs = 0;
 };
 static Report g_report;
-extern "C" void gxCmdQueueInterrupt(GSPGPU_Event irq);   // libctru gxqueue.c (not in its headers): what a GX "done" does
+extern "C" void gxCmdQueueInterrupt(GSPGPU_Event irq);
+extern "C" {
+extern u32 __ctru_heap_size, __ctru_linear_heap_size;   // (source/heaps.cpp)
+}   // libctru gxqueue.c (not in its headers): what a GX "done" does
 static bool g_kickBroken = false;   // stage 6.7: the GPU queue got stuck with the early kick on (see the wait in the loop)
 static const SpellView* g_spellViewPtr = nullptr;   // stage 5.33: for report.txt
 static LoginFlow g_login;
@@ -404,6 +405,10 @@ static void writeReport(const Bench* b, float drawDist, const RenderSettings& rs
     fprintf(f, "terrain pool: %d slots\ntextures that had to wait for memory: %u total, %d now (drawn white until it frees)\ntextures white because not in the pack: %u, because the read failed: %u\n", s.slotsTotal,
             (unsigned)s.texOomTotal, s.texOom, (unsigned)s.texNotInPack, (unsigned)s.texReadFailed);
     fprintf(f, "time to first frame: %.0f ms\n", g_report.firstFrameMs);
+    fprintf(f, "far ground (6.24): %d tiles%s, %d drawn last frame, %d vertex buffers\n", s.farTiles,
+            s.farTiles ? "" : " (the pack has none: convert again)", s.farDrawn, s.farCached);
+    fprintf(f, "far buildings (6.29): %d in the map%s, %d drawn last frame, %d tile buffers\n", s.farObjects,
+            s.farObjects ? "" : " (the pack has none: convert again)", s.farObjDrawn, s.farObjTiles);
     fprintf(f, "APPLICATION region available: %lu KB\n\n", (unsigned long)(g_report.appRegion / 1024));
     fprintf(f, "now resident: %d tiles, %d models, %d textures\n", s.tilesReady, s.models, s.textures);
     fprintf(f, "  textures %lu KB VRAM + %lu KB linear, geometry %lu KB\n", (unsigned long)(s.texVram / 1024),
@@ -411,6 +416,8 @@ static void writeReport(const Bench* b, float drawDist, const RenderSettings& rs
     fprintf(f, "  linear used since start %lu KB, VRAM used %lu KB\n",
             (unsigned long)((g_report.linearAtStart - linearSpaceFree()) / 1024),
             (unsigned long)((g_report.vramAtStart - vramSpaceFree()) / 1024));
+    fprintf(f, "  heap (6.31): %lu KB free now, tiles kept to 3 x 3 for want of it %lu times%s, COLL in linear memory %lu times\n",
+            (unsigned long)(s.heapFree / 1024), (unsigned long)s.heapShrinks, s.heapShrunk ? " (now)" : "", (unsigned long)s.collHeapMiss);
     fprintf(f, "tile loads so far: %lu, ground shown after avg %.0f ms, max %.0f ms (request -> terrain drawn)\n", (unsigned long)s.tileLoads,
             s.tileLoads ? s.sumTileMs / s.tileLoads : 0.0, s.maxTileMs);
     fprintf(f, "  complete (every model and texture): %lu tiles, avg %.0f ms, max %.0f ms; models waiting for textures now %d\n",
@@ -555,11 +562,18 @@ static void fail(const char* msg) {
 }
 
 int main() {
+    crashInstall();   // 6.31: crash.txt on a CPU exception
     osSetSpeedupEnable(true);  // 804 MHz + L2 on New 3DS
     gfxInitDefault();
     romfsInit();
     PrintConsole bottom;
     consoleInit(GFX_BOTTOM, &bottom);
+    {   // 6.32b: the memory the system gave (a CIA in the 178 MB mode: region 182272 KB, heap 49152 KB) - on the touch screen
+        // until the game draws there, so a launch that stops early still says how far it got
+        printf("w3dproto: region %lu KB, heap %lu KB, linear %lu KB\n%s\n", (unsigned long)(osGetMemRegionSize(MEMREGION_APPLICATION) / 1024),
+               (unsigned long)(__ctru_heap_size / 1024), (unsigned long)(__ctru_linear_heap_size / 1024),
+               envIsHomebrew() ? "(3dsx)" : "(CIA)");
+    }
     C3D_Init(C3D_DEFAULT_CMDBUF_SIZE * 8);   // 2 MB: thousands of draws per frame
 
     C3D_RenderTarget* top = C3D_RenderTargetCreate(240, 400, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
@@ -703,6 +717,8 @@ int main() {
     char padPath[96];
     snprintf(padPath, sizeof padPath, "%s/pad.txt", kOutDir);
     padCfg.load(padPath);
+    rendererSetHorizon(kHorizons[std::clamp(padCfg.horizon, 0, 2)]);   // 6.34b
+    rendererSetProjection(cam.drawDist);
     ui::g_lang = padCfg.lang;   // 6.20: the language from the first frame on (the main menu too)
     rs.effects = padCfg.effects;
     perf::init(kOutDir, padCfg.perfLog);   // stage 6: perf.csv (a row a second) + perf_events.txt
@@ -1003,6 +1019,7 @@ int main() {
             {   // stage 5.45: the zone banner and the names of explored areas (glue.txt "Z" lines, AreaTable)
                 if (!gs.areaName) gs.areaName = zoneNameOf;
                 g_zoneBanner.update(g_login.mapId(), audio::area(), g_login.sessionMs(), zoneNameOf, zoneParentOf);
+                if (g_zoneBanner.zone()) gs.updateDefaultChannels(g_zoneBanner.zone(), zoneNameOf(g_zoneBanner.zone()), g_login.sessionMs());   // the original's General / Trade / LocalDefense / LFG
             }
             if (uiOut.faceYaw && walk) {   // turn to the target (spell, loot, BADFACING); the camera follows
                 charYaw = uiOut.yaw;
@@ -1013,6 +1030,7 @@ int main() {
             if (uiOut.graphicsChanged) {   // the Settings tab: draw distance, world objects
                 distIdx = std::clamp(padCfg.drawDist, 0, 3);
                 cam.drawDist = kDrawDists[distIdx];
+                rendererSetHorizon(kHorizons[std::clamp(padCfg.horizon, 0, 2)]);   // 6.34b
                 rendererSetProjection(cam.drawDist);
                 rs.doodads = padCfg.doodads;
                 rs.effects = padCfg.effects;
@@ -1021,6 +1039,13 @@ int main() {
             if (bars.empty() && !gs.spells.empty() && bars.autofill(gs)) uiOut.layoutChanged = true;
             if (uiOut.layoutChanged && !barsPath.empty()) bars.save(barsPath.c_str());
             if (uiOut.quit) break;
+            if (uiOut.characters) {   // START menu: log out; the timer runs, the character list comes when it ends
+                if (g_login.requestCharacterList()) gs.addSystem(ui::tr("Logging out... move to cancel.", "Выход... двиньтесь, чтобы отменить."), g_login.sessionMs());
+            }
+            if (g_login.logoutPending() && (po.dir || po.jump)) {   // as the original: moving cancels the logout
+                g_login.cancelLogout();
+                gs.addSystem(ui::tr("Logout cancelled.", "Выход отменён."), g_login.sessionMs());
+            }
             if (uiOut.freeCamera) {
                 walk = !walk;
                 if (walk) {   // back into the character
@@ -1445,8 +1470,8 @@ int main() {
                             if (o.type != w3n::ObjType::GameObject || !o.hasPos) continue;
                             const float ddx = o.mv.x - pl[0], ddy = o.mv.y - pl[1];
                             if (ddx * ddx + ddy * ddy > 36.0f) continue;
-                            perf::event("  object near: entry %u display %u type %u state %u at %.1f %.1f %.1f%s", o.entry(), o.displayId(),
-                                        o.goType(), o.goState(), o.mv.x, o.mv.y, o.mv.z,
+                            perf::event("  object near: entry %u display %u type %u state %u at %.1f %.1f %.1f%s", (unsigned)o.entry(), (unsigned)o.displayId(),
+                                        (unsigned)o.goType(), (unsigned)o.goState(), o.mv.x, o.mv.y, o.mv.z,
                                         game->objects.transports.staticDeck(o.displayId()) ? " (platform)" : "");
                         }
                     }
@@ -1470,7 +1495,28 @@ int main() {
                     airborne = jumped = true;
                     plVz = 7.9555473f;
                 }
-                if (!airborne && haveGround && ground < pl[2] - 1.0f) {   // walked off a ledge: fall
+                // 6.22: the ground under the feet may drop away for a frame or two while climbing - the seam between two stair
+                // treads or a building's floor and the terrain, a slope's triangles at a tile edge - and the walker "fell" for
+                // that moment: the jump / fall animation flashed on stairs and slopes (and a fall packet went to the server).
+                // A real ledge stays a ledge: the drop must last LEDGE_HOLD seconds (the height is kept meanwhile, the walker
+                // keeps moving over it) before the fall starts. A flicker that ends sooner is noted in the perf log.
+                static float ledgeT = 0, ledgeDrop = 0;
+                const bool dropNow = !airborne && haveGround && ground < pl[2] - 1.0f;
+                bool holdLedge = false;
+                if (dropNow) {
+                    ledgeT += dt;
+                    ledgeDrop = std::max(ledgeDrop, pl[2] - ground);
+                    holdLedge = ledgeT < 0.12f;
+                } else {
+                    if (ledgeT > 0 && ledgeT < 0.12f)
+                        perf::event("ledge flicker ignored: the ground dropped up to %.1f yd for %.0f ms at %.1f %.1f %.1f", ledgeDrop,
+                                    ledgeT * 1000.0f, pl[0], pl[1], pl[2]);
+                    ledgeT = 0;
+                    ledgeDrop = 0;
+                }
+                if (dropNow && !holdLedge) {   // walked off a ledge: fall
+                    ledgeT = 0;
+                    ledgeDrop = 0;
                     airborne = true;
                     jumped = false;
                     plVz = 0;
@@ -1515,7 +1561,7 @@ int main() {
                             perf::event("land: fell %.1f yd (z %.1f -> %.1f), FALL_LAND sent", fallFromZ - ground, fallFromZ, ground);
                         jumped = false;
                     }
-                } else if (haveGround) {
+                } else if (haveGround && !holdLedge) {
                     pl[2] = ground;
                     if (deepWater()) {   // waded in deep enough: float up to the surface
                         swimState = swim::State();
@@ -1527,7 +1573,7 @@ int main() {
                 }
                 // 6.14: standing on solid ground for a moment makes a safe place; a fall into nothing (no terrain, no floor, no
                 // object under us, 80 yards below the safe place) puts the character back there instead of dropping for ever.
-                if (!airborne && haveGround && !ride.guid && !loadingWorld) {
+                if (!airborne && haveGround && !holdLedge && !ride.guid && !loadingWorld) {
                     groundedFor += dt;
                     if (groundedFor >= 0.4f) { memcpy(safePos, pl, sizeof safePos); safeValid = true; }
                 } else {
@@ -1843,6 +1889,8 @@ int main() {
             hi.zoneAlpha = g_zoneBanner.alpha(netMs);
             hi.zoneBig = g_zoneBanner.big().c_str();
             hi.zoneSmall = g_zoneBanner.small().c_str();
+            hi.charSheet = gameUi.charSheetOpen(*game);   // UI stage 14: the Equipment tab = the character window up here
+            if (hi.charSheet) hi.doll = portrait::doll(game->selfGuid());
             hi.portrait[0] = portrait::image(0, game->selfGuid());
             hi.portrait[1] = portrait::image(1, game->target());
             hudBuildGame(hud, hi);
@@ -2016,6 +2064,7 @@ int main() {
                 g_kickBroken = true;
             }
         }
+        crashCheckCmdBuf();   // 6.31
         lastBegin = svcGetSystemTick();
         u64 afterWait = svcGetSystemTick();
         perf::lap(perf::kWait);
@@ -2027,12 +2076,19 @@ int main() {
         perf::lap(perf::kStream);
         perf::mark("portraits");
         if (online && !loginUi && !bench.running) portrait::frame(portraitUnit, portraitGuid, netMs, fc);   // (its own targets)
+        {   // UI stage 14: the figure of the character window (only while it is shown; nothing is drawn otherwise)
+            static bool dollShown = false;
+            const bool want = online && !loginUi && !bench.running && game && gameUi.charSheetOpen(*game);
+            if (want) portrait::frameDoll(portraitUnit[0], portraitGuid[0], 0.0f, netMs, fc);
+            else if (dollShown) portrait::dollForget();
+            dollShown = want;
+        }
         perf::lap(perf::kPortrait);
         {
             C3D_RenderTarget* left = topModeNow == 1 ? topWide : top;   // wide: the 400-wide HUD layout is stretched x2 (pixels are half as wide)
             const float slider = topModeNow == 2 ? osGet3DSliderState() : 0.0f;
             const bool stereo = slider > 0.02f && topRight;
-            const float iod = slider * 0.12f;   // yards; the zero-parallax plane is 5 yd away (render.cpp)
+            const float iod = slider * 0.30f;   // yards (6.27: stronger, was 0.12); the zero-parallax plane is 5 yd away (render.cpp)
             rs.gpuKick = padCfg.gpuKick && !stereo && !g_kickBroken;   // stage 6.3 (two eyes share the passes' buffers: no early kick)
             for (int eye = 0; eye < (stereo ? 2 : 1); ++eye) {
                 C3D_RenderTarget* t = eye == 0 ? left : topRight;
@@ -2257,7 +2313,7 @@ int main() {
             // reserve for the other modes, the two portraits (colour + depth24)
             pc.vramTargets = 240 * 400 * 8 + (bottomT ? 240 * 320 * 4 : 0) + (topWide ? 240 * 800 * 8 : 0) + (topRight ? 240 * 400 * 8 : 0);
             pc.vramReserve = 0;   // (stage 6.5: no reserve any more)
-            pc.vramPortraits = 2 * ui::kPortraitSize * ui::kPortraitSize * 7;
+            pc.vramPortraits = (2 * ui::kPortraitSize * ui::kPortraitSize + ui::kDollSize * ui::kDollSize) * 7;
             pc.cmdBufBytes = C3D_DEFAULT_CMDBUF_SIZE * 8;
             perf::second(pc);
         }

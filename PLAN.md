@@ -2467,3 +2467,291 @@ FPS при `--terrain-centers`.
 - Полоса опыта ConsolePort: `XPBar.blp` — это текстура заливки (StatusBar), а не рамка; раньше рисовалась поверх всей полосы и скрывала заливку («всегда пустая»). Теперь она — заливка, обрезанная по доле опыта; без аддона — прежняя полоса с 20 делениями.
 - Тесты: spell_text_test, SPELL DESCRIPTIONS в run_text_tests.sh, сцена ui «spell_desc» (56 сцен, 0 ошибок).
 - Пользователю: пересобрать клиент и конвертер, прогнать `--texts-only`/`--ui`/`all.bat`, чтобы `spelldesc.bin` оказался рядом со `spells.txt`.
+
+## Часть 66. UI-этап 14 — окно персонажа на верхнем экране (вкладка «Снаряжение»)
+- Пока на нижнем экране открыта вкладка Bags → Equipment (и нет другого окна), верхний экран показывает окно персонажа вместо HUD: имя, уровень и класс, **фигура персонажа во весь рост** (рендер модели в текстуру 128×128, внешняя текстура №2, `portrait::frameDoll`, ~15 кадров/с, освещение и сглаживание как у портретов, калибровка ориентации общая), **средний уровень предметов** и два столбца статов (характеристики, броня, сопротивления, ближний бой, защита, дальний бой, бонус заклинаний). Слоты предметов остаются на нижнем экране, как были.
+- `net/charsheet.hpp` (только заголовок): поля 1.12.1 из UpdateFields_1_12_1.h (STAT0 150, RESISTANCES 155, ATTACK_POWER 165/166, RANGED 168/169, DAMAGE 134/135 и 171/172, BLOCK/DODGE/PARRY/CRIT 1106–1110, POSSTAT0 1177, NEGSTAT0 1182, MOD_DAMAGE_DONE_POS 1201). ilvl: среднее по головe, шее, плечам, спине, груди, запястьям, кистям, поясу, ногам, ступням, 2 кольцам, 2 аксессуарам, основной и вторая рука (двуручка считается за обе), дальний бой — только если надет; рубашка и накидка не считаются; пустой слот = 0. Если данные части предметов ещё не пришли, показывается «n/m предметов изучено».
+- `rendererDrawPortrait(..., body, turn)`: режим «во весь рост» (камера по центру габарита, FOV 30°, чуть сбоку).
+- Тесты: `net/tests/charsheet_test.cpp` (10 проверок, в run_stage5.sh), `W3D_SHEET=1 run_hud.sh` рисует окно с выдуманными статами. ARM-компиляция main/portrait/render/hud_game чистая. На консоли не проверено: калибровка и VRAM (+64 КБ цвет, +48 КБ глубина).
+
+## Часть 67. Этап 6.21 — «невидимая стена» у входов в здания и тоннели (дыры в земле ADT)
+- Симптом (Coldridge Valley, вход в тоннель): персонаж висит в воздухе перед проёмом и не может пройти; в оригинальном клиенте на том же месте он спрыгивает на пол тоннеля и проходит — значит, лишняя коллизия наша.
+- Причина: там, где здание уходит в землю, у ADT дыра (holes), и в оригинале земли там нет вовсе. У нас в дыре — «перепонка» (высоты, натянутые над проёмом); с 6.17 она не считалась полом только ВЫШЕ ног, а на уровне ног и ниже — считалась. `w3d_walk_height` берёт наивысшую поверхность из земли и пола здания, и перепонка над полом тоннеля держала персонажа в воздухе; дальше перепонка уходит вверх по склону, и персонаж упирался в арку тоннеля.
+- Исправление: `w3d_hole_terrain_usable` (common/w3d_collision.h): в дыре земля используется, только если под ногами нет пола здания (коллизия отсутствует или ещё не загружена) и она не выше ног. Есть пол — персонаж опускается на него, как в оригинале.
+- Тесты: run_slope.sh (новая группа «terrain over an ADT hole»), run_holes.sh — PASS.
+- ARM-проверка восстановлена (зависимости заново склонированы в /home/claude/deps): все proto3ds/source/*.cpp и net/*.cpp компилируются под mpcore. Найдена и исправлена ошибка этапа UI 14 (charsheet.hpp: лямбда возвращала `unsigned int` и `uint32_t`, а в devkitARM это `unsigned long`) — в 7f клиент бы не собрался.
+- Windows-сборка снова возможна в песочнице: релиз llvm-mingw 20240619 (ucrt) скачивается с GitHub; `cmake -DCMAKE_SYSTEM_NAME=Windows` с
+  x86_64-w64-mingw32-clang++, FETCHCONTENT_SOURCE_DIR_* на локальные клоны (glm, meshoptimizer, rg-etc1, WoWee, StormLib). Собраны
+  w3dconv.exe (со StormLib), w3dgui.exe, w3dpreview.exe — зависят только от системных DLL (UCRT, Windows 10+). Пак: w3dconv-win64-7g.zip.
+
+## Часть 68. Этап 6.22 — меню грифонов показывало чужие точки полёта
+- Симптом: орк 1 уровня, знающий только Оргриммар, видел в списке перелёт в Мулгор (Громовой Утёс), которого у него нет.
+- Причина: маска известных узлов из SMSG_SHOWTAXINODES индексируется **номером узла минус 1** (vMaNGOS `PlayerTaxi::IsTaximaskNodeKnown`: `(nodeidx - 1) / 32`, `1 << ((nodeidx - 1) % 32)`), а `TaxiWindow::known()` читал бит с номером узла: Оргриммар (23, бит 22) выглядел как Громовой Утёс (22), а после изучения Перекрёстка (25, бит 24) «известным» становился узел 24. Все маршруты (taxiCost, цена, перелёт) строятся по тому же `known()`.
+- Исправление: `known(n)`: `mask[(n-1)/32] >> ((n-1)%32)`, n = 1..256 (net/game.hpp). Тест `net/tests/taxi_mask_test.cpp` (5 проверок, в run_stage5.sh): Оргриммар известен, соседи нет; границы слов 32/33; 256.
+- Побочно: перелёт в «неизученную» точку теперь отказывается сразу строкой «You haven't learned that flight path yet.», а не ответом сервера.
+
+## Часть 69. Этап 6.23 — анимация прыжка на лестницах и склонах
+- Симптом: при подъёме по лестнице или склону персонаж иногда на мгновение проигрывал прыжок/падение.
+- Причина (по коду, на консоли не воспроизведено): «упал с уступа» срабатывало сразу, как только земля под ногами оказывалась ниже ног больше чем на ярд — а на стыке ступеней, пола здания и земли, на границах тайлов земля на кадр-два «пропадала» вглубь. Mover.fall() ставил флаг Jumping (анимация прыжка + пакет серверу), следующий кадр — приземление.
+- Исправление (main.cpp): падение начинается, только если провал длится ≥ 0.12 с; пока ждём, высота ног сохраняется. Короткий провал игнорируется и пишется в perf_events.txt строкой «ledge flicker ignored: the ground dropped up to N yd for M ms at x y z» — по ним видно, где именно земля пропадает (это подскажет, что чинить в конвертере). Настоящий обрыв: падение начинается на 0.12 с позже, незаметно.
+
+## Часть 70. Этап 6.24 — дальняя земля (Far LOD) и упреждающая подгрузка (НА КОНСОЛИ НЕ ПРОВЕРЕНО)
+- Жалоба: дыры в небо прямо перед персонажем, пока консоль не дочитала тайл (особенно после входа, телепорта, на быстрой скорости).
+- **Формат** `common/w3d_farlod.h`, запись `FARL` (id 0, тайловая — лежит в паке карты, не в пуле): на каждый тайл карты 17×17 высот в углах чанков
+  (int16 × 0.25 ярда) + ячейка 16×16 текселей цвета в одном атласе (ETC1, 512×N, без мипов). ~600 байт + 128 байт атласа на тайл
+  (Восточные королевства ≈ 1 МБ). Высоты сконвертированных тайлов — из ADT (точно совпадают с подробной землёй в углах), остальных — из
+  `<map>.wdl` (MAOF/MARE; из четырёх прочтений — индекс [y][x]/[x][y], сетка прямо/транспонированно — берётся то, что лучше совпадает с ADT,
+  в логе «far ground: WDL … reading N … mean difference … yd»). Цвет чанка — средние цвета текстур слоёв, смешанные по средней альфе (как игра
+  кладёт слои); тайлы только из WDL — средний цвет карты. Подземелья (без ADT) — без дальней земли.
+- **Конвертер** `converter/src/farlod.cpp`: `collectFarTile` (из convertTile), `emitFarLod` (после тайлов карты, в --all и обычном режиме);
+  `--no-far-lod`. Лог: «far ground: N tiles (M from the WDL), atlas WxH, K KB».
+- **Клиент**: streamer.cpp грузит FARL при входе на карту (атлас — обычной текстурой, приоритет как у земли), буферы вершин (289 вершин,
+  4,6 КБ) создаются для рисуемых тайлов, кэш 96 (LRU, освобождение отложенное). render.cpp рисует дальнюю землю тем же шейдером земли
+  (оба текстурных блока = атлас, вершина a = 0, r = запечённый свет из нормали) там, где у тайла нет подробной земли, в пределах дальности
+  прорисовки; на 0,6 ярда ниже настоящей, чтобы на стыке подробная была впереди (щели закрывают юбки подробных тайлов). report.txt:
+  «far ground (6.24): N tiles, D drawn last frame, B vertex buffers» (0 — пак старый, нужна переконвертация).
+- **Упреждающая подгрузка**: тайлы вокруг точки в 300 ярдах перед камерой из следующего кольца читаются, когда кольцо уже загружено и есть
+  свободный слот (без вытеснения); остаются, пока в пределах keep.
+- Тесты: `converter/tests/run_far_tests.sh` (15 проверок: высоты против GRND ≤ 0,14 ярда, тайлы WDL и их ориентация, атлас, вершины/индексы
+  клиента — позиции, uv внутри своей ячейки, CCW сверху); `run_holes.sh` — FAR (streamer): дальняя земля рисуется только для тайлов без
+  подробной, буферы живы (ASan). ARM-проверка streamer/render/main — чисто.
+- Попутно: проверка «submesh problems» в streamer_pc считала ошибкой каждую расстановку модели-заглушки с радиусом 0 (6.14, невидимые стены
+  несут только коллизию; рендер их пропускает) — run_streamer.sh/run_pool_tests.sh падали с 6.14, теперь PASS. Прогон с PACE_US=0 в этой
+  песочнице не успевает загрузить ничего (и до изменений) — не ошибка клиента.
+- Не решает: всплывание зданий/деревьев (дальних версий в 1.12 нет), смену LOD подробной земли вблизи (kLod1Dist 40 / kLod2Dist 140 ярдов).
+- Пользователю: пересобрать клиент и конвертер, прогнать all.bat (нужна запись FARL), в report.txt проверить строку far ground.
+
+## Part 71 — START menu "Characters" (6.25)
+
+The in-game START menu got a **Characters** button (before Quit): after a confirmation the client logs out on the server and returns to the character list on the same connection (no new login).
+
+- `net/client`: `WorldClient::logout(bool toCharacters)`; on `SMSG_LOGOUT_COMPLETE` with the flag it asks for the list again (WaitCharEnum → CharSelect) instead of closing; `cancelLogout()` sends `CMSG_LOGOUT_CANCEL` (0x04E); `takeLogoutRefused()` reports a refusal (combat).
+- `LoginFlow::requestCharacterList()` / `cancelLogout()` / `logoutPending()`: the character stays in the world while the server's timer runs (20 s outside inns); when the list arrives the session detaches and the character screen opens with the same character selected. Refused: a system message in the chat; no answer in 25 s: back to the main menu with a message.
+- main.cpp: moving or jumping during the timer cancels the logout (as the original client).
+- Menu: action 13 (the old ones keep their numbers), up to 11 buttons fit the page.
+- Tests: `w3dlogin --relog` against fake_server (run_stage5.sh: "LOGOUT TO THE CHARACTER LIST: PASS"), ui_test `menu_characters`; ARM compile clean.
+- Not checked on a console.
+
+## Part 72 — items used on a target (Lazy Peons) and the default channels (6.26)
+
+- **Use item on NPC / object**: `GameSession::useItem` always sent target mask 0 (self), so a quest item such as Foreman's Blackjack (Awaken Peon) was cast at the player: the item "worked" (stack used / animation) with no effect and no quest credit. Now, when the item's first on-use spell is not a self spell (`@self`) and not a ground spell, CMSG_USE_ITEM names the selected unit/player (TARGET_FLAG_UNIT 0x2) or object (TARGET_FLAG_OBJECT 0x800) with a packed guid; the on-use spell index is the item's first trigger-0 spell. The UI turns to the target first (`useItemFaced`). Nothing is blocked client-side: with no target the old packet goes out and the server answers. Test: `net/tests/useitem_test.cpp`.
+- **Default channels** like the original client: `GameSession::updateDefaultChannels(zone, name)` joins `General - <zone>`, `Trade - <city>` (six capitals only), `LocalDefense - <zone>` and the global `LookingForGroup`; the zone ones are left and joined again on a zone change (numbers as in the original: General 1, Trade 2 ...). Driven by the zone banner's zone (main.cpp); `autoChannels` switches it off; a new session clears the channel list. Names come from glue.txt (the DBC locale): other players' channels match only on the same locale. WorldDefense is not auto-joined. Test: `net/tests/channels_test.cpp`.
+- Not checked on a console / against a real server.
+
+## Part 73 — damage numbers, experience and the notice lines on the top screen (6.27)
+
+- **Floating damage numbers**: the Large font (was Small), a little higher and faster rise; a crit also pops up as it appears; Miss / Parry stay a word in the middle size.
+- **Experience**: `SMSG_LOG_XPGAIN` fills `GameSession::xpGains`; the HUD shows "+N XP" (violet, Large) rising from the middle of the top screen and fading (2.6 s, older ones above).
+- **UIErrorsFrame at the top centre** (below the zone banner): `UiError.info` = a yellow line (quest accepted / progress / complete, a spell learned, a flight path found, a bank slot bought, new mail), else red. `GameSession::fail(text)` = red line + chat line, `notice(text)` = yellow + chat, `uiLine` = the top line only; up to 4 lines, 4 s each. Moved to the top screen: not enough money (taxi, bank, mail, auction), out of range / cast errors (already), vendor / trainer refusals, quest errors (log full, reward, not finished), inventory full, items not known, talents, trade, pet, mail, auction, group, guild errors.
+- **GameUi::refuse(g, text)**: the touch screen's "why not" hint (no target, none left, choose a reward first, target a player first, no pet, trade slots ...) also goes to the red line at the top.
+- 3D: the stereoscopic separation at the slider's maximum 0.12 -> 0.30 yd (main.cpp `iod`).
+- Tests: hud_test `W3D_NOTICES=1` draws the lines, XP and numbers; ui/net suites unchanged green. Not checked on a console.
+
+## Part 74 — noise textures after 3D / wide (6.28)
+
+Photo: on the character screen after "Characters" the scene (Durotar rocks, the troll and its gear) was drawn with noise textures.
+Cause found in `streamerEvictVram` (stage 6.5/6.9): when a render target for 3D (right eye) or 800x240 does not fit, the farthest
+textures are moved from VRAM to linear memory with a GX texture copy. The new linear block is cacheable and may hold dirty CPU cache
+lines from its previous use; the GPU writes the copy into RAM, a later write-back of such a line puts old bytes over the texture -
+noise, permanently, for every texture moved. The character screen shows textures shared with the world (rocks, the player's body and
+armour), which had been moved. Fix: `GSPGPU_FlushDataCache` on the block before the copy, `GSPGPU_InvalidateDataCache` after.
+report.txt "shortages" line: "moved out of VRAM for 3D / wide N" (StreamStats::texEvicted). Not reproduced on a console: if noise
+appears with N = 0 the cause is elsewhere.
+
+## Part 75 — far buildings (FARO, 6.29)
+
+WoW 1.12 has no far versions of WMOs: buildings appeared only when their tile and groups were read. The converter now makes them.
+- **Converter** (`converter/src/farobj.cpp`, `wmo.cpp`): for every WMO whose longest side is >= `--far-obj-min` (20 yd), a shell
+  from the outside groups' drawn triangles (no interior-only groups, no additive glows) by vertex clustering on a grid over the
+  building, the grid coarsened until the shell fits `--far-obj-tris` (300); a cluster sits at the mean of its vertices, coloured
+  with the area-weighted mean texture colour of the triangles around it (`farMeanColour`, the far ground's), with an averaged
+  normal; collapsed and doubled triangles are dropped. Every placement goes into the map's FARO entry (`common/w3d_farobj.h`) by
+  the tile whose PLCM holds its groups, with the first group's model id and placed position (how the client knows the real one is
+  shown). Palette: RGB565 128 x N, a 4x4 cell per colour (4-bit channels, 3-bit beyond 1024). `--no-far-objects` leaves it out.
+- **Client** (`streamer.cpp streamerFarObjectDraws`, `render.cpp`): the entry stays in memory; per tile one vertex/index buffer
+  of all its shells (terrain vertices: x / y from the tile corner in `W3D_FAROBJ_XY_SCALE` = 4 x the far ground's, z in zScale;
+  r = baked light, uv = the palette cell), built at most two a frame, LRU 64. Drawn with the far ground's shader, culling off:
+  the whole tile while it is not loaded; for a loaded tile only the buildings whose first group is not shown yet (its Bldg not
+  open, or a one-group building whose model is not drawable). report.txt: "far buildings (6.29): N in the map, D drawn ...".
+- Tests: `far_shell_test` (16000-triangle tower -> 254 within the box, colours kept, budget kept, small sheds skipped),
+  `farobj_test` in run_far_tests.sh (objects match their PLCM placements, shells inside/covering the house and tower, the
+  client's tile builder vs w3d_farobj_place, palette, --no-far-objects), run_holes.sh "FAR BUILDINGS (streamer)" (drawn while not
+  shown, never from a tile that shows all its buildings, buffers alive under ASan). ARM compile clean.
+- Not seen on a console; trees / large doodads are not covered (next: impostors).
+
+## Part 76 — seams in the ground between terrain LODs (6.30)
+
+Console photo (Durotar): short white dashes on the ground at 40-200 yd - the sky through cracks. `converter/tests/terrain_seam_test.cpp`
+(hills + a patchwork of textures + holes, `gen_terrain_layers.py seams`) found three causes:
+- **The client** picked each batch's LOD by its own box, but a batch is (4x4-chunk region, texture triple): one region of mixed
+  ground is several batches, and skirts are only on region borders. Two chunks side by side got LOD 1 and LOD 2: T-junctions with
+  nothing under them (12368 crack points in the test, worst 8.9 yd). Now `common/w3d_terrain_lod.h`: the LOD of a region (union of
+  its batches' boxes, same 40 / 140 yd), capped by the coarsest level every batch of it keeps its ground at (6.13 caps).
+  `Tile::batchRegion / regions` filled by the IO thread (`terrainLodCaps`). Works with old packs (no reconversion for this part).
+- **Skirts 4 yd deep** were too short on steep hills at region borders (gaps up to 8.4 yd): the converter now makes each edge's
+  skirt as deep as the largest step between its LOD levels + 1 yd (at least 4).
+- **Blocks split at holes** (6.13) left T-junctions inside the chunk and against the neighbouring chunk: a block with smaller
+  blocks' corners on its edges is now a fan around its centre through them (`terrain.cpp`, blocks of all chunks first).
+- Test: `run_terrain_tests.sh` - region choice 0 cracks over 121 cameras; negative control: the old per-batch choice still cracks.
+  `run_ground_tests`, `run_far_tests`, `run_holes`, `run_wmo_tests`, `run_pool_tests` green; ARM compile clean.
+- User: reconvert (all.bat with the 7p converter) for the skirts and the hole fans; the client part works at once.
+
+## Part 77 — crash at 533 yd in Stormwind (6.31, diagnostics)
+
+Luma screen (7o): data abort, write to 0x301BFB98 = R2 + R0 * 4. With the user's w3dproto.elf (llvm-symbolizer): PC in libctru
+`GPUCMD_Add` (gpu.c:33), from `shaderProgramConfigure` <- `C3Di_UpdateContext` (a shader switch). libctru's size check passed
+(no svcBreak: LR still the caller), so the command buffer did not overflow: gpuCmdBuf itself pointed at a 1 MB section the process
+does not have mapped ("Translation - Section"). Cause not found from the registers (citro3d's 2 MB buffer from C3D_Init; nothing of
+ours sets the GPU command buffer; GPUCMD_Split keeps pointer and size consistent).
+- `proto3ds/source/crash.cpp`: libctru `threadOnException` handler (main thread + streamer worker): on a CPU exception it writes
+  `sdmc:/3ds/w3dproto/crash.txt` (fault, registers, the main thread's last perf mark, frames, gpuCmdBuf / size / offset against
+  citro3d's buffer, linear heap and heap ranges, 64 stack words for llvm-symbolizer), then svcBreak. No heap use in the handler.
+- `crashCheckCmdBuf()` every frame after C3D_FrameBegin: libctru's pointer / size must be citro3d's buffer; else one event in
+  perf_events.txt (corruption found the frame it happens, not at the crash).
+- Needed from the user: crash.txt, perf_events.txt / perf.csv / report.txt of that session (perf_prev_* if the game was restarted).
+
+## Part 78 — the crash at 533 yd was the normal heap running dry (6.31b)
+
+User's perf_events.txt (7o, Stormwind): draw distance 533 at 41.2 s, `HEAP LOW: 944 KB of 24576 KB left (COLL 10291 KB, heights
+1170 KB, instances 898 KB, other 8164 KB)` at 48.3 s, the crash seconds later (the .dmp sent was the HOME menu's, not ours).
+COLL took the heap (malloc) as long as malloc said yes and went to linear memory only after a failure - down to the last MB; then
+something that does not check malloc (libctru's linear allocator keeps its blocks and address tree on the heap, citro3d, STL)
+broke: the bogus gpuCmdBuf fits that.
+- `streamer.cpp`: `heapFreeNow()` (mallinfo, once a frame -> `StreamStats::heapFree`). COLL goes to the heap only if 6 MB stay
+  free after it (else linear memory, 53 MB free at the start). Under 3 MB free the wanted ring shrinks to 3 x 3 (tiles beyond
+  are released, no read-ahead) until 5 MB are free again: `heapShrunk / heapShrinks`, an event in perf_events.txt ("HEAP: ... kept
+  to the 3 x 3"), a line in report.txt ("heap (6.31): ...").
+- The far ground (FARL) and far buildings (FARO) blobs moved from the heap to linear memory (`LinBlob`).
+- Test: `run_streaming.sh` "heap reserve": a 5 x 5 synthetic pack, plenty of heap -> up to 18 tiles at 800 yd; `W3D_HEAP_FREE_MB=2`
+  -> at most 9 and one shrink. run_holes (far ground / buildings, ASan leaks) green; ARM compile clean.
+- Note: `run_streamer.sh` at PACE_US=0 loads no tiles in 1500 frames on this machine - flaky by timing, the same on 0d03cf6 and
+  76af7c0 (not from this change).
+
+## Part 79 — the CIA build: 178 MB on the New 3DS (6.32)
+
+- `proto3ds/cia/w3dproto.rsf` (makerom): SystemModeExt 178MB, CpuSpeed 804MHz, EnableL2Cache, CanAccessCore2 (the IO thread,
+  UI loader and sound run on core 2; without it ctrtool shows "Access Core 2: NO"), AffinityMask 3, DirectSdmc(Write), the usual
+  homebrew syscall / service lists, title id 000400000F7D3A00. Icon / banner / chime made here (plain, ours).
+- `make cia` (MAKEROM= / BANNERTOOL= overridable): bannertool banner + smdh, makerom -f cia from the same .elf; romfs inside.
+- `proto3ds/source/heaps.cpp`: our `__system_allocateHeaps` (libctru's is weak; same code but the split): 150 MB+ free -> 48 MB
+  normal heap, else 24 MB as before (.3dsx under hbmenu: 124 MB region); the rest linear. The main thread's 32 KB stack still
+  comes from the heap's start (stack_adjust.s reads fake_heap_start). main.cpp no longer fixes __ctru_heap_size.
+- Checked here: makerom and bannertool built from source (Project_CTR, 3ds-bannertool); a CIA made from the user's 7o .elf with
+  this RSF, ctrtool: "AppMemory: 178MB", "804MHz", "L2 YES", "Access Core 2: YES", RomFS present. ARM compile clean.
+- Not checked on a console: the CIA starting, swkbd (chat, login) in the 178 MB mode, the 48 MB heap. User steps in
+  proto3ds/cia/README_RU.md (perf_events "memory:" line must say APPLICATION region 182272 KB, heap 49152 KB).
+
+## Part 80 — 7r link fix and the user's build warnings (6.32b)
+
+- devkitARM link error: `undefined reference to (anonymous namespace)::__ctru_heap_size` - the `extern "C"` declaration in
+  streamer.cpp sat inside `namespace {`; GCC mangled it as a namespace member (clang, used by tools/armcheck, does not, and
+  armcheck only compiles). Moved to global scope. Checked: no object of proto3ds/source + net has an undefined `_GLOBAL__N_`
+  symbol (llvm-nm over the armcheck objects).
+- From the user's build log: `render.cpp BindCache::unit[2]` was indexed with 2 for the terrain's third texture (5.47) - a write
+  past the array on the stack of drawTerrain every frame with a three-texture batch. Now unit[3].
+- `-Wmaybe-uninitialized` in game_ui_tabs.cpp (map u / v) and w3d_collision.h (qx / qy): initialised.
+- run_streaming.sh heap reserve: PACE_US 2000 (1500 frames at 200 us were 0.3 s - no tile loaded, the check passed empty) and
+  the check needs tile loads; full: 25 tiles at 800 yd, 2 MB heap: 9 and one shrink.
+
+## Part 81 — the 178 MB CIA shows a black screen (6.32b)
+
+User: the CIA (7s, 178MB) stays black. 3dbrew (Memory layout): APPMEMTYPE 7 = 178 MB APPLICATION (SYSTEM shrinks to 46 MB),
+New 3DS kernel only, chosen by the FIRM-launch parameters; whether retail NS/firmware boots it is not documented. ctrtool labels
+it "snake dev1". Isolation:
+- RSF `SystemModeExt: $(APP_MEMORY)`, `UniqueId: $(APP_UNIQUE_ID)` (makerom -D); `make cia CIA_MEMORY=124MB` makes
+  `w3dproto-124.cia` (title 000400000F7D3B00, "w3dproto (124 MB)"), installable next to the 178MB one.
+- main.cpp prints on the touch screen right after consoleInit: region / heap / linear KB and (3dsx) / (CIA).
+- Test CIAs from the user's own 7o .elf sent (178MB and 124MB) - no rebuild needed to see which one boots.
+
+## Part 82 — the CIA crashed in ndspInit (6.32c)
+
+Console (test CIA 124MB from the 7o .elf, title 000400000F7D3B00): data abort "Translation - Page", write to 0x1FF57FFE, PC in
+libctru ndspSetCounter <- ndspInitialize <- ndspInit. The DSP's shared memory was not mapped: a .3dsx gets it from the Homebrew
+Launcher's exheader, a CIA only from its own. RSF now has (as the devkitPro template) `IORegisterMapping: 1ff00000-1ff7ffff`
+(DSP memory) and `MemoryMapping: 1f000000-1f5fffff:r` (VRAM). ctrtool: "IoMapping 0x1FF00000-0x1FF7FFFF", "StaticMapping
+0x1F000000-0x1F5FFFFF:r". Test CIAs from the 7o .elf rebuilt (124MB and 178MB).
+
+## Part 83 — 178 MB CIA: svcBreak in __system_allocateHeaps (6.32d)
+
+Console (test CIA 178MB, 7o .elf): prefetch abort (svcBreak), PC svcBreak, LR in libctru __system_allocateHeaps line 71 (the
+linear heap's svcControlMemory failed), SP 0x0FFFFFC0 (before main). 7o fixes the heap at 24 MB, so libctru asked ~150 MB of
+linear memory; the linear heap lives in the 128 MB window 0x30000000-0x38000000 (virtual = physical + offset) - too much.
+- heaps.cpp: the linear heap first: region less a 24 MB minimum heap, at most 120 MB, 8 MB less each time the kernel refuses;
+  the normal heap gets the rest (capped at the 96 MB heap area). 124 MB region: ~97 MB linear / 24 MB heap as before; 178 MB:
+  ~120 MB linear / ~55 MB heap.
+- Test CIA 178MB rebuilt from the 7o .elf with __ctru_heap_size patched 24 -> 60 MB (.data word at 0x30B378, file offset
+  0x20C378): libctru then asks ~115 MB linear.
+
+## Part 84 — trees hanging in the air in Stormwind (6.33)
+
+User (CIA running, Stormwind): trees hang in the air; buildings and the ground appear only close by. The city's floor is WMO
+groups, shown only when the whole building is (6.11, or kBldgWaitMs after its first group). A WMO's doodads (trees, lamps -
+placeWmo writes them right after its groups) were ordinary instances, drawn as soon as their model was in.
+- `findBuildings` also gives every lone placement after a building run an owner: the latest run (since the first one) whose
+  group-centre box widened by 40 yd holds it (the converter writes the ADT's doodads first, then each WMO: groups, doodads).
+  `Instance::owner`; collectInstance skips it while the owner is closed and fades it in with it; the particle emitters (lamp
+  flames) wait too. No reconversion.
+- Test: run_holes.sh "WMO DOODAD OWNERS": the house's two placed doodads are owned (the barrel's model is missing in the data),
+  nothing else, no owner points at a missing building or a building group. ARM compile clean.
+- Open: the slow appearance of the city itself (tile complete avg 7 s / max 21 s in the 7o report) - needs a report / perf log
+  from the CIA; the far shells (6.29) cover it only in packs converted with the 7o+ converter.
+
+## Part 85 — the horizon: ground and building shells past the draw distance (6.34)
+
+CIA logs (178 MB: heap 56868 KB, linear 122880 KB; low points 35.6 MB heap / 47 MB linear free): everything within the draw
+distance (250) was loaded 1-2 s after entering the world; past it nothing was drawn at all (far ground / shells were limited to
+the draw distance too) - the city "loads only when you come close". Now:
+- render.cpp: `kHorizonDist` 1200 yd, `g_horizon = max(drawDist, 1200)`; the far plane at horizon * 1.05 + 30 (24-bit depth,
+  ~0.1 yd steps out there); fog from 45% of the draw distance to the horizon (was 55%..100% of the draw distance).
+  `Frustum::horizon` / `sphereFar` (side planes + the horizon): the loaded tiles' terrain batches (LOD 2 out there) and water,
+  the far ground (streamerFarDraws to the horizon) and the far shells. Real buildings / doodads keep the draw distance.
+  Underwater the horizon is the water's fog distance.
+- streamer.cpp `streamerFarObjectDraws(cam, horizon, detailDist, ...)`: on a loaded tile a building whose centre is beyond
+  detailDist (the draw distance) is drawn as its shell (overlap with a few real groups rather than a gap); a tile all beyond it:
+  every shell. kFarCache 128, kFarObjCache 160 (up to 9 x 9 / 11 x 11 tiles to the horizon).
+- Tests: run_holes "far buildings beyond the detail distance": ~630 shell draws from loaded tiles with detailDist 1 yd; the old
+  "never over a shown building" check (detailDist huge) 0 wrong. The "drawn before the tile loads" count races the palette's
+  read (0 in some runs, before this change too) - no longer required. ARM compile clean.
+- Not seen on a console: the GPU cost (up to ~16 far ground tiles in view, 1536 triangles each), the fog look, z-fighting.
+
+## Part 86 — the horizon as a setting (6.34b)
+
+User: "cool, but a bit hungry - make it optional". Settings -> Interface -> Horizon: Off (default) / 800 / 1200 yd
+(`PadConfig::horizon`, pad.txt `horizon`, actions 210-212; the Interface page has 8 rows now, y -= 4 as Graphics/sound).
+`rendererSetHorizon(yards)` (0 = off) before rendererSetProjection: off = exactly as before 6.34 (far plane drawDist * 1.15 +
+30, fog 55%..100% of the draw distance, far ground / shells only inside the draw distance); on = the 6.34 horizon. Applied
+after pad.txt is read and on every graphics change. UI test: 57 scenes, 0 failed (settings_iface shows the row). ARM clean.
+
+## Part 87 — a cheaper horizon: far mesh for loaded tiles past the draw distance (6.34c)
+
+perf_prev.csv (7x, Stormwind online, the horizon always at 1200): FPS 49.8 / 43.4 / 40.2 at draw distance 120 / 250 / 533;
+CPU 11-14 ms + waiting for the GPU 9-11 ms (GPU 13-15 ms); terrain draws 216-371 a frame (LOD 2 ~310-340 of ~350): the loaded
+tiles' detailed batches out to the horizon, ~35k triangles - the cost is the number of draws (terrain CPU 2-3 ms), not the
+triangles. Water to the horizon up to 15k triangles. (perf.csv: login + 30 s of free camera at Dun Morogh, 60 FPS - no compare.)
+- `tileBeyond(tx, ty, cam, d)` (world.h): the tile's square wholly farther than d (x / y). With the horizon, a loaded tile
+  wholly beyond the draw distance is drawn with its far ground mesh (one draw, 1536 triangles) instead of its 30-60 detailed
+  batches, and its water is left out (render.cpp terrain / water loops; streamerFarDraws(cam, horizon, detailDist, ...) no
+  longer counts it as detailed). Horizon off: no change (such tiles were beyond the draw distance anyway).
+- Test: run_holes "FAR": with detailDist 40 yd, 150 far draws over loaded tiles wholly beyond it, 0 for a tile within it
+  (the camera's); the old checks unchanged. ARM clean. Not measured on the console yet.
+
+## Part 88 — textures broken on entering the world: libctru's VRAM allocator overwritten (6.35)
+
+User (7z CIA): textures broken right on entering the world. report.txt "VRAM used 4194098 KB" (negative: more free than at the
+start). perf.csv: at 16.7 s (character screen) VRAM free jumped 1 KB -> 5784 KB while the streamer still had 648 textures /
+4869 KB in VRAM - free + booked > the 6 MB there is: new textures went over live ones. Not a double free (libctru's vramFree
+ignores unknown pointers) - the allocator's state itself was overwritten.
+The .bss of the user's .elf: citro3d's `C3D_FVUnif` (2 x 96 x 16 bytes, 0x32A154..0x32AD54) is followed directly by libctru's
+sLinearPool / sAddrMap / sVramPoolA/B / sAddrMap (0x32AD58..0x32AD8C), console state, gfx state and gpuCmdBuf / Size / Offset
+(0x32AE78..0x32AE80). The 533-yd crash (Part 77) wrote through gpuCmdBuf = 0x301B0210 - as a float 5.6e-10, a typical bone
+matrix element. The only uniform upload with a data-driven length is the skinning palette (render.cpp, C3D_FVUnifWritePtr with
+p.count * 3 from the CMDL blob; the shader has bones[72] = 24 bones): a palette count over 24 (a damaged / stale blob, or a
+blob read after it was freed) writes bone matrices over exactly these globals. Most likely cause (not proven on the console).
+- `w3d_creature_valid` (w3d_format.h): submeshes / palettes / textures / indices inside the blob, every palette <= 24 bones,
+  submesh ranges inside the indices. The streamer refuses a CMDL that fails it (not drawn; StreamStats badCreatureModels /
+  lastBadCreature -> perf_events "CREATURE MODEL REFUSED").
+- render.cpp: the palette upload is clamped to W3D_PALETTE_BONES whatever the blob says.
+- perflog: "VRAM BOOKS BROKEN" event once when free + textures + targets + portraits > 6 MB + 64 KB (with the main thread's mark).
+- Tests: creature_valid_test in run_player_tests.sh (converter CMDLs valid; 25 / 65535 bones refused); check_glue.py's
+  "zone names" check fixed (glue.txt Z lines have had a 4th field since 5.45 - it failed before this change). run_pool_tests
+  (streamer with creatures) green; ARM clean.

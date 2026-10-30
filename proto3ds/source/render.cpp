@@ -3,6 +3,8 @@
 // Everything is drawn camera-relative: the CPU builds per-object modelView
 // matrices in float32 from (object - camera), because PICA200 uniforms are
 // float24 and absolute coordinates (~17000 yd) would visibly jitter.
+#include "w3d_farlod.h"
+#include "w3d_farobj.h"
 #include "world.h"
 
 #include <array>
@@ -41,9 +43,13 @@ C3D_AttrInfo g_terrainAttr, g_modelAttr, g_skinAttr, g_fxAttr;
 std::vector<W3dMat34> g_pose;   // scratch: bone matrices of the creature being drawn
 C3D_Mtx g_proj;
 float g_near = 1.0f, g_far = 400.0f, g_skyRadius = 300.0f;
+// 6.34: the horizon - the ground (detailed of the loaded tiles, far of the others) and the far buildings' shells are drawn this
+// far, past the draw distance (which stays the distance of the real buildings and doodads); the fog ends there
+// (6.34b: a setting - off by default, it costs GPU time: rendererSetHorizon)
+float g_horizonWant = 0.0f;   // 0 = off: the horizon is the draw distance (as before 6.34)
+float g_horizon = 400.0f;
 float g_fogX = 0.0f, g_fogY = 1.0f;   // visibility = clamp(g_fogY - dist * g_fogX, 0, 1)
-// Terrain LOD switch distances (yards from the camera to a batch's bounding sphere).
-constexpr float kLod1Dist = 40.0f, kLod2Dist = 140.0f;
+// Terrain LOD switch distances: W3D_TERRAIN_LOD1_DIST / LOD2_DIST (w3d_terrain_lod.h, by region since 6.30).
 
 // Object marker: an elongated diamond whose front tip shows the facing (model layout).
 W3dModelVertex* g_markerV = nullptr;
@@ -219,6 +225,7 @@ struct Frustum {
     float n[6][3];
     float d[6];
     float maxDist;
+    float horizon;   // 6.34
     void build(const Camera& c, float nearZ) {
         memcpy(cam, c.pos, sizeof cam);
         float f[3];
@@ -243,6 +250,16 @@ struct Frustum {
         d[4] = -nearZ;
         d[5] = c.drawDist;
         maxDist = c.drawDist;
+        horizon = std::max(c.drawDist, g_horizon);
+    }
+    // 6.34: the side planes and the horizon (the ground and the far shells)
+    bool sphereFar(const float c[3], float rad) const {
+        float p[3] = {c[0] - cam[0], c[1] - cam[1], c[2] - cam[2]};
+        float lim = horizon + rad;
+        if (p[0] * p[0] + p[1] * p[1] + p[2] * p[2] > lim * lim) return false;
+        for (int i = 0; i < 5; ++i)
+            if (n[i][0] * p[0] + n[i][1] * p[1] + n[i][2] * p[2] + d[i] < -rad) return false;
+        return true;
     }
     bool sphere(const float c[3], float rad) const {
         float p[3] = {c[0] - cam[0], c[1] - cam[1], c[2] - cam[2]};
@@ -255,7 +272,7 @@ struct Frustum {
 };
 
 struct BindCache {
-    GpuTex* unit[2] = {nullptr, nullptr};
+    GpuTex* unit[3] = {nullptr, nullptr, nullptr};   // (6.32: was [2] - the terrain's third texture (5.47) wrote past it)
     void bind(int u, GpuTex* t, FrameCounters& fc) {
         if (unit[u] == t) return;
         C3D_TexBind(u, &t->tex);
@@ -366,7 +383,68 @@ void drawTerrain(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, cons
     C3D_CullFace(GPU_CULL_BACK_CCW);   // verified on hardware (stage 2)
 
     BindCache bc;
+    // 6.24: the far ground where a tile's detailed ground is not there (being read, or not loaded): instead of a hole into the
+    // sky. Both texture units sample the colour atlas (vertex a = 0), r = baked light; 0.6 yd lower than the true heights so
+    // that wherever it touches the detailed ground, the detailed one is in front.
+    {
+        static std::vector<FarDraw> far;
+        GpuTex* atlas = nullptr;
+        const uint16_t* fidx = nullptr;
+        float zs = 0.25f;
+        if (streamerFarDraws(cam.pos, fr.horizon, fr.maxDist, far, &atlas, &fidx, &zs)) {
+            setTerrainEnv(2);
+            bc.bind(0, atlas, fc);
+            bc.bind(1, atlas, fc);
+            for (const FarDraw& d : far) {
+                if (!fr.sphereFar(d.center, d.radius)) continue;
+                C3D_BufInfo* buf = C3D_GetBufInfo();
+                BufInfo_Init(buf);
+                BufInfo_Add(buf, d.verts, sizeof(W3dTerrainVertex), 3, 0x210);
+                C3D_Mtx mv;
+                camRelative(&mv, view, d.origin, cam.pos);
+                C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_terrainSh.uMV, &mv);
+                C3D_FVUnifSet(GPU_VERTEX_SHADER, g_terrainSh.uScale, W3D_FAR_XY_SCALE, W3D_FAR_XY_SCALE, zs, W3D_FAR_UV_SCALE);
+                C3D_FVUnifSet(GPU_VERTEX_SHADER, g_terrainSh.uOffset, 0, 0, -W3D_FAR_SINK, 0);
+                C3D_DrawElements(GPU_TRIANGLES, W3D_FAR_INDICES, C3D_UNSIGNED_SHORT, fidx);
+                ++fc.drawCalls;
+                fc.tris += W3D_FAR_INDICES / 3;
+            }
+        }
+    }
+    // 6.29: the far buildings - coarse shells of the large buildings whose tile is not loaded or that their tile does not show
+    // yet, with the far ground's shader (palette on both units); drawn from both sides (a shell is not closed everywhere)
+    {
+        static std::vector<FarObjDraw> fo;
+        GpuTex* pal = nullptr;
+        float zs = 0.25f;
+        if (streamerFarObjectDraws(cam.pos, fr.horizon, fr.maxDist, fo, &pal, &zs)) {
+            setTerrainEnv(2);
+            bc.bind(0, pal, fc);
+            bc.bind(1, pal, fc);
+            C3D_CullFace(GPU_CULL_NONE);
+            const W3dTerrainVertex* boundV = nullptr;
+            for (const FarObjDraw& d : fo) {
+                if (!fr.sphereFar(d.center, d.radius)) continue;
+                if (d.verts != boundV) {
+                    C3D_BufInfo* buf = C3D_GetBufInfo();
+                    BufInfo_Init(buf);
+                    BufInfo_Add(buf, d.verts, sizeof(W3dTerrainVertex), 3, 0x210);
+                    C3D_Mtx mv;
+                    camRelative(&mv, view, d.origin, cam.pos);
+                    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_terrainSh.uMV, &mv);
+                    C3D_FVUnifSet(GPU_VERTEX_SHADER, g_terrainSh.uScale, W3D_FAROBJ_XY_SCALE, W3D_FAROBJ_XY_SCALE, zs, W3D_FAR_UV_SCALE);
+                    C3D_FVUnifSet(GPU_VERTEX_SHADER, g_terrainSh.uOffset, 0, 0, 0, 0);
+                    boundV = d.verts;
+                }
+                C3D_DrawElements(GPU_TRIANGLES, d.count, C3D_UNSIGNED_SHORT, d.idx);
+                ++fc.drawCalls;
+                fc.tris += d.count / 3;
+            }
+            C3D_CullFace(GPU_CULL_BACK_CCW);
+        }
+    }
     for (Tile* t : streamerReadyTiles()) {
+        if (tileBeyond(t->tx, t->ty, cam.pos, fr.maxDist)) continue;   // 6.34c: its far ground mesh is drawn instead (above)
         const W3dTerrainHeader* h = t->th;
         const uint16_t* tex2 = w3d_terrain_tex2(h, t->terr);
         setTerrainEnv(tex2 ? 3 : 2);
@@ -379,6 +457,11 @@ void drawTerrain(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, cons
         C3D_FVUnifSet(GPU_VERTEX_SHADER, g_terrainSh.uScale, h->posScale[0], h->posScale[1], h->posScale[2], W3D_TERRAIN_UV_SCALE);
         C3D_FVUnifSet(GPU_VERTEX_SHADER, g_terrainSh.uOffset, h->posOffset[0], h->posOffset[1], h->posOffset[2], 0);
         const uint16_t* idx = (const uint16_t*)(t->terr + h->offIndices);
+        // 6.30: the LOD of each region (all its batches alike: skirts are only on region borders)
+        int8_t regLod[W3D_TERRAIN_REGIONS];
+        const bool byRegion = t->batchRegion.size() == h->batchCount;
+        for (int r = 0; r < W3D_TERRAIN_REGIONS; ++r)
+            regLod[r] = byRegion && t->regions[r].used ? (int8_t)w3d_terrain_region_lod(&t->regions[r], h->origin, cam.pos) : 0;
         for (u32 i = 0; i < h->batchCount; ++i) {
             const W3dTerrainBatch& b = t->batches[i];
             float c[3], r2 = 0;
@@ -388,11 +471,15 @@ void drawTerrain(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, cons
                 r2 += e * e;
             }
             float rad = sqrtf(r2);
-            if (!fr.sphere(c, rad)) continue;
-            // LOD by distance from the camera to the batch's bounding sphere.
-            float dx = c[0] - cam.pos[0], dy = c[1] - cam.pos[1], dz = c[2] - cam.pos[2];
-            float d = sqrtf(dx * dx + dy * dy + dz * dz) - rad;
-            int lod = d < kLod1Dist ? 0 : d < kLod2Dist ? 1 : 2;
+            if (!fr.sphereFar(c, rad)) continue;   // (6.34: the loaded tiles' ground to the horizon, LOD 2 out there)
+            int lod;
+            if (byRegion) {
+                lod = regLod[t->batchRegion[i]];   // (capped by the coarsest level all the region's batches keep their ground at, 6.13)
+            } else {   // (no caps yet: the batch's own sphere)
+                float dx = c[0] - cam.pos[0], dy = c[1] - cam.pos[1], dz = c[2] - cam.pos[2];
+                float d = sqrtf(dx * dx + dy * dy + dz * dz) - rad;
+                lod = d < W3D_TERRAIN_LOD1_DIST ? 0 : d < W3D_TERRAIN_LOD2_DIST ? 1 : 2;
+            }
             if (rs.forceLod >= 0) lod = rs.forceLod;
             if (i < t->batchMaxLod.size() && lod > t->batchMaxLod[i]) lod = t->batchMaxLod[i];   // stage 6.13: no ground lost at holes
             bc.bind(0, t->ttex[b.tex0], fc);
@@ -450,6 +537,9 @@ static inline void collectInstance(const Tile* t, Instance& in, const Frustum& f
     if (m->meshHidden) return;           // 6.17: an emitter volume (its particles come from the tile's instances, not from here)
     const Tile::Bldg* bg = in.bldg && in.bldg <= t->bldgs.size() && m->building && !m->interior ? &t->bldgs[in.bldg - 1] : nullptr;
     if (bg && !bg->open) return;         // stage 6.11: a building is shown whole (or when a lagging group is given up on)
+    // 6.33: a WMO's doodad only with its building (a building's own group that turned out a doodad-like model counts too)
+    const Tile::Bldg* og = in.owner && in.owner <= t->bldgs.size() ? &t->bldgs[in.owner - 1] : nullptr;
+    if (og && !og->open) return;
     if (in.radius <= 0) in.radius = m->h->radius * in.scale;
     if (in.radius <= 0) return;
     if (!rs.doodads && !m->building) return;
@@ -468,6 +558,7 @@ static inline void collectInstance(const Tile* t, Instance& in, const Frustum& f
     if (g_fadeOn && !m->interior && !m->fx && !m->fxAnim.a) {
         uint32_t born = laterMs(m->drawableMs, t->readyMs);
         if (bg) born = laterMs(born, bg->openMs);
+        if (og) born = laterMs(born, og->openMs);   // (6.33: fades in with its building)
         const uint32_t age = g_nowMs - born;
         if (age < kFadeMs) fade = (float)age * (1.0f / (float)kFadeMs);
         if (!m->building) {   // a small doodad dissolves over the last 25% of its distance instead of popping out
@@ -1029,8 +1120,11 @@ void drawCreatures(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, co
             }
             if (m.palette != curPal && m.palette < h->paletteCount) {
                 const W3dBonePalette& p = pal[m.palette];
-                C3D_FVec* u = C3D_FVUnifWritePtr(GPU_VERTEX_SHADER, g_skinSh.uBones, p.count * 3);
-                for (int b = 0; b < p.count; ++b) {
+                // 6.35: never more than the shader's bones[] (W3D_PALETTE_BONES * 3 registers) - past it citro3d's
+                // uniform array ends and libctru's allocators and the GPU command buffer pointer follow in memory
+                const int nb = p.count < W3D_PALETTE_BONES ? p.count : W3D_PALETTE_BONES;
+                C3D_FVec* u = C3D_FVUnifWritePtr(GPU_VERTEX_SHADER, g_skinSh.uBones, nb * 3);
+                for (int b = 0; b < nb; ++b) {
                     const float* M = P[p.bones[b] < h->boneCount ? p.bones[b] : 0].m;
                     for (int r = 0; r < 3; ++r) {
                         C3D_FVec& v = u[b * 3 + r];
@@ -1113,6 +1207,7 @@ void drawWater(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, const 
     for (Tile* tile : streamerReadyTiles()) {
         const W3dWaterHeader* h = tile->wh;
         if (!h || !tile->waterReady) continue;
+        if (tileBeyond(tile->tx, tile->ty, cam.pos, fr.maxDist)) continue;   // 6.34c: a tile drawn as far ground has no water drawn
         C3D_BufInfo* buf = C3D_GetBufInfo();
         BufInfo_Init(buf);
         BufInfo_Add(buf, tile->water + h->offVertices, sizeof(W3dTerrainVertex), 3, 0x210);
@@ -1131,7 +1226,7 @@ void drawWater(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, const 
                 float e = 0.5f * (b.bmax[k] - b.bmin[k]);
                 r2 += e * e;
             }
-            if (!fr.sphere(c, sqrtf(r2))) continue;
+            if (!fr.sphereFar(c, sqrtf(r2))) continue;   // (6.34: the loaded tiles' water to the horizon, as their ground)
             u32 tex = b.tex;
             const bool animated = b.frames > 1;
             if (animated) {   // fewer frames than the original 30 (--water-frames) are shown longer each
@@ -1231,6 +1326,7 @@ static void fxSimulate(const Camera& cam, const C3D_Mtx& view, const RenderSetti
             for (const Instance& in : t->instances) {
                 const Model* m = in.model;
                 if (!m->fx || !m->drawable) continue;
+                if (in.owner && in.owner <= t->bldgs.size() && !t->bldgs[in.owner - 1].open) continue;   // 6.33: lamps' flames with their building
                 const float dx = in.pos[0] - cam.pos[0], dy = in.pos[1] - cam.pos[1], dz = in.pos[2] - cam.pos[2];
                 if (dx * dx + dy * dy + dz * dz > range * range) continue;
                 fx::Source s;
@@ -1456,15 +1552,21 @@ void rendererSetProjection(float drawDist) {
     // A near plane of 1 yd keeps depth precision usable with 24-bit depth;
     // the far plane follows the draw distance so fog and clipping agree.
     g_near = 1.0f;
-    g_far = drawDist * 1.15f + 30.0f;
+    // 6.34: the far plane at the horizon (24-bit depth: ~0.1 yd steps at 1200 yd with the 1 yd near plane)
+    const bool horizonOn = g_horizonWant > drawDist;
+    g_horizon = horizonOn ? g_horizonWant : drawDist;
+    g_far = horizonOn ? g_horizon * 1.05f + 30.0f : drawDist * 1.15f + 30.0f;
     g_skyRadius = g_far * 0.9f;
     buildProj();
 
-    // Linear fog by true view distance, from 55% to 100% of the draw distance.
-    const float start = drawDist * 0.55f, end = drawDist;
+    // Linear fog by true view distance: from 55% to 100% of the draw distance; with the horizon (6.34) from 45% of it to the
+    // horizon (the ground and the shells beyond the draw distance melt into the sky there)
+    const float start = drawDist * (horizonOn ? 0.45f : 0.55f), end = g_horizon;
     g_fogX = 1.0f / (end - start);
     g_fogY = end / (end - start);
 }
+
+void rendererSetHorizon(float yards) { g_horizonWant = yards; }
 
 bool rendererUnitPoint(uint64_t guid, int slot, float out[3]) {
     if (slot < 0 || slot > 5) return false;
@@ -1521,6 +1623,7 @@ static void frameFrustum(const Camera& cam, const RenderSettings& rs, Frustum& f
     if (rs.underwater) {
         fr.maxDist = std::min(fr.maxDist, std::max(rs.waterFogEnd, 6.0f) + 8.0f);
         fr.d[5] = fr.maxDist;
+        fr.horizon = fr.maxDist;
     }
 }
 
@@ -1726,7 +1829,7 @@ void rendererDrawScene(const Camera& cam, float vfovDeg, float nearZ, float farZ
     g_far = keepFar;
 }
 
-bool rendererDrawPortrait(const CreatureInstance& ciIn, const float corr[4], FrameCounters& fc) {
+bool rendererDrawPortrait(const CreatureInstance& ciIn, const float corr[4], FrameCounters& fc, bool body, float turn) {
     const CreatureDisplay* d = ciIn.disp;
     if (!d || !d->ready()) return false;
     const uint8_t* blob = d->model->blob;
@@ -1750,16 +1853,24 @@ bool rendererDrawPortrait(const CreatureInstance& ciIn, const float corr[4], Fra
             break;
         }
     }
-    // framing: about a sixth of the unit's height above and below the head's centre (head and shoulders of a person)
+    // framing: about a sixth of the unit's height above and below the head's centre (head and shoulders of a person);
+    // the character window (UI stage 14, body): the whole figure, turned by 'turn' from the front
     const float height = std::max(0.3f, (h->bmax[2] - h->bmin[2]) * s);
-    const float half = std::clamp(0.16f * height, 0.12f, 4.0f);
-    const float fov = 40.0f, dist = half / tanf(fov * 0.5f * 3.14159265f / 180.0f);
-    const float side = 0.35f;     // a little from the unit's left (the original portraits look slightly sideways)
+    float half = std::clamp(0.16f * height, 0.12f, 4.0f);
+    float focus[3] = {head[0], head[1], head[2]};
+    if (body) {
+        half = 0.56f * height;
+        focus[0] = 0.5f * (h->bmin[0] + h->bmax[0]) * s;
+        focus[1] = 0.5f * (h->bmin[1] + h->bmax[1]) * s;
+        focus[2] = (h->bmin[2] + 0.5f * (h->bmax[2] - h->bmin[2])) * s;
+    }
+    const float fov = body ? 30.0f : 40.0f, dist = half / tanf(fov * 0.5f * 3.14159265f / 180.0f);
+    const float side = body ? 0.25f + turn : 0.35f;     // a little from the unit's left (the original portraits look slightly sideways)
     Camera cam;
-    cam.pos[0] = head[0] + cosf(side) * dist;
-    cam.pos[1] = head[1] + sinf(side) * dist;
-    cam.pos[2] = head[2] + 0.12f * dist;
-    const float dx = head[0] - cam.pos[0], dy = head[1] - cam.pos[1], dz = head[2] - 0.05f * half - cam.pos[2];
+    cam.pos[0] = focus[0] + cosf(side) * dist;
+    cam.pos[1] = focus[1] + sinf(side) * dist;
+    cam.pos[2] = focus[2] + (body ? 0.04f : 0.12f) * dist;
+    const float dx = focus[0] - cam.pos[0], dy = focus[1] - cam.pos[1], dz = focus[2] - (body ? 0.0f : 0.05f * half) - cam.pos[2];
     cam.yaw = atan2f(dy, dx);
     cam.pitch = atan2f(dz, sqrtf(dx * dx + dy * dy));
     cam.drawDist = dist + 4.0f * height + 10.0f;

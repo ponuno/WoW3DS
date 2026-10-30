@@ -77,6 +77,7 @@ public:
     // client sends them without a target, as the original does - a selected enemy made the server refuse them.
     bool selfCast(uint32_t id) const { return selfCast_.count(id) != 0; }
     void addSelfCast(uint32_t id) { selfCast_.insert(id); }
+    size_t selfCastCount() const { return selfCast_.size(); }   // 0 = spells.txt not loaded: we cannot tell what needs a target
     // UI stage 12: the cooldowns of Spell.dbc (spells.txt "@cd id recovery category categoryRecovery onEvent", ms). The
     // 1.12 server does not send them for ordinary casts: the client starts them itself when its cast goes off.
     struct Cooldown { uint32_t rec = 0, category = 0, catRec = 0; bool onEvent = false; };
@@ -342,7 +343,10 @@ struct TaxiWindow {
     uint64_t npc = 0;
     uint32_t current = 0;               // the node we are at
     uint32_t mask[8] = {0, 0, 0, 0, 0, 0, 0, 0};   // known nodes (bit = node id)
-    bool known(uint32_t node) const { return node < 256 && (mask[node / 32] >> (node % 32)) & 1; }
+    // TaxiNodes.dbc id n is bit n-1 of the mask (vMaNGOS PlayerTaxi::IsTaximaskNodeKnown: (nodeidx - 1) / 32, 1 << ((nodeidx - 1) % 32)).
+    // Reading bit n showed the NEXT node's state: a level 1 orc, who knows only Orgrimmar (23), was offered the Crossroads (24)... and
+    // the flight to Crossroads (25) only when 24 was known.
+    bool known(uint32_t node) const { return node >= 1 && node <= 256 && ((mask[(node - 1) / 32] >> ((node - 1) % 32)) & 1); }
 };
 // SMSG_MAIL_LIST_RESULT (vMaNGOS WorldSession::HandleGetMailList, 1.12: one item per letter).
 struct MailEntry {
@@ -445,7 +449,9 @@ Vocal vocalForCastResult(uint32_t code, uint8_t powerType, uint32_t cls);
 Vocal vocalForInventoryResult(uint32_t code);
 Vocal vocalForLootError(uint8_t error);
 // A red line at the top of the screen (the original's UIErrorsFrame): errors of casts, items, attacks, loot.
-struct UiError { std::string text; uint32_t ms = 0; };
+struct UiError { std::string text; uint32_t ms = 0; bool info = false; };   // info: a yellow line (quest progress ...), else red
+// Experience gained (SMSG_LOG_XPGAIN): shown at the top of the screen as it comes.
+struct XpGain { uint32_t xp = 0, ms = 0; bool kill = false; };
 
 class GameSession {
 public:
@@ -500,6 +506,11 @@ public:
     int channelNumber(const std::string& name) const;            // 1-based, 0 = not joined
     void joinChannel(const std::string& name, const std::string& password, uint32_t nowMs);   // CMSG_JOIN_CHANNEL
     void leaveChannel(const std::string& name, uint32_t nowMs);                               // CMSG_LEAVE_CHANNEL
+    // The original client's default channels, joined by the client itself (the server only answers): "General - <zone>",
+    // "Trade - <city>" in the six capitals, "LocalDefense - <zone>" (all three follow the zone: left and joined again when it
+    // changes) and the global "LookingForGroup". Called with the zone the player is in (0 = not known yet: nothing happens).
+    void updateDefaultChannels(uint32_t zoneId, const std::string& zoneName, uint32_t nowMs);
+    bool autoChannels = true;
     void listChannel(const std::string& name, uint32_t nowMs);                                // CMSG_CHANNEL_LIST
     // CMSG_CHANNEL_* with (channel, player) or (channel) payload: moderator, kick, ban, invite, announcements ...
     void channelCommand(uint16_t opcode, const std::string& channel, const std::string* arg, uint32_t nowMs);
@@ -599,7 +610,8 @@ public:
     std::vector<InvItem> inventory() const;
     uint32_t money() const;                            // PLAYER_FIELD_COINAGE (copper)
     uint32_t freeBagSlots() const;
-    void useItem(const InvItem& it, uint32_t nowMs);   // CMSG_USE_ITEM on self / the target
+    void useItem(const InvItem& it, uint32_t nowMs);   // CMSG_USE_ITEM on self, or on the selected unit / object when its spell needs a target
+    uint32_t itemTargetSpell(uint32_t entry) const;    // the on-use spell when it needs a target (quest items used on a creature), else 0
     // UI stage 10: an item whose spell is placed on the ground (grenades, bombs, target dummies): its on-use spell, or 0
     uint32_t itemGroundSpell(uint32_t entry) const;
     void useItemAt(const InvItem& it, const float pos[3], uint32_t nowMs);
@@ -660,6 +672,12 @@ public:
     void vocal(Vocal v) { if (v != Vocal::None && vocals.size() < 8) vocals.push_back(v); }
     std::deque<UiError> uiErrors;
     void error(const std::string& text, Vocal v, uint32_t nowMs, const std::string& chatLine = std::string());
+    // The original's UIErrorsFrame at the top of the screen, and the chat line as well: red for what could not be done
+    // (fail), yellow for what happened (notice: quest accepted / progress, a spell learned, a flight path found).
+    void fail(const std::string& text, uint32_t nowMs) { error(text, Vocal::None, nowMs); }
+    void notice(const std::string& text, uint32_t nowMs);
+    void uiLine(const std::string& text, uint32_t nowMs, bool info);   // the top line only (no chat line)
+    std::deque<XpGain> xpGains;                        // newest last, at most 4
     // Text emotes heard (SMSG_TEXT_EMOTE: ours echoed back and the players' around): the client plays the emote's voice
     // for the race and gender of who did it (EmotesTextSound.dbc, sounds.txt "T").
     struct HeardEmote { uint64_t guid = 0; uint32_t textEmote = 0; };
@@ -1015,6 +1033,9 @@ private:
     uint32_t attackErrorMs_ = 0;
     uint64_t lootGuid_ = 0;
     std::vector<std::string> channels_;   // joined channels (SMSG_CHANNEL_NOTIFY "you joined")
+    uint32_t autoZone_ = 0;               // the zone the default channels were joined for
+    std::vector<std::string> autoJoined_; // the zone channels we asked for (left when the zone changes)
+    bool autoLfg_ = false;
 
     WorldClient* wc_ = nullptr;
     uint64_t self_ = 0;

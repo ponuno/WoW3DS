@@ -104,7 +104,34 @@ ifneq ($(ROMFS),)
 	export _3DSXFLAGS += --romfs=$(CURDIR)/$(ROMFS)
 endif
 
-.PHONY: all clean synth
+.PHONY: all clean synth cia
+
+# Stage 6.32: the CIA (cia/w3dproto.rsf: 178 MB on the New 3DS, 804 MHz + L2). Needs makerom and bannertool in the PATH
+# (or MAKEROM= / BANNERTOOL=). The same .elf as the .3dsx; the romfs folder goes into the CIA itself.
+MAKEROM		?=	makerom
+BANNERTOOL	?=	bannertool
+CIA_VERSION	?=	0 7 0
+# 6.32b: the memory mode. 178MB (New 3DS "Dev1" mode, APPMEMTYPE 7) is the point of the CIA; 124MB (the normal New 3DS mode,
+# what the .3dsx gets) is a test build with its own title id, installed next to it - if only the 178MB one stays black, the
+# mode is the problem, not the CIA.
+CIA_MEMORY	?=	178MB
+ifeq ($(CIA_MEMORY),124MB)
+CIA_ID		:=	0xF7D3B
+CIA_NAME	:=	$(TARGET)-124
+CIA_LABEL	:=	$(APP_TITLE) (124 MB)
+else
+CIA_ID		:=	0xF7D3A
+CIA_NAME	:=	$(TARGET)
+CIA_LABEL	:=	$(APP_TITLE)
+endif
+
+cia: all
+	@$(BANNERTOOL) makebanner -i cia/banner.png -a cia/audio.wav -o $(BUILD)/banner.bnr
+	@$(BANNERTOOL) makesmdh -s "$(CIA_LABEL)" -l "$(APP_DESCRIPTION)" -p "$(APP_AUTHOR)" -i cia/icon.png -f visible,nosavebackups -o $(BUILD)/icon.icn
+	@$(MAKEROM) -f cia -o $(CIA_NAME).cia -elf $(TARGET).elf -rsf cia/w3dproto.rsf -icon $(BUILD)/icon.icn -banner $(BUILD)/banner.bnr \
+		-DAPP_MEMORY=$(CIA_MEMORY) -DAPP_UNIQUE_ID=$(CIA_ID) \
+		-exefslogo -target t -major $(word 1,$(CIA_VERSION)) -minor $(word 2,$(CIA_VERSION)) -micro $(word 3,$(CIA_VERSION))
+	@echo built ... $(CIA_NAME).cia "($(CIA_MEMORY))"
 
 all: $(BUILD)
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
@@ -119,7 +146,7 @@ synth:
 
 clean:
 	@echo clean ...
-	@rm -fr $(BUILD) $(TARGET).3dsx $(OUTPUT).smdh $(TARGET).elf
+	@rm -fr $(BUILD) $(TARGET).3dsx $(OUTPUT).smdh $(TARGET).elf $(TARGET).cia $(TARGET)-124.cia
 
 #---------------------------------------------------------------------------------
 else

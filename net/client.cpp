@@ -13,7 +13,7 @@ namespace {
 enum : uint16_t {
     CMSG_CHAR_CREATE = 0x036, CMSG_CHAR_DELETE = 0x038, SMSG_CHAR_CREATE = 0x03A, SMSG_CHAR_DELETE = 0x03C,
     CMSG_CHAR_ENUM = 0x037, SMSG_CHAR_ENUM = 0x03B, CMSG_PLAYER_LOGIN = 0x03D, SMSG_CHARACTER_LOGIN_FAILED = 0x041,
-    CMSG_LOGOUT_REQUEST = 0x04B, SMSG_LOGOUT_RESPONSE = 0x04C, SMSG_LOGOUT_COMPLETE = 0x04D,
+    CMSG_LOGOUT_REQUEST = 0x04B, SMSG_LOGOUT_RESPONSE = 0x04C, SMSG_LOGOUT_COMPLETE = 0x04D, CMSG_LOGOUT_CANCEL = 0x04E,
     CMSG_PING = 0x1DC, SMSG_PONG = 0x1DD, SMSG_AUTH_CHALLENGE = 0x1EC, CMSG_AUTH_SESSION = 0x1ED,
     SMSG_AUTH_RESPONSE = 0x1EE, SMSG_LOGIN_VERIFY_WORLD = 0x236, SMSG_WARDEN_DATA = 0x2E6,
 };
@@ -290,11 +290,22 @@ void WorldClient::login(uint64_t guid) {
     deadline_ = nowMs() + 30000;
 }
 
-void WorldClient::logout() {
+void WorldClient::logout(bool toCharacters) {
     if (state_ != State::InWorld) { sock_.close(); state_ = State::Done; return; }
     send(CMSG_LOGOUT_REQUEST, {});
     state_ = State::LoggingOut;
+    logoutToChars_ = toCharacters;
+    logoutRefused_ = false;
     deadline_ = nowMs() + 25000;   // 20 s logout timer outside inns, plus slack
+}
+
+// The logout timer is running: the character stays in the world, nothing else changes.
+bool WorldClient::cancelLogout() {
+    if (state_ != State::LoggingOut || !logoutToChars_) return false;
+    send(CMSG_LOGOUT_CANCEL, {});
+    logoutToChars_ = false;
+    state_ = State::InWorld;
+    return true;
 }
 
 void WorldClient::update() {
@@ -454,10 +465,22 @@ void WorldClient::handle(Packet& p) {
             }
             return;
         case SMSG_LOGOUT_RESPONSE:
-            if (r.u32() != 0) { state_ = State::InWorld; err_ = "logout refused (in combat?)"; }
+            if (state_ != State::LoggingOut) return;   // (a late answer after a cancel)
+            if (r.u32() != 0) {
+                state_ = State::InWorld;
+                logoutToChars_ = false;
+                logoutRefused_ = true;
+                err_ = "logout refused (in combat?)";
+            }
             return;
         case SMSG_LOGOUT_COMPLETE:
-            // Back at character select on the same connection; we simply close.
+            if (state_ != State::LoggingOut) return;
+            if (logoutToChars_) {
+                // Back at character select on the same connection: ask for the list again.
+                logoutToChars_ = false;
+                requestCharacters();
+                return;
+            }
             sock_.close();
             state_ = State::Done;
             return;

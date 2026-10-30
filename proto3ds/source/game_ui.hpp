@@ -57,6 +57,7 @@ public:
         bool blockJump = false;       // the jump button did something else (closed a window) or we are dead
         bool keyboardShown = false;   // the system keyboard ran (the frame took long)
         bool quit = false, freeCamera = false, showDebug = false;
+        bool characters = false;      // START menu "Characters": log out to the character list
         bool configChanged = false, layoutChanged = false;
         bool graphicsChanged = false; // draw distance / crowd / doodads changed in Settings
         bool soundChanged = false;    // a volume changed in Settings
@@ -86,6 +87,8 @@ public:
     };
     Panel panel(const w3n::GameSession& g) const;   // what the centre area shows now
     Tab tab() const { return tab_; }
+    // UI stage 14: the Equipment page is shown (no window over it): the top screen shows the character window instead of the HUD
+    bool charSheetOpen(const w3n::GameSession& g) const { return tab_ == Tab::Bags && subBags_ == 1 && panel(g) == Panel::Tabs; }
     bool pinned() const { return pinned_; }
     uint64_t aimed() const { return aim_; }          // unit under the C-Stick ring (L/R held), 0 = none
     int shownSet() const { return shownSet_; }       // hotbar set on the bars
@@ -142,6 +145,7 @@ public:
     };
     const std::vector<Button>& buttons() const { return buttons_; }   // tap regions of the last draw (PC test)
     // Runs a hotbar slot (pad addressing): spell with soft targeting, item from the bags, fixed set-0 action.
+    void useItemFaced(w3n::GameSession& g, const w3n::InvItem& it, const Input& in, Output& out);
     void useSlot(w3n::GameSession& g, const Input& in, int slot, Output& out);
     bool placing() const { return place_.on; }
     enum : int { kKbBack = 1001, kKbShift = 1002, kKbSymbols = 1003, kKbOk = 1004, kKbCancel = 1005 };   // Act::KeyboardKey args
@@ -227,6 +231,8 @@ private:
     void questPrimary(w3n::GameSession& g, const Input& in);              // Accept / Continue / Complete
     std::vector<int> trainerRows(const w3n::GameSession& g) const;   // indices into trainer.spells shown now
     void hint(const std::string& s, uint32_t nowMs) { hint_ = s; hintMs_ = nowMs; dirty_ = true; }
+    // a "why not" (no target, none left ...): the touch screen's line as before and the red line at the top of the screen
+    void refuse(w3n::GameSession& g, const std::string& s, uint32_t nowMs) { hint(s, nowMs); g.uiLine(s, nowMs, false); }
     void dropOnSlot(const Input& in, int slot, Output& out);
     void showInfo(w3n::GameSession& g, const Button& b);
     const Button* hit(int x, int y) const;

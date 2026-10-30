@@ -22,6 +22,7 @@ enum : uint16_t {
     SMSG_LOOT_RELEASE_RESPONSE = 0x161, SMSG_LOOT_REMOVED = 0x162, SMSG_LOOT_MONEY_NOTIFY = 0x163,
     SMSG_LOOT_CLEAR_MONEY = 0x165, SMSG_ITEM_PUSH_RESULT = 0x166,
 };
+constexpr uint16_t TARGET_FLAG_UNIT_ = 0x0002, TARGET_FLAG_OBJECT_ = 0x0800;   // SpellCastTargets masks
 constexpr uint32_t kQueryBatch = 8;   // item queries per update(): the answers are ~250 bytes each
 
 const char* lootErrorText(uint8_t e) {
@@ -228,12 +229,44 @@ uint32_t GameSession::freeBagSlots() const {
     return total > used ? total - used : 0;
 }
 
+// The item's first on-use spell (trigger 0) and its index among the item's five spells; 0 when unknown.
+static uint32_t itemUseSpell(const ItemInfo* i, uint8_t* index) {
+    *index = 0;
+    if (!i) return 0;
+    for (int k = 0; k < 5; ++k)
+        if (i->spellId[k] && i->spellTrigger[k] == 0) { *index = (uint8_t)k; return i->spellId[k]; }
+    return 0;
+}
+
+// An item whose on-use spell wants a target (quest items used on a creature or an object: Foreman's Blackjack on a peon,
+// a vial at a corpse ...): the spell, else 0 (food, potions, the hearthstone, ground spells use no explicit target).
+uint32_t GameSession::itemTargetSpell(uint32_t entry) const {
+    uint8_t idx;
+    const uint32_t sp = itemUseSpell(itemInfoIfKnown(entry), &idx);
+    if (!sp || !spellNames.selfCastCount() || spellNames.selfCast(sp) || spellNames.ground(sp)) return 0;   // (no spell data: as before)
+    return sp;
+}
+
 void GameSession::useItem(const InvItem& it, uint32_t nowMs) {
+    uint8_t index = 0;
+    itemUseSpell(itemInfoIfKnown(it.entry), &index);
     Writer w;
     w.u8(it.bag);
     w.u8(it.slot);
-    w.u8(0);      // spell slot of the item (its first on-use spell)
-    w.u16(0);     // targets: none = self (food, drink, potions, hearthstone)
+    w.u8(index);  // spell slot of the item (its first on-use spell)
+    // Targets (SpellCastTargets): food, drink, potions, the hearthstone act on the caster (mask 0). An item whose spell
+    // needs a target (quest items "use on ...") must name it - the selected creature / player (UNIT 0x2) or object
+    // (GAMEOBJECT 0x800); without it the server casts at the caster and nothing happens (Lazy Peons).
+    const WorldObject* t = target_ && itemTargetSpell(it.entry) ? objects.find(target_) : nullptr;
+    if (t && !t->self && (t->type == ObjType::Unit || t->type == ObjType::Player)) {
+        w.u16(TARGET_FLAG_UNIT_);
+        w.packedGuid(target_);
+    } else if (t && t->type == ObjType::GameObject) {
+        w.u16(TARGET_FLAG_OBJECT_);
+        w.packedGuid(target_);
+    } else {
+        w.u16(0);
+    }
     send(CMSG_USE_ITEM, w.b, nowMs);
 }
 
@@ -275,7 +308,7 @@ void GameSession::equipItem(const InvItem& it, uint32_t nowMs) {
 }
 
 void GameSession::unequipItem(const InvItem& it, uint32_t nowMs) {
-    if (freeBagSlots() == 0) { addLocal(inventoryResultText(50 /* INVENTORY_FULL */), nowMs); return; }
+    if (freeBagSlots() == 0) { fail(inventoryResultText(50 /* INVENTORY_FULL */), nowMs); return; }
     Writer w;
     w.u8(it.bag);
     w.u8(it.slot);

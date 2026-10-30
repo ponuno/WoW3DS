@@ -39,7 +39,7 @@ const char* tradeError(uint32_t s) {
 
 void GameSession::proposeTrade(uint64_t player, uint32_t nowMs) {
     if (!player || player == self_) return;
-    if (trade.phase != TradeState::Phase::None) { addLocal("You are already trading.", nowMs); return; }
+    if (trade.phase != TradeState::Phase::None) { fail("You are already trading.", nowMs); return; }
     Writer w;
     w.u64(player);
     send(CMSG_INITIATE_TRADE, w.b, nowMs);
@@ -56,9 +56,9 @@ void GameSession::answerTrade(bool accept, uint32_t nowMs) {
 
 bool GameSession::offerTradeItem(int slot, const InvItem& it, uint32_t nowMs) {
     if (!trade.open() || slot < 0 || slot >= 7 || !it.guid) return false;
-    if (it.equipped()) { addLocal("Unequip it first.", nowMs); return false; }
+    if (it.equipped()) { fail("Unequip it first.", nowMs); return false; }
     for (int i = 0; i < 7; ++i)
-        if (trade.myItems[i].guid == it.guid && i != slot) { addLocal("That item is already offered.", nowMs); return false; }
+        if (trade.myItems[i].guid == it.guid && i != slot) { fail("That item is already offered.", nowMs); return false; }
     Writer w;
     w.u8((uint8_t)slot);
     w.u8(it.bag);
@@ -134,7 +134,7 @@ bool GameSession::handleTrade(uint16_t op, const Bytes& data, uint32_t nowMs) {
                     trade = TradeState();
                     break;
                 default:
-                    addLocal(tradeError(s), nowMs);
+                    fail(tradeError(s), nowMs);
                     trade = TradeState();
                     break;
             }

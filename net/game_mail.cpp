@@ -60,7 +60,7 @@ void GameSession::takeMailMoney(uint32_t mailId, uint32_t nowMs) {
 }
 
 void GameSession::takeMailItem(uint32_t mailId, uint32_t nowMs) {
-    if (!freeBagSlots()) { addLocal("Your bags are full.", nowMs); return; }
+    if (!freeBagSlots()) { fail("Your bags are full.", nowMs); return; }
     Writer w;
     w.u64(mail.box);
     w.u32(mailId);
@@ -89,9 +89,9 @@ void GameSession::markMailRead(uint32_t mailId, uint32_t nowMs) {
 bool GameSession::sendMail(const std::string& to, const std::string& subject, const std::string& body, uint64_t itemGuid,
                            uint32_t money_, uint32_t nowMs) {
     if (!mail.open) return false;
-    if (to.empty()) { addLocal("Whom to send it to?", nowMs); return false; }
-    if (subject.empty() && !itemGuid && !money_) { addLocal("A letter needs a subject.", nowMs); return false; }
-    if ((uint64_t)money_ + kPostage > money()) { addLocal("You don't have enough money (postage is 30c).", nowMs); return false; }
+    if (to.empty()) { fail("Whom to send it to?", nowMs); return false; }
+    if (subject.empty() && !itemGuid && !money_) { fail("A letter needs a subject.", nowMs); return false; }
+    if ((uint64_t)money_ + kPostage > money()) { fail("You don't have enough money (postage is 30c).", nowMs); return false; }
     Writer w;
     w.u64(mail.box);
     w.cstr(to);
@@ -152,7 +152,7 @@ bool GameSession::handleMail(uint16_t op, const Bytes& data, uint32_t nowMs) {
         case SMSG_SEND_MAIL_RESULT: {
             uint32_t id = r.u32(), action = r.u32(), err = r.u32();
             if (r.bad) return true;
-            if (err) addLocal(mailError(err), nowMs);
+            if (err) fail(mailError(err), nowMs);
             else if (action == 0) { ++mailsSent; addLocal("Mail sent.", nowMs); }
             else if (action == 4) mail.mails.erase(std::remove_if(mail.mails.begin(), mail.mails.end(), [&](const MailEntry& m) { return m.id == id; }),
                                                   mail.mails.end());
@@ -163,7 +163,7 @@ bool GameSession::handleMail(uint16_t op, const Bytes& data, uint32_t nowMs) {
         }
         case SMSG_RECEIVED_MAIL:
             newMail = true;
-            addLocal("You have new mail.", nowMs);
+            notice("You have new mail.", nowMs);
             sound("mail");
             return true;
         default:

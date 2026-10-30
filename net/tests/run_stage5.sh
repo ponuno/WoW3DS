@@ -250,7 +250,17 @@ g++ -std=c++20 $SAN -Wall "$N/tests/water_test.cpp" $SRC -o "$OUT/water_test"
 g++ -std=c++20 $SAN -Wall "$N/tests/areatrigger_test.cpp" $SRC -o "$OUT/areatrigger_test"
 # Stage 5.40: cooldowns computed by the client (spells.txt @cd, item numbers, categories, COOLDOWN_EVENT)
 g++ -std=c++20 $SAN -Wall "$N/tests/cooldown_test.cpp" $SRC -o "$OUT/cooldown_test"
+g++ -std=c++20 $SAN -Wall "$N/tests/useitem_test.cpp" $SRC -o "$OUT/useitem_test"
+g++ -std=c++20 $SAN -Wall "$N/tests/channels_test.cpp" $SRC -o "$OUT/channels_test"
+# UI stage 14: the character window's stats and the average item level
+g++ -std=c++20 $SAN -Wall -I"$N" "$N/tests/charsheet_test.cpp" $SRC -o "$OUT/charsheet_test"
+# 6.22: the flight master's known-nodes mask (node id - 1)
+g++ -std=c++20 $SAN -Wall -I"$N" "$N/tests/taxi_mask_test.cpp" $SRC -o "$OUT/taxi_mask_test"
+"$OUT/taxi_mask_test"
+"$OUT/charsheet_test"
 "$OUT/cooldown_test"
+"$OUT/useitem_test"
+"$OUT/channels_test"
 "$OUT/areatrigger_test"
 # Stage 5.29: the character list's looks and equipment, creating and deleting characters (w3dlogin = the 3DS net code)
 PORT6=$((PORT + 50))
@@ -266,3 +276,14 @@ grep -q "create Taken: That name is unavailable (0x31)" "$OUT/glue2.log"
 grep -q "delete Testtwo: Character deleted (0x39)" "$OUT/glue2.log"
 ! grep -q "\[1\] Testtwo" <(sed -n '/delete Testtwo/,$p' "$OUT/glue2.log")
 echo "CHARACTER LIST + CREATE + DELETE: PASS"
+# 6.25: the START menu's "Characters": logout on the same connection, the list again, enter again
+PORT7=$((PORT + 60))
+(cd "$N/tests" && timeout 30 python3 -u fake_server.py --port $PORT7 > "$OUT/relog_server.log" 2>&1 &)
+sleep 1
+"$OUT/w3dlogin" 127.0.0.1:$PORT7 TEST PASSWORD --char 0 --stay 1 --relog > "$OUT/relog.log" 2>&1
+grep -E "RELOG" "$OUT/relog.log"
+grep -q "RELOG: back at the character list (2 characters)" "$OUT/relog.log"
+grep -q "RELOG: entered the world again" "$OUT/relog.log"
+grep -q "logged out OK" "$OUT/relog.log"
+[ "$(grep -c 'character list sent' "$OUT/relog_server.log")" -ge 2 ]
+echo "LOGOUT TO THE CHARACTER LIST: PASS"

@@ -83,9 +83,9 @@ void GameSession::listOwnAuctions(uint32_t nowMs) {
 
 bool GameSession::bidAuction(const AuctionItem& a, uint32_t price, uint32_t nowMs) {
     if (!auction.open) return false;
-    if (a.owner == self_) { addLocal("You cannot bid on your own auction.", nowMs); return false; }
-    if (price > money()) { addLocal("You don't have enough money.", nowMs); return false; }
-    if (price < a.nextBid() && !(a.buyout && price >= a.buyout)) { addLocal("Your bid is too low.", nowMs); return false; }
+    if (a.owner == self_) { fail("You cannot bid on your own auction.", nowMs); return false; }
+    if (price > money()) { fail("You don't have enough money.", nowMs); return false; }
+    if (price < a.nextBid() && !(a.buyout && price >= a.buyout)) { fail("Your bid is too low.", nowMs); return false; }
     Writer w;
     w.u64(auction.npc);
     w.u32(a.id);
@@ -96,8 +96,8 @@ bool GameSession::bidAuction(const AuctionItem& a, uint32_t price, uint32_t nowM
 
 bool GameSession::sellAuction(const InvItem& it, uint32_t bid, uint32_t buyout, uint32_t minutes, uint32_t nowMs) {
     if (!auction.open || !it.guid) return false;
-    if (!bid) { addLocal("Set a starting bid.", nowMs); return false; }
-    if (buyout && buyout < bid) { addLocal("The buyout must not be below the bid.", nowMs); return false; }
+    if (!bid) { fail("Set a starting bid.", nowMs); return false; }
+    if (buyout && buyout < bid) { fail("The buyout must not be below the bid.", nowMs); return false; }
     if (minutes != 120 && minutes != 480 && minutes != 1440) minutes = 480;
     Writer w;
     w.u64(auction.npc);
@@ -149,7 +149,7 @@ bool GameSession::handleAuction(uint16_t op, const Bytes& data, uint32_t nowMs) 
             if (r.bad) return true;
             auction.lastAction = action;
             auction.lastError = err;
-            if (err) { addLocal(auctionError(err), nowMs); return true; }
+            if (err) { fail(auctionError(err), nowMs); return true; }
             if (action == 0) addLocal("Auction created.", nowMs);
             else if (action == 1) {
                 addLocal("Auction cancelled.", nowMs);

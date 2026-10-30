@@ -79,7 +79,7 @@ void GameSession::answerGroupInvite(bool accept, uint32_t nowMs) {
 }
 
 void GameSession::leaveGroup(uint32_t nowMs) {
-    if (!party.inGroup) { addLocal("You aren't in a party.", nowMs); return; }
+    if (!party.inGroup) { fail("You aren't in a party.", nowMs); return; }
     send(CMSG_GROUP_DISBAND, {}, nowMs);
 }
 
@@ -117,7 +117,7 @@ bool GameSession::handleGroup(uint16_t op, const Bytes& data, uint32_t nowMs) {
             uint32_t res = r.u32();
             if (r.bad) return true;
             std::string t = partyResultText(operation, res, name);
-            if (!t.empty()) addLocal(t, nowMs);
+            if (!t.empty()) fail(t, nowMs);
             return true;
         }
         case SMSG_GROUP_LIST: {

@@ -39,6 +39,7 @@ struct PadConfig {
     // UI stages 3/6 (the Settings tab)
     int lang = 0;                     // interface language: 0 English (default), 1 Russian
     int drawDist = 1;                 // index into the draw distances (main.cpp kDrawDists)
+    int horizon = 0;                  // 6.34b: the ground and far buildings past the draw distance: 0 off, 1 to 800 yd, 2 to 1200 yd
     int crowd = 2;                    // creatures drawn at most: 0 = 10, 1 = 20, 2 = 40, 3 = all
     int topMode = 0;                  // top screen: 0 normal 400x240, 1 wide 800x240, 2 stereoscopic 3D (the slider)
     bool doodads = true;              // small world objects (trees, rocks, furniture)

@@ -215,7 +215,7 @@ bool GameSession::castSpell(uint32_t spell, uint32_t nowMs) {
         return true;
     }
     if (!spells.empty() && !knowsSpell(spell)) {
-        addLocal("You do not know " + spellNames.name(spell), nowMs);
+        fail("You do not know " + spellNames.name(spell), nowMs);
         return false;
     }
     if (cast.active && (cast.durMs == 0 ? nowMs - cast.startMs < 400 : nowMs - cast.startMs < cast.durMs)) {
@@ -247,7 +247,7 @@ bool GameSession::castSpell(uint32_t spell, uint32_t nowMs) {
 }
 
 bool GameSession::castSpellAt(uint32_t spell, const float pos[3], uint32_t nowMs) {
-    if (!spells.empty() && !knowsSpell(spell)) { addLocal("You do not know " + spellNames.name(spell), nowMs); return false; }
+    if (!spells.empty() && !knowsSpell(spell)) { fail("You do not know " + spellNames.name(spell), nowMs); return false; }
     if (cast.active && (cast.durMs == 0 ? nowMs - cast.startMs < 400 : nowMs - cast.startMs < cast.durMs)) {
         error("Another action is in progress", Vocal::None, nowMs, "Already casting");
         return false;
@@ -310,7 +310,7 @@ bool GameSession::cancelAura(uint32_t spell, uint32_t nowMs) {
     if (!me) return false;
     for (const AuraView& a : auras(*me, nowMs))
         if (a.spell == spell) {
-            if (!a.cancelable) { addLocal("You can't cancel that.", nowMs); return false; }
+            if (!a.cancelable) { fail("You can't cancel that.", nowMs); return false; }
             Writer w;
             w.u32(spell);
             send(CMSG_CANCEL_AURA, w.b, nowMs);
@@ -354,7 +354,7 @@ bool GameSession::handleSpells(uint16_t op, const Bytes& data, uint32_t nowMs) {
             uint32_t id = r.u16();
             if (r.bad || !id) return true;
             if (!knowsSpell(id)) spells.push_back(id);
-            addLocal("You have learned a new spell: " + spellNames.name(id) +
+            notice("You have learned a new spell: " + spellNames.name(id) +
                      (spellNames.rank(id).empty() ? "" : " (" + spellNames.rank(id) + ")"), nowMs);
             return true;
         }

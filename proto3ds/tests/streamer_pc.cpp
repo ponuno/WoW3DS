@@ -8,6 +8,7 @@
 #include "../source/creature_view.hpp"
 #include "../source/fx.hpp"
 #include "w3d_anim.h"
+#include "w3d_farlod.h"
 
 #include <cmath>
 #include <cstdio>
@@ -39,6 +40,14 @@ void pcTestIoDelay(int file, uint32_t offset, uint32_t size) {
     std::this_thread::sleep_for(std::chrono::microseconds((long long)us));
 }
 
+static size_t g_farFrames = 0, g_farOverlap = 0;
+static size_t g_foFrames = 0, g_foWrong = 0, g_foHiddenFrames = 0, g_foBeyondDraws = 0;   // 6.29: far buildings (6.34: beyond the detail distance)
+static size_t g_pk[5] = {0, 0, 0, 0, 0};   // submesh problems by kind: not ready, index range, texture, vertex index, radius/position
+
+static int g_maxRingTiles = 0;   // 6.31
+static size_t g_farLoadedFar = 0, g_farLoadedWrong = 0;   // 6.34c
+static std::map<int, int> g_ownMax;   // 6.33: owned doodads per tile (most seen)
+static size_t g_ownWrong = 0;
 int main(int argc, char** argv) {
     if (argc < 2) return 2;
     PackIndex index;
@@ -112,6 +121,83 @@ int main(int argc, char** argv) {
         float dist = std::getenv("CAM_WALK") ? 250.0f : (f / 500) % 2 ? 800.0f : 250.0f;   // switches the 3x3 / 5x5 radius too
         if (inFrame) { streamerUpdate(cam, dist, true); streamerUploadTextures(); }   // stage 6: the main loop's way
         else streamerUpdate(cam, dist);
+        {   // 6.24: the far ground - drawn only for tiles without their detailed ground, its buffers always valid
+            static std::vector<FarDraw> far;
+            GpuTex* atlas = nullptr;
+            const uint16_t* fidx = nullptr;
+            float zs = 0;
+            {   // 6.34c: detailed only within 40 yd - loaded tiles wholly beyond get their far mesh, never the camera's own tile
+                static std::vector<FarDraw> f2;
+                GpuTex* a2 = nullptr;
+                const uint16_t* i2 = nullptr;
+                float z2 = 0;
+                if (streamerFarDraws(cam, dist + 1000.0f, 40.0f, f2, &a2, &i2, &z2))
+                    for (const FarDraw& d : f2) {
+                        const int tx = (int)std::floor(32.0f - (d.origin[1] + 1.0f) / kTileSize), ty = (int)std::floor(32.0f - (d.origin[0] + 1.0f) / kTileSize);
+                        for (Tile* t : streamerReadyTiles())
+                            if (t->tx == tx && t->ty == ty) {
+                                if (tileBeyond(tx, ty, cam, 40.0f)) ++g_farLoadedFar; else ++g_farLoadedWrong;
+                            }
+                        volatile int16_t probe = d.verts[W3D_FAR_VERTS - 1].z;
+                        (void)probe;
+                    }
+            }
+            if (streamerFarDraws(cam, dist, dist, far, &atlas, &fidx, &zs)) {
+                ++g_farFrames;
+                for (const FarDraw& d : far) {
+                    const int tx = (int)std::floor(32.0f - (d.origin[1] + 1.0f) / kTileSize), ty = (int)std::floor(32.0f - (d.origin[0] + 1.0f) / kTileSize);
+                    for (Tile* t : streamerReadyTiles()) if (t->tx == tx && t->ty == ty) ++g_farOverlap;
+                    if (!d.verts || !fidx || !atlas || zs <= 0) ++g_farOverlap;
+                    volatile int16_t probe = d.verts[W3D_FAR_VERTS - 1].z;   // ASan: the buffer is alive
+                    (void)probe;
+                }
+            }
+        }
+        {   // 6.29: the far buildings - never drawn from a tile that shows all of its buildings, the ranges inside live buffers
+            static std::vector<FarObjDraw> fo;
+            GpuTex* pal = nullptr;
+            float zs = 0;
+            const bool any = streamerFarObjectDraws(cam, dist, 1e9f, fo, &pal, &zs);   // (the real buildings drawn at any distance)
+            if (any) ++g_foFrames;
+            {   // 6.34: real buildings drawn only within 1 yd: a loaded tile's buildings are shells beyond it
+                static std::vector<FarObjDraw> beyond;
+                GpuTex* p2 = nullptr;
+                float z2 = 0;
+                if (!std::getenv("NO_BEYOND") && streamerFarObjectDraws(cam, dist, 1.0f, beyond, &p2, &z2))
+                    for (const FarObjDraw& d : beyond) {
+                        const int tx = (int)std::floor(32.0f - (d.origin[1] + 1.0f) / kTileSize), ty = (int)std::floor(32.0f - (d.origin[0] + 1.0f) / kTileSize);
+                        for (Tile* t : streamerReadyTiles())
+                            if (t->tx == tx && t->ty == ty) { ++g_foBeyondDraws; break; }
+                        volatile uint16_t probe = d.idx[d.count - 1];
+                        (void)probe;
+                    }
+            }
+            // a tile "shows everything": every building group of it is shown (its Bldg open, or a one-group building drawable)
+            auto showsAll = [](const Tile* t) {
+                bool any = false;
+                for (const Instance& in : t->instances) {
+                    if (!in.model || !in.model->building) continue;
+                    any = true;
+                    if (in.bldg ? !(in.bldg <= t->bldgs.size() && t->bldgs[in.bldg - 1].open) : !in.model->drawable) return false;
+                }
+                return any;
+            };
+            for (const FarObjDraw& d : fo) {
+                if (!d.verts || !d.idx || !d.count || d.count % 3 || !pal || zs <= 0) ++g_foWrong;
+                const int tx = (int)std::floor(32.0f - (d.origin[1] + 1.0f) / kTileSize), ty = (int)std::floor(32.0f - (d.origin[0] + 1.0f) / kTileSize);
+                for (Tile* t : streamerReadyTiles())
+                    if (t->tx == tx && t->ty == ty && showsAll(t)) {
+                        if (!g_foWrong && std::getenv("FAROBJ_DEBUG")) std::printf("wrong: tile %d_%d, draw of %u indices\n", tx, ty, d.count);
+                        ++g_foWrong;
+                    }
+                volatile uint16_t probe = d.idx[d.count - 1];   // ASan: the buffers are alive
+                volatile int16_t probeV = d.verts[probe].z;
+                (void)probeV;
+            }
+            // a frame where a tile shows all its buildings and nothing of it is drawn far: the shells did go
+            for (Tile* t : streamerReadyTiles())
+                if (showsAll(t)) { ++g_foHiddenFrames; break; }
+        }
         {   // stage 5.32: the effects of what is near, as render.cpp drawFx does (models freed meanwhile must take their
             // particles with them: ASan would catch a particle reading a freed blob)
             static std::vector<fx::Source> fsrc;
@@ -188,7 +274,7 @@ int main(int argc, char** argv) {
                 Model* m = in.model;
                 // stage 5.30: as the renderer, each model once it and its textures are in (the tile shows its ground first)
                 if (!m->drawable) continue;
-                if (m->state != AssetState::Ready || !m->h || !m->texturesReady()) { ++problems; continue; }
+                if (m->state != AssetState::Ready || !m->h || !m->texturesReady()) { ++problems; ++g_pk[0]; continue; }
                 if (in.radius <= 0) in.radius = m->h->radius * in.scale;
                 {
                     const uint64_t k2 = (uint64_t)(uintptr_t)t << 20 ^ (uint64_t)(&in - t->instances.data());
@@ -210,12 +296,14 @@ int main(int argc, char** argv) {
                 for (u32 s = 0; s < h->submeshCount; ++s) {
                     const W3dSubmesh& sm = m->subs[s];
                     ++checks;
-                    if ((u64)sm.firstIndex + sm.indexCount > h->indexCount || sm.indexCount % 3) { ++problems; continue; }
-                    if (sm.tex != W3D_NO_TEXTURE && (sm.tex >= m->tex.size() || !m->tex[sm.tex])) { ++problems; continue; }
+                    if ((u64)sm.firstIndex + sm.indexCount > h->indexCount || sm.indexCount % 3) { ++problems; ++g_pk[1]; continue; }
+                    if (sm.tex != W3D_NO_TEXTURE && (sm.tex >= m->tex.size() || !m->tex[sm.tex])) { ++problems; ++g_pk[2]; continue; }
                 }
                 if (modelsSeen.insert(m->id).second)
-                    for (u32 k = 0; k < h->indexCount; ++k) if (idx[k] >= h->vertexCount) { ++problems; break; }
-                if (!(in.radius > 0) || !std::isfinite(in.pos[0])) ++problems;
+                    for (u32 k = 0; k < h->indexCount; ++k) if (idx[k] >= h->vertexCount) { ++problems; ++g_pk[3]; break; }
+                // (a model with radius 0 is a one-vertex stand-in that only carries collision - 6.14: the renderer skips it; the check
+                // counted every such placement as a problem since then)
+                if (!std::isfinite(in.pos[0]) || (!(in.radius > 0) && m->h->radius > 0 && !m->meshHidden)) { ++problems; ++g_pk[4]; }
             }
         }
         maxInst = std::max(maxInst, inst);
@@ -330,6 +418,16 @@ int main(int argc, char** argv) {
                 if (c.displayId == 987654321u && !c.look && view.drawn(c.guid)) ++crtProblems;
         }
         maxModels = std::max(maxModels, (size_t)streamerStats().models);
+        for (Tile* t : streamerReadyTiles()) {   // 6.33: owned doodads (a WMO's own) - their building exists, they are no building group
+            int owned = 0;
+            for (const Instance& in : t->instances) {
+                if (!in.owner) continue;
+                ++owned;
+                if (in.owner > t->bldgs.size() || in.bldg) ++g_ownWrong;
+            }
+            g_ownMax[t->ty * 64 + t->tx] = std::max(g_ownMax[t->ty * 64 + t->tx], owned);
+        }
+        if (dist > 450.0f) g_maxRingTiles = std::max(g_maxRingTiles, (int)streamerReadyTiles().size());   // 6.31
         if (f % 25 == 0) {   // stage 6 (perf log): the memory walk agrees with the running texture totals
             StreamMemory m;
             streamerMemory(&m);
@@ -395,7 +493,7 @@ int main(int argc, char** argv) {
         std::printf("show order: first fifth avg %.0f yd, last fifth avg %.0f yd (%zu placements)\n", a / q, b / q, shownOrder.size());
         if (std::getenv("ORDER_EXPECT") && !(a < b)) { std::printf("show order: the far ones came first\n"); ++problems; }
     }
-    std::printf("submesh checks %zu, problems %zu; linear peak %.1f MB\n", checks, problems, stubLinearPeak() / 1048576.0);
+    std::printf("submesh checks %zu, problems %zu (not ready %zu, index range %zu, texture %zu, vertex index %zu, radius %zu); linear peak %.1f MB\n", checks, problems, g_pk[0], g_pk[1], g_pk[2], g_pk[3], g_pk[4], stubLinearPeak() / 1048576.0);
     {   // stage 6: IO accounting for the perf log
         uint64_t kb = 0;
         uint32_t rd = 0;
@@ -443,6 +541,22 @@ int main(int argc, char** argv) {
         std::printf("terrain holes: %d uncovered points (membrane checks %d), ground checks %d, %d wrong\n", uncovered, membraneChecks,
                     groundChecks, holeBad);
         problems += holeBad;
+    }
+    if (const char* fe = std::getenv("FAROBJ_EXPECT")) {   // 6.29: the far buildings
+        const StreamStats& ss = streamerStats();
+        std::printf("far buildings: %d in the map, drawn in %zu frames, hidden behind the real ones in %zu, %zu wrong\n", ss.farObjects,
+                    g_foFrames, g_foHiddenFrames, g_foWrong);
+        std::printf("far buildings beyond the detail distance (6.34): %zu shell draws from loaded tiles\n", g_foBeyondDraws);
+        // (drawn before the tile loads is a race with the palette's read - some runs have none; beyond the detail distance always)
+        if (ss.farObjects != std::atoi(fe) || g_foWrong || !g_foHiddenFrames || !g_foBeyondDraws) { std::printf("far buildings FAIL\n"); ++problems; }
+    }
+    if (const char* fe = std::getenv("FAR_EXPECT")) {   // 6.24: the pack's far ground: its tiles, frames it was drawn in, overlaps
+        const StreamStats& ss = streamerStats();
+        std::printf("far ground: %d tiles, drawn in %zu frames, %zu wrong (drawn over a tile with its detailed ground)\n", ss.farTiles,
+                    g_farFrames, g_farOverlap);
+        if (ss.farTiles != std::atoi(fe) || g_farOverlap) { std::printf("far FAIL\n"); ++problems; }
+        std::printf("far ground over loaded tiles beyond the detail distance (6.34c): %zu draws, %zu inside it\n", g_farLoadedFar, g_farLoadedWrong);
+        if (!g_farLoadedFar || g_farLoadedWrong) { std::printf("far (6.34c) FAIL\n"); ++problems; }
     }
     // 6.18a (env GROUND_POINTS=file from converter/tests/ground_ref.py, GROUND_EXPECT=exact|old): the ground height and the hole
     // flag of streamerGroundHeightEx() at the reference points. exact: with GRND every point within 0.01 yd (and the hole flags
@@ -578,6 +692,26 @@ int main(int argc, char** argv) {
     std::printf("tile chunks: %zu checked, %zu problems\n", chunksSeen, chunkProblems);
     std::printf("buildings: %zu groups seen, %zu problems, %zu complete tiles with a closed building; found %u, opened with every group %u, late %u, closed now %d\n",
                 bldgGroups, bldgProblems, bldgCompleteClosed, s.bldgFound, s.bldgOpenedFull, s.bldgOpenedLate, s.bldgClosed);
+    {   // 6.33: WMO doodads owned by their building
+        int total = 0;
+        for (auto& [k, n] : g_ownMax) total += n;
+        std::printf("wmo doodads owned by their building: %d (tiles %zu), wrong %zu\n", total, g_ownMax.size(), g_ownWrong);
+        if (const char* oe = std::getenv("OWNED_EXPECT")) {
+            const bool good = total == std::atoi(oe) && g_ownWrong == 0;
+            std::printf("WMO DOODAD OWNERS: %s\n", good ? "PASS" : "FAIL");
+            if (!good) ++problems;
+        }
+    }
+    {   // 6.31: the heap reserve - with little heap left (W3D_HEAP_FREE_MB) the 5 x 5 ring of the far draw distance stays 3 x 3
+        std::printf("ring at 533+ yd: at most %d tiles ready; heap shrinks %u, COLL in linear memory %u\n", g_maxRingTiles, (unsigned)s.heapShrinks,
+                    (unsigned)s.collHeapMiss);
+        if (const char* he = std::getenv("HEAP_EXPECT")) {
+            const bool small = !std::strcmp(he, "small");
+            const bool good = s.tileLoads > 0 && (small ? (s.heapShrinks > 0 && g_maxRingTiles <= 9 && g_maxRingTiles > 0) : (s.heapShrinks == 0 && g_maxRingTiles > 9));
+            std::printf("HEAP RESERVE (%s): %s\n", he, good ? "PASS" : "FAIL");
+            if (!good) ++problems;
+        }
+    }
     bool ok = problems == 0 && leakLin == 0 && leakTex == 0 && s.tileLoads > 0 && walkBad == 0 && chunkProblems == 0 && chunksSeen > 0 && bldgProblems == 0 && bldgCompleteClosed == 0;
     std::printf("STREAMER: %s\n", ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;

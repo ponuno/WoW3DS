@@ -112,6 +112,18 @@ int main() {
     CHECK(onFloor && fabsf(z - 2.0f) < 0.02f, "second step from 0.6 up: z %.3f onFloor %d", z, onFloor);
     std::printf("   1 yd step: climbed, 2 yd step: not, 1.4 yd from the feet: climbed\n");
 
+    std::puts("-- terrain over an ADT hole (6.21)");
+    // the membrane at 1.6 over floor A (z 1.0): standing on the membrane (feet 1.6) the building floor wins, the membrane is ignored
+    CHECK(!w3d_hole_terrain_usable(coll.data(), 15.0f, 5.0f, 1.6f, 1.5f, 1.6f), "membrane used over a building floor");
+    // a membrane 3 yd above floor B seen from 3 up: still ignored (the character drops onto the floor, like the original)
+    CHECK(!w3d_hole_terrain_usable(coll.data(), 35.0f, 5.0f, 5.0f, 1.5f, 5.0f), "membrane used 3 yd above a building floor");
+    // no building floor here (x 25: between the squares): the membrane is all there is - kept (collision missing)
+    CHECK(w3d_hole_terrain_usable(coll.data(), 25.0f, 5.0f, 1.0f, 1.5f, 1.0f), "membrane dropped with nothing under it");
+    CHECK(w3d_hole_terrain_usable(nullptr, 25.0f, 5.0f, 1.0f, 1.5f, 1.0f), "membrane dropped without collision loaded");
+    // never above the feet (6.17)
+    CHECK(!w3d_hole_terrain_usable(nullptr, 25.0f, 5.0f, 1.0f, 1.5f, 1.2f), "membrane above the feet used");
+    std::printf("   membrane over a building floor: ignored; with nothing under it: kept\n");
+
     std::puts("-- wall / floor boundary");
     CHECK(fabsf(W3D_WALK_MIN_NZ - cosf(W3D_WALK_MAX_SLOPE_DEG * 3.14159265f / 180.0f)) < 1e-4f, "constants disagree");
     std::printf("   walkable up to %.0f degrees (normal z >= %.4f), the same number in the converter (wall flag) and the client\n",

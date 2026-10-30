@@ -298,16 +298,24 @@ Vocal vocalForLootError(uint8_t e) {
     }
 }
 
+void GameSession::uiLine(const std::string& text, uint32_t nowMs, bool info) {
+    if (text.empty()) return;
+    // the same text again: renew it rather than stacking copies (spamming a key on cooldown)
+    for (auto it = uiErrors.begin(); it != uiErrors.end(); ++it)
+        if (it->text == text) { uiErrors.erase(it); break; }
+    uiErrors.push_back({text, nowMs, info});
+    while (uiErrors.size() > 4) uiErrors.pop_front();
+}
+
 void GameSession::error(const std::string& text, Vocal v, uint32_t nowMs, const std::string& chatLine) {
     addLocal(chatLine.empty() ? text : chatLine, nowMs);
-    if (!text.empty()) {
-        // the same text again: renew it rather than stacking copies (spamming a key on cooldown)
-        for (auto it = uiErrors.begin(); it != uiErrors.end(); ++it)
-            if (it->text == text) { uiErrors.erase(it); break; }
-        uiErrors.push_back({text, nowMs});
-        while (uiErrors.size() > 3) uiErrors.pop_front();
-    }
+    uiLine(text, nowMs, false);
     vocal(v);
+}
+
+void GameSession::notice(const std::string& text, uint32_t nowMs) {
+    addLocal(text, nowMs);
+    uiLine(text, nowMs, true);
 }
 
 uint64_t GameSession::npcWindow() const {

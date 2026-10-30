@@ -25,6 +25,7 @@ struct Slot {
 };
 
 Slot g_slot[2];
+Slot g_doll;                    // UI stage 14: the character window's full figure (kDollSize square), external texture 2
 State g_state = State::Off;
 float g_corr[4] = {1, 0, 0, 1};
 uint32_t g_frame = 0, g_calFrame = 0;
@@ -56,6 +57,16 @@ bool init() {
         snprintf(g_status, sizeof g_status, "portraits: off (no video memory)");
         return false;
     }
+    if (C3D_TexInitVRAM(&g_doll.tex, (u16)ui::kDollSize, (u16)ui::kDollSize, GPU_RGBA8)) {
+        g_doll.target = C3D_RenderTargetCreateFromTex(&g_doll.tex, GPU_TEXFACE_2D, 0, C3D_DEPTHTYPE(GPU_RB_DEPTH24));
+        if (g_doll.target) {
+            C3D_TexSetFilter(&g_doll.tex, GPU_LINEAR, GPU_LINEAR);
+            C3D_TexSetWrap(&g_doll.tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+            g_doll.ok = true;
+        } else {
+            C3D_TexDelete(&g_doll.tex);
+        }
+    }
     g_state = State::Calibrate;
     snprintf(g_status, sizeof g_status, "portraits: calibrating");
     return true;
@@ -69,6 +80,10 @@ void shutdown() {
         if (s.ok) C3D_TexDelete(&s.tex);
         s = Slot();
     }
+    uiSetExternalTexture(2, nullptr, 0, 0);
+    if (g_doll.target) C3D_RenderTargetDelete(g_doll.target);
+    if (g_doll.ok) C3D_TexDelete(&g_doll.tex);
+    g_doll = Slot();
     g_state = State::Off;
 }
 
@@ -96,6 +111,7 @@ void frame(const CreatureInstance* const units[2], const uint64_t guids[2], uint
             g_state = State::Ready;
             snprintf(g_status, sizeof g_status, "portraits: on, fix %+.0f %+.0f %+.0f %+.0f", g_corr[0], g_corr[1], g_corr[2], g_corr[3]);
             for (int k = 0; k < 2; ++k) uiSetExternalTexture(k, &g_slot[k].tex, ui::kPortraitSize, ui::kPortraitSize);
+            if (g_doll.ok) uiSetExternalTexture(2, &g_doll.tex, ui::kDollSize, ui::kDollSize);
             return;
         }
         case State::Ready:
@@ -136,6 +152,34 @@ void frame(const CreatureInstance* const units[2], const uint64_t guids[2], uint
         s.drawnMs = nowMs;
     }
 }
+
+void frameDoll(const CreatureInstance* unit, uint64_t guid, float turn, uint32_t nowMs, FrameCounters& fc) {
+    if (g_state != State::Ready || !g_doll.ok || !unit || !guid || !unit->disp || !unit->disp->ready()) return;
+    if (g_doll.guid == guid && nowMs - g_doll.drawnMs < 66) return;   // ~15 pictures a second is plenty for an idle pose
+    C3D_RenderTargetClear(g_doll.target, C3D_CLEAR_ALL, 0, 0);
+    C3D_FrameDrawOn(g_doll.target);
+    CreatureInstance pose = *unit;
+    float rate = 1;
+    bool loop = true;
+    pose.seq = creaturePickSeq(unit->disp->model->blob, false, 0, false, false, &rate, &loop);   // standing
+    pose.timeMs = nowMs;
+    pose.loop = loop;
+    if (rendererDrawPortrait(pose, g_corr, fc, true, turn)) {
+        g_doll.guid = guid;
+        g_doll.drawnMs = nowMs;
+    }
+}
+
+ui::Image doll(uint64_t guid) {
+    ui::Image im;
+    if (g_state != State::Ready || !g_doll.ok || !guid || g_doll.guid != guid) return im;
+    im.tex = (uint16_t)(ui::kTexExternal0 + 2);
+    im.x = im.y = 0;
+    im.w = im.h = (uint16_t)ui::kDollSize;
+    return im;
+}
+
+void dollForget() { g_doll.guid = 0; }   // the window closed: the next opening draws a fresh picture first
 
 ui::Image image(int k, uint64_t guid) {
     ui::Image im;

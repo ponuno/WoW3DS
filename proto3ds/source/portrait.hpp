@@ -18,6 +18,11 @@ void shutdown();
 // Inside C3D_FrameBegin / C3D_FrameEnd, before the screens are drawn. units[k]: the unit to show in slot k (0 ours,
 // 1 the target), nullptr when none / not drawn this frame; guids[k] who it is. At most one portrait is drawn per frame.
 void frame(const CreatureInstance* const units[2], const uint64_t guids[2], uint32_t nowMs, FrameCounters& fc);
+// UI stage 14: the character window's full-figure picture of 'unit' (turned 'turn' radians from the front), at most ~15 a
+// second; call it only while the window is shown. doll(): the picture when it shows 'guid' (ok() false: not yet / not possible).
+void frameDoll(const CreatureInstance* unit, uint64_t guid, float turn, uint32_t nowMs, FrameCounters& fc);
+ui::Image doll(uint64_t guid);
+void dollForget();
 // The picture of slot k when it shows 'guid' (ok() false: not yet / not possible).
 ui::Image image(int k, uint64_t guid);
 const char* status();   // one line for the debug page / report

@@ -50,6 +50,8 @@ struct HudInput {
     uint32_t pingMs = 0;                  // the last pong (0 = none yet)
     int fading = -1;                      // stage 6.12: objects / units drawn fading last frame (shown with the FPS; -1 = hide)
     ui::Image portrait[2];                // UI stage 8: the rendered portraits, ours and the target's (!ok(): a fallback)
+    bool charSheet = false;               // UI stage 14: the Equipment tab is open: the character window instead of the HUD
+    ui::Image doll;                       // ... its figure, rendered from the model (!ok(): "loading")
     bool xpBar = true;                    // UI stage 8: the experience bar along the bottom edge
     const char* placeHint = nullptr;      // UI stage 10: a ground spell is being aimed (its name): the controls under it
     const char* zoneBig = nullptr;        // stage 5.45: the zone banner (ZoneBanner): the zone / subzone name, the subzone under it

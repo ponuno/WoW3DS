@@ -864,6 +864,7 @@ int main(int argc, char** argv) {
     std::vector<uint32_t> castList;   // --cast ID (repeatable): one cast per second once the previous one ended
     std::string spellsFile;           // --spells FILE (spells.txt of w3dconv)
     std::string createSpec, deleteName;   // --create / --delete (stage 5.29)
+    bool relog = false;
     std::string fightName;
     ClientVersion ver;
     for (int i = 3; i < argc; ++i) {
@@ -887,6 +888,7 @@ int main(int argc, char** argv) {
         else if (a == "--log") logPath = next();
         else if (a == "--objects") maxList = atoi(next().c_str());
         else if (a == "--out") outPath = next();
+        else if (a == "--relog") relog = true;   // log out to the character list, then enter the world again
         else if (a == "--create") createSpec = next();
         else if (a == "--delete") deleteName = next();
         else if (password.empty()) password = a;
@@ -1185,6 +1187,19 @@ int main(int argc, char** argv) {
     int shown = 0;
     for (auto& [op, n] : world.opcodeCounts())
         if (shown++ < 60) say("    0x%03X x%u\n", op, n);
+    if (relog) {   // the START menu's "Characters": logout keeps the connection, the list comes again
+        if (attached) { game.detach(); attached = false; }
+        world.logout(true);
+        waitUntil([&] { return world.state() == WorldClient::State::CharSelect || world.state() == WorldClient::State::Failed ||
+                               world.state() == WorldClient::State::Done; }, [&] { world.update(); });
+        if (world.state() != WorldClient::State::CharSelect) { say("RELOG FAILED: state %d %s\n", (int)world.state(), world.error().c_str()); return 8; }
+        say("RELOG: back at the character list (%zu characters)\n", world.characters().size());
+        world.login(chars[charIdx].guid);
+        waitUntil([&] { return world.state() == WorldClient::State::InWorld || world.state() == WorldClient::State::Failed; },
+                  [&] { world.update(); });
+        if (world.state() != WorldClient::State::InWorld) { say("RELOG FAILED to enter again: %s\n", world.error().c_str()); return 8; }
+        say("RELOG: entered the world again, map %u\n", world.mapId());
+    }
     sayLine("logging out ...");
     if (attached) game.detach();
     world.logout();

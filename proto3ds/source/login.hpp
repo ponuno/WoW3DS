@@ -56,6 +56,11 @@ public:
     size_t opcodesSeen() const { return world_.opcodeCounts().size(); }
     const std::string& characterName() const { return charName_; }
     bool online() const { return phase_ == Phase::InWorld; }
+    // The START menu's "Characters": log out on the server (its timer runs outside inns; the character stays in the world
+    // until it ends) and come back to the character list on the same connection. False when not possible now.
+    bool requestCharacterList();
+    bool logoutPending() const { return logoutPending_; }
+    void cancelLogout();                   // the player moved: the timer is cancelled
     // Stage 5: in-world session (objects, own movement). Valid while online().
     w3n::GameSession& game() { return game_; }
     uint32_t sessionMs() const { return (uint32_t)(w3n::nowMs() - sessionT0_); }
@@ -79,6 +84,7 @@ private:
     w3n::GameSession game_;
     w3n::PacketLog log_;
     bool entered_ = false, quit_ = false;
+    bool logoutPending_ = false;    // CMSG_LOGOUT_REQUEST sent for the character list
     w3n::AuthClient auth_;
     w3n::WorldClient world_;
     // the screens

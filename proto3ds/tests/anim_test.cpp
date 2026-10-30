@@ -159,7 +159,7 @@ static void stateMachine() {
     k.id(c, 1100);
     k.id(c, 1100);
     c.looting = true;
-    CHECK(k.id(c) == W3D_ANIM_LOOT, "looting");
+    CHECK(k.id(c) == W3D_ANIM_KNEEL_LOOP, "looting: the kneeling pose, not the repeated one-shot bend");
     c.looting = false;
     // jumping
     c.moveFlags = 0x2000;

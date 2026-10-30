@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "charsheet.hpp"
 #include "text.hpp"
 #include "ui_style.hpp"
 
@@ -426,8 +427,98 @@ bool hudProject(const HudInput& in, const float w[3], float* sx, float* sy) {
     return true;
 }
 
+// UI stage 14: the character window, the top screen while the Equipment tab is open (like the original's character frame):
+// the figure drawn from the model, the average item level of the worn gear, the stats in two columns. The slots are on the
+// touch screen. (Replaces the HUD while it is shown.)
+static void drawCharSheet(HudList& l, const HudInput& in) {
+    using ui::tr;
+    const w3n::GameSession& g = *in.game;
+    const w3n::CharSheet c = w3n::buildCharSheet(g);
+    l.fade = 255;
+    l.rect(0, 0, kHudW, kHudH, hudRgba(10, 8, 6, 238));
+    l.outline(1, 1, kHudW - 2, kHudH - 2, kBorder);
+    const int lh = HudList::lineHeight() + 1;
+    // title: name, level and class
+    const uint32_t cls = g.classId();
+    char b[96];
+    l.textCentered(kHudW / 2, 5, ascii(in.selfName), kGold, true, ui::Font::Normal);
+    snprintf(b, sizeof b, "%s %d %s", tr("Level", "Уровень"), c.level, ui::className(cls));
+    l.textCentered(kHudW / 2, 5 + HudList::lineHeight(ui::Font::Normal), b, ui::classColor(cls));
+    l.rect(8, 33, kHudW - 16, 1, hudAlpha(kBorder, 160));
+    // the figure
+    const int dx = 10, dy = 38, ds = 136;
+    l.rect(dx - 1, dy - 1, ds + 2, ds + 2, hudRgba(0, 0, 0, 200));
+    if (in.doll.ok()) l.image(dx, dy, ds, ds, in.doll);
+    else l.textCentered(dx + ds / 2, dy + ds / 2 - 5, tr("loading...", "загрузка..."), kGrey);
+    l.outline(dx - 1, dy - 1, ds + 2, ds + 2, hudAlpha(kBorder, 200));
+    // item level under it
+    const int iy = dy + ds + 6;
+    l.textCentered(dx + ds / 2, iy, tr("Average item level", "Средний уровень предметов"), kGrey);
+    if (c.itemLevel) snprintf(b, sizeof b, "%d", c.itemLevel);
+    else snprintf(b, sizeof b, "-");
+    l.textCentered(dx + ds / 2, iy + lh, b, kGold, true, ui::Font::Large);
+    if (c.itemsWorn && c.itemsKnown < c.itemsWorn) {
+        snprintf(b, sizeof b, "%d/%d %s", c.itemsKnown, c.itemsWorn, tr("items known", "предметов изучено"));
+        l.textCentered(dx + ds / 2, iy + lh + HudList::lineHeight(ui::Font::Large), b, kGrey);
+    }
+    // the stats: two columns
+    auto column = [&](int x, int w) {
+        struct Col { int x, w, y; } col{x, w, 40};
+        return col;
+    };
+    auto head = [&](auto& col, const char* t) {
+        if (col.y > 40) col.y += 3;
+        l.text(col.x, col.y, t, kGold);
+        l.rect(col.x, col.y + lh - 1, col.w, 1, hudAlpha(kBorder, 120));
+        col.y += lh + 1;
+    };
+    auto row = [&](auto& col, const char* label, const std::string& value, uint32_t vcol = kWhite) {
+        l.text(col.x, col.y, label, kGrey);
+        l.textRight(col.x + col.w, col.y, value, vcol);
+        col.y += lh;
+    };
+    auto num = [](int v) { return std::to_string(v); };
+    auto pct = [](float v) { char t[24]; snprintf(t, sizeof t, "%.2f%%", v); return std::string(t); };
+    auto range = [](int a, int b2) { return std::to_string(a) + " - " + std::to_string(b2); };
+    const uint32_t kGreen = hudRgba(30, 255, 30), kRed = hudRgba(255, 60, 60);
+    const int x0 = dx + ds + 14, cw = (kHudW - 8 - x0 - 12) / 2;
+    auto A = column(x0, cw), B = column(x0 + cw + 12, cw);
+    head(A, tr("Attributes", "Характеристики"));
+    static const char* const kStatEn[5] = {"Strength", "Agility", "Stamina", "Intellect", "Spirit"};
+    static const char* const kStatRu[5] = {"Сила", "Ловкость", "Выносливость", "Интеллект", "Дух"};
+    for (int i = 0; i < 5; ++i)
+        row(A, tr(kStatEn[i], kStatRu[i]), num(c.stat[i]), c.statBonus[i] > 0 ? kGreen : c.statBonus[i] < 0 ? kRed : kWhite);
+    row(A, tr("Armor", "Броня"), num(c.armor));
+    head(A, tr("Resistance", "Сопротивление"));
+    static const char* const kResEn[5] = {"Fire", "Nature", "Frost", "Shadow", "Arcane"};
+    static const char* const kResRu[5] = {"Огонь", "Природа", "Лёд", "Тьма", "Тайная магия"};
+    static const int kResIdx[5] = {1, 2, 3, 4, 5};
+    for (int i = 0; i < 5; ++i) row(A, tr(kResEn[i], kResRu[i]), num(c.resist[kResIdx[i]]));
+    head(B, tr("Melee", "Ближний бой"));
+    row(B, tr("Damage", "Урон"), range(c.dmgMin, c.dmgMax));
+    row(B, tr("Attack power", "Сила атаки"), num(c.attackPower));
+    row(B, tr("Crit", "Крит"), pct(c.crit));
+    head(B, tr("Defense", "Защита"));
+    row(B, tr("Dodge", "Уклонение"), pct(c.dodge));
+    row(B, tr("Parry", "Парирование"), pct(c.parry));
+    row(B, tr("Block", "Блок"), pct(c.block));
+    if (c.rangedAttackPower > 0 || c.rangedMax > 0) {
+        head(B, tr("Ranged", "Дальний бой"));
+        row(B, tr("Damage", "Урон"), range(c.rangedMin, c.rangedMax));
+        row(B, tr("Attack power", "Сила атаки"), num(c.rangedAttackPower));
+        row(B, tr("Crit", "Крит"), pct(c.rangedCrit));
+    }
+    if (c.spellPower > 0) {
+        head(B, tr("Spell", "Заклинания"));
+        row(B, tr("Bonus damage", "Бонус к урону"), num(c.spellPower));
+    }
+    snprintf(b, sizeof b, "%s %u%%", tr("Durability", "Прочность"), (unsigned)c.durabilityPct);
+    l.textRight(kHudW - 12, kHudH - lh - 4, b, c.durabilityPct < 25 ? kRed : kGrey);
+}
+
 void hudBuildGame(HudList& l, const HudInput& in) {
     l.clear();
+    if (in.charSheet) { drawCharSheet(l, in); return; }   // UI stage 14: the character window instead of the HUD
     const w3n::GameSession& g = *in.game;
     const uint32_t now = in.nowMs;
     const WorldObject* me = g.objects.find(g.objects.self());
@@ -545,12 +636,16 @@ void hudBuildGame(HudList& l, const HudInput& in) {
             float head[3] = {p[0], p[1], p[2] + 2.6f};
             float sx, sy;
             if (!hudProject(in, head, &sx, &sy)) continue;
-            std::string t = h.miss() ? "Miss" : h.victimState >= 2 && h.victimState <= 8 ? "Parry" : num((uint32_t)std::max<int32_t>(0, h.damage));
+            const bool word = h.miss() || (h.victimState >= 2 && h.victimState <= 8);
+            std::string t = h.miss() ? "Miss" : word ? "Parry" : num((uint32_t)std::max<int32_t>(0, h.damage));
             if (h.crit()) t += "!";
             uint32_t col = onMe ? hudRgba(255, 60, 60) : h.crit() ? hudRgba(255, 120, 0) : hudRgba(255, 230, 40);
-            int rise = (int)(age * 30 / 1000);
+            // larger numbers (the Large font); a crit also jumps out a little as it appears; misses are a word in the middle size
+            const ui::Font nf = word ? ui::Font::Normal : ui::Font::Large;
+            int rise = (int)(age * 36 / 1000);
+            if (h.crit() && age < 160) rise -= (int)(160 - age) / 16;
             if (age > 1100) col = (col & 0x00FFFFFF) | ((uint32_t)(255 - (age - 1100) * 255 / 500) << 24);
-            l.textCentered((int)sx + (onMe ? -24 : 18), (int)sy - 22 - rise, t, col);
+            l.textCentered((int)sx + (onMe ? -28 : 22), (int)sy - 28 - rise, t, col, true, nf);
         }
     }
 
@@ -823,16 +918,28 @@ void hudBuildGame(HudList& l, const HudInput& in) {
             }
         }
     }
-    // ---- UI stage 8: the red error lines (the original's UIErrorsFrame): what could not be done, newest at the bottom
+    // ---- UI stage 8: the original's UIErrorsFrame at the top centre: red = what could not be done (not enough money, out of
+    // range, ...), yellow = what happened (quest progress, a spell learned); newest at the bottom, each fades after 4 s
     {
         l.fade = 255;
-        int y = 58;
+        int y = 62;
         for (const w3n::UiError& e : g.uiErrors) {
             const uint32_t age = now - e.ms;
             if (age > 4000) continue;
             const int a = age > 3000 ? (int)(255 - (age - 3000) * 255 / 1000) : 255;
-            l.textCentered(kHudW / 2, y, ui::trText(e.text), hudRgba(255, 26, 26, a), true, ui::Font::Normal);
+            l.textCentered(kHudW / 2, y, ui::trText(e.text), e.info ? hudRgba(255, 209, 0, a) : hudRgba(255, 26, 26, a), true, ui::Font::Normal);
             y += HudList::lineHeight(ui::Font::Normal);
+        }
+        // experience just gained: "+54 XP", large, rising from the middle of the top screen and fading (older ones above)
+        int slot = 0;
+        for (auto it = g.xpGains.rbegin(); it != g.xpGains.rend(); ++it, ++slot) {
+            const uint32_t age = now - it->ms;
+            if (age > 2600) continue;
+            const int rise = (int)(age * 16 / 1000) + slot * 16;
+            const int a = age > 1900 ? (int)(255 - (age - 1900) * 255 / 700) : 255;
+            char t[48];
+            snprintf(t, sizeof t, "+%u XP", (unsigned)it->xp);
+            l.textCentered(kHudW / 2, 150 - rise, t, hudRgba(190, 140, 255, a), true, ui::Font::Large);
         }
     }
     // ---- UI stage 9: duels (the countdown, leaving the area, who won) and following

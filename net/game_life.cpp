@@ -353,7 +353,7 @@ bool GameSession::handleLife(uint16_t op, const Bytes& data, uint32_t nowMs) {
             uint8_t found = r.u8();
             if (r.bad) return true;
             if (!found) {
-                if (life() == Life::Ghost && !corpse.known) addLocal("Your corpse could not be found.", nowMs);
+                if (life() == Life::Ghost && !corpse.known) fail("Your corpse could not be found.", nowMs);
                 return true;
             }
             int32_t map = (int32_t)r.u32();
@@ -386,7 +386,7 @@ bool GameSession::handleLife(uint16_t op, const Bytes& data, uint32_t nowMs) {
             return true;
         }
         case SMSG_RESURRECT_FAILED:
-            addLocal("Resurrection failed.", nowMs);
+            fail("Resurrection failed.", nowMs);
             return true;
         case SMSG_SPIRIT_HEALER_CONFIRM: {
             uint64_t g = r.u64();

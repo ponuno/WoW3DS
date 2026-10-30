@@ -11,11 +11,20 @@
 #include <vector>
 
 #include "w3d_format.h"
+#include "w3d_terrain_lod.h"
 #include "w3d_character.h"
 #include "w3d_fx.h"
 #include "hud.hpp"
 
 static constexpr float kTileSize = 533.33333f;
+// 6.34c: a whole tile farther than d from the camera (x / y, its square's nearest point): with the horizon on, such a loaded
+// tile is drawn with its far ground mesh (one draw) instead of its detailed batches, and its water is left out
+inline bool tileBeyond(int tx, int ty, const float cam[3], float d) {
+    const float x0 = (32.0f - ty - 1.0f) * kTileSize, y0 = (32.0f - tx - 1.0f) * kTileSize;
+    const float dx = cam[0] < x0 ? x0 - cam[0] : cam[0] > x0 + kTileSize ? cam[0] - x0 - kTileSize : 0.0f;
+    const float dy = cam[1] < y0 ? y0 - cam[1] : cam[1] > y0 + kTileSize ? cam[1] - y0 - kTileSize : 0.0f;
+    return dx * dx + dy * dy > d * d;
+}
 static constexpr int kHeightN = 129;  // height samples per tile edge (4.17 yd spacing)
 
 static inline double ticksToMs(u64 t) { return (double)t * 1000.0 / (double)SYSCLOCK_ARM11; }
@@ -101,6 +110,7 @@ struct Instance {
     uint32_t animMs = 0;             // stage 5.35: age of an animated effect (Model::fxAnim)
     uint8_t lod = 0;                 // stage 6.12: the level drawn this frame (renderer; 0 = full)
     uint16_t bldg = 0;               // stage 6.11: 1 + index in Tile::bldgs of the building (WMO groups sharing one transform), 0 = none
+    uint16_t owner = 0;              // 6.33: 1 + the building whose doodad (tree, lamp, bench of the WMO) it is: shown only with it
     float fade = 1.0f;               // stage 6.11: opacity this frame (the renderer sets it while the instance appears / at the edge)
 };
 
@@ -191,6 +201,10 @@ struct Tile {
     // every 16-yd LOD-2 block that touched a hole (a building's footprint) - beyond 140 yd the ground around Stormwind's houses
     // vanished and lamps / trees hung in the air over the sky. Filled by the IO thread with the height field.
     std::vector<uint8_t> batchMaxLod;
+    // Stage 6.30: every batch of a 4x4-chunk region is drawn at the region's LOD (w3d_terrain_lod.h; skirts are only on region
+    // borders - per batch, mixed ground left cracks between chunks).
+    std::vector<uint8_t> batchRegion;
+    W3dTerrainRegion regions[W3D_TERRAIN_REGIONS];
     // water (optional, linear memory)
     uint8_t* water = nullptr;
     const W3dWaterHeader* wh = nullptr;
@@ -251,6 +265,12 @@ struct StreamStats {
     double uploadMsLastFrame = 0;
     u32 collBytes = 0;               // COLL (floors + walls) resident in the heap
     u32 collFailed = 0;              // COLL entries dropped because malloc failed (no walls/floors there)
+    int farTiles = 0;                // 6.24: tiles of the far ground (0: the pack has none)
+    int farDrawn = 0;                // ... drawn last frame (where the detailed ground was not there)
+    int farCached = 0;               // ... with a vertex buffer
+    int farObjects = 0;              // 6.29: far buildings of the map (0: the pack has none)
+    int farObjDrawn = 0;             // ... drawn last frame (their tile not loaded, or the real building not shown yet)
+    int farObjTiles = 0;             // ... tiles with a vertex buffer
     u32 floorHolds = 0;              // 6.16: floor queries with nothing under the feet and a surface far above (kept the height)
     int players = 0;                 // player displays (distinct looks) alive
     u32 composites = 0;              // body textures composited so far
@@ -281,7 +301,16 @@ struct StreamStats {
     u32 oomLastSize = 0, oomLastFree = 0;
     u32 texVramMiss = 0;                // textures that went to linear memory because VRAM was full
     uint64_t texVramMissBytes = 0;
+    uint32_t texEvicted = 0;          // 6.28: textures moved from VRAM to linear memory for a render target (3D / wide)
     u32 collHeapMiss = 0;               // COLL that did not fit in the normal heap (went to linear memory)
+    u32 badCreatureModels = 0;          // 6.35: CMDL blobs that failed w3d_creature_valid (not drawn)
+    u32 lastBadCreature = 0;            // ... the last one's id
+    // 6.31: the normal heap (24 MB) is kept from running dry: COLL takes it only above a reserve, and under kHeapLow the wanted
+    // ring shrinks to 3 x 3 tiles (7o crashed in Stormwind at 533 yd with 944 KB left: libctru / citro3d do not survive a
+    // failed malloc)
+    u32 heapFree = 0;                   // measured once a frame (mallinfo)
+    bool heapShrunk = false;            // the ring is 3 x 3 for want of heap now
+    u32 heapShrinks = 0;                // times it happened
     // stage 6.11: buildings (placements sharing a transform) shown whole
     u32 bldgFound = 0, bldgOpenedFull = 0, bldgOpenedLate = 0;   // groups parsed / opened with every group in / opened by the timeout
     int bldgClosed = 0;                 // closed now (their groups hidden until the rest arrive)
@@ -333,6 +362,18 @@ void streamerSetView(float yaw);
 void streamerSetBoost(bool on);
 // Ready tiles for rendering.
 const std::vector<Tile*>& streamerReadyTiles();
+// 6.24: the far ground (w3d_farlod.h): the tiles to draw this frame - within maxDist of the camera, without detailed ground.
+// False when the pack has none or its atlas is not uploaded yet. The vertex buffers stay valid until the next call.
+struct FarDraw { const W3dTerrainVertex* verts; float origin[3]; float center[3]; float radius; };
+// 6.29: the far buildings (w3d_farobj.h): per tile, one buffer of every shell; a draw is a range of its indices (the whole tile
+// while it is not loaded, else the buildings it does not show yet). x / y scale W3D_FAROBJ_XY_SCALE, z zScale.
+struct FarObjDraw { const W3dTerrainVertex* verts; const uint16_t* idx; uint32_t count; float origin[3]; float center[3]; float radius; };
+// 6.34: maxDist = the horizon (far shells are drawn that far); detailDist = how far the real buildings are drawn - beyond it a
+// loaded tile's buildings are shells too
+bool streamerFarObjectDraws(const float cam[3], float maxDist, float detailDist, std::vector<FarObjDraw>& out, GpuTex** palette, float* zScale);
+// 6.34c: detailDist - a loaded tile wholly beyond it gets its far ground too (the renderer leaves out its detailed batches)
+bool streamerFarDraws(const float cam[3], float maxDist, float detailDist, std::vector<FarDraw>& out, GpuTex** atlas, const uint16_t** indices,
+                      float* zScale);
 const StreamStats& streamerStats();
 bool streamerTileReadyAt(float wx, float wy);
 // The tile there is ready and so is its COLL (or it has none). COLL is read only for tiles
@@ -477,6 +518,7 @@ void rendererInit();
 void fxForgetModel(const void* model);   // fx.cpp: a model with effects is being freed
 void rendererShutdown();
 void rendererSetProjection(float drawDist);   // also rebuilds the fog LUT
+void rendererSetHorizon(float yards);         // 6.34b: 0 = off; else the ground / far shells to this distance (then call rendererSetProjection)
 void rendererSetEye(float iod);               // stereoscopic 3D: the projection of one eye (-iod left, +iod right, 0 = mono)
 u32 rendererClearColor(const RenderSettings& rs);
 // Stage 5.29: a login / character screen scene: static models and creatures only (no terrain, sky, water or fog), seen
@@ -498,7 +540,7 @@ void rendererDrawScene(const Camera& cam, float vfovDeg, float nearZ, float farZ
 // that is current (C3D_FrameDrawOn; a square texture). ci: the unit as the world draws it (display, worn items); its
 // position, facing and animation are replaced (standing, at the origin). corr: 2x2 signed permutation (row-major) applied
 // to clip x / y so that the picture lands upright in the texture (portrait.cpp finds it once by drawing a test pattern).
-bool rendererDrawPortrait(const CreatureInstance& ci, const float corr[4], FrameCounters& fc);   // the sky's colour behind everything (RGBA8), water when under it
+bool rendererDrawPortrait(const CreatureInstance& ci, const float corr[4], FrameCounters& fc, bool body = false, float turn = 0);   // the sky's colour behind everything (RGBA8), water when under it
 // Stage 6.3: call right before C3D_FrameEnd. After an early GPU kick citro3d's queue is running, so FrameEnd's last command
 // list goes to the GPU at once - before FrameEnd's own cache flush: flush here first, and end the frame with
 // C3D_FrameEnd(GX_CMDLIST_FLUSH) so that the list's last words (written by the split) are flushed too (stage 6.8).

@@ -193,6 +193,21 @@ void GameSession::joinChannel(const std::string& name, const std::string& passwo
     send(CMSG_JOIN_CHANNEL, w.b, nowMs);
 }
 
+void GameSession::updateDefaultChannels(uint32_t zoneId, const std::string& zoneName, uint32_t nowMs) {
+    if (!autoChannels || !zoneId || zoneName.empty() || zoneId == autoZone_ || !wc_) return;
+    // the capitals (AreaTable): Stormwind City, Ironforge, Darnassus, Orgrimmar, Thunder Bluff, Undercity
+    const bool city = zoneId == 1519 || zoneId == 1537 || zoneId == 1657 || zoneId == 1637 || zoneId == 1638 || zoneId == 1497;
+    std::vector<std::string> want;
+    want.push_back("General - " + zoneName);
+    if (city) want.push_back("Trade - " + zoneName);
+    want.push_back("LocalDefense - " + zoneName);
+    for (const std::string& old : autoJoined_) leaveChannel(old, nowMs);   // first the old ones: their numbers are free again
+    autoJoined_ = want;
+    for (const std::string& n : want) joinChannel(n, "", nowMs);
+    if (!autoLfg_) { autoLfg_ = true; joinChannel("LookingForGroup", "", nowMs); }
+    autoZone_ = zoneId;
+}
+
 void GameSession::leaveChannel(const std::string& name, uint32_t nowMs) {
     Writer w;
     w.cstr(name);
@@ -301,7 +316,7 @@ bool GameSession::sendTyped(const std::string& lineIn, uint32_t nowMs) {
     if (cmd == "r" || cmd == "reply") {
         std::string name = lastWhisperGuid ? objects.nameOf(lastWhisperGuid) : std::string();
         if (name.empty()) name = lastWhisperTo;
-        if (name.empty()) { addLocal("There is no one to reply to.", nowMs); return false; }
+        if (name.empty()) { fail("There is no one to reply to.", nowMs); return false; }
         if (!need(!rest.empty(), "/r text")) return false;
         lastWhisperTo = name;
         sendChat(Chat::Whisper, rest, name, nowMs);
@@ -925,7 +940,7 @@ bool GameSession::handleSocial(uint16_t op, const Bytes& data, uint32_t nowMs) {
         }
         case SMSG_CHAT_PLAYER_NOT_FOUND: {
             std::string who = r.cstr();
-            if (!r.bad) addLocal("No player named '" + who + "' is currently playing.", nowMs);
+            if (!r.bad) fail("No player named '" + who + "' is currently playing.", nowMs);
             return true;
         }
         case SMSG_NOTIFICATION: {
@@ -1113,6 +1128,8 @@ bool GameSession::handleSocial(uint16_t op, const Bytes& data, uint32_t nowMs) {
             uint8_t kind = r.u8();
             if (r.bad) return true;
             xpGained += xp;
+            xpGains.push_back({xp, nowMs, kind == 0});
+            while (xpGains.size() > 4) xpGains.pop_front();
             if (kind == 0) {
                 ++kills;
                 std::string v = objects.nameOf(victim);
