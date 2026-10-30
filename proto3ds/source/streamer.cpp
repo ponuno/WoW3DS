@@ -2076,9 +2076,10 @@ bool streamerFloorHeight(float wx, float wy, float zFeet, float* out, bool* onFl
     bool haveT = streamerGroundHeightEx(wx, wy, &terrain, &hole);
     // 6.17: in an ADT hole the "terrain" is a membrane filled in over the building's opening (Ironforge's gate): never a floor
     // above the feet - walking in through the gate climbed it step by step and carried the character up the mountain.
-    if (haveT && hole && terrain > zFeet + 0.05f) haveT = false;
     Tile* t = tileAt(wx, wy);
     const uint8_t* coll = t ? t->coll : nullptr;
+    // 6.21: nor where a building's floor lies under the membrane: the opening is open, the walker goes down onto that floor
+    if (haveT && hole && !w3d_hole_terrain_usable(coll, wx, wy, zFeet, kStepHeight, terrain)) haveT = false;
     if (held) *held = false;
     if (!haveT && !coll) return false;
     int f = 0;

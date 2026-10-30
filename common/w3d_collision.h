@@ -108,6 +108,18 @@ static inline float w3d_walk_height(const uint8_t* coll, float x, float y, float
     return best;
 }
 
+// 6.21: the terrain in an ADT hole. The hole is where a building opens into the ground (a tunnel mouth, a cellar, Ironforge's
+// gate); the original client has no ground there at all. Our ground there is a membrane filled in over the opening, and
+// standing on it held the character in the air in front of the doorway, then the hillside it continues into stopped it
+// (the Coldridge Valley tunnel). It counts only where no building has a floor under the feet (its collision is missing
+// or not loaded yet) and never above the feet (6.17). Returns whether the terrain height may be used.
+static inline int w3d_hole_terrain_usable(const uint8_t* coll, float x, float y, float zFeet, float step, float terrainZ) {
+    if (terrainZ > zFeet + 0.05f) return 0;
+    if (!coll) return 1;
+    float below = 0, above = 0;
+    return (w3d_coll_query(coll, x, y, zFeet + step, &below, &above) & 1) ? 0 : 1;
+}
+
 // ---------------------------------------------------------------- walls
 // The walker is a vertical cylinder of radius r. A wall triangle blocks it if the part
 // of the triangle inside the height slab [zLow, zHigh] (from feet + 0.75: lower steps

@@ -85,7 +85,7 @@ inline CharSheet buildCharSheet(const GameSession& g) {
         durMax += it.maxDurability;
     }
     c.durabilityPct = durMax ? (uint32_t)(dur * 100ull / durMax) : 100;
-    auto levelOf = [&](uint32_t entry, bool* known, uint32_t* invType) {
+    auto levelOf = [&](uint32_t entry, bool* known, uint32_t* invType) -> uint32_t {
         const ItemInfo* info = entry ? g.itemInfoIfKnown(entry) : nullptr;
         if (!info || info->missing) { *known = false; return 0u; }
         *known = true;
