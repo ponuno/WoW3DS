@@ -342,7 +342,10 @@ struct TaxiWindow {
     uint64_t npc = 0;
     uint32_t current = 0;               // the node we are at
     uint32_t mask[8] = {0, 0, 0, 0, 0, 0, 0, 0};   // known nodes (bit = node id)
-    bool known(uint32_t node) const { return node < 256 && (mask[node / 32] >> (node % 32)) & 1; }
+    // TaxiNodes.dbc id n is bit n-1 of the mask (vMaNGOS PlayerTaxi::IsTaximaskNodeKnown: (nodeidx - 1) / 32, 1 << ((nodeidx - 1) % 32)).
+    // Reading bit n showed the NEXT node's state: a level 1 orc, who knows only Orgrimmar (23), was offered the Crossroads (24)... and
+    // the flight to Crossroads (25) only when 24 was known.
+    bool known(uint32_t node) const { return node >= 1 && node <= 256 && ((mask[(node - 1) / 32] >> ((node - 1) % 32)) & 1); }
 };
 // SMSG_MAIL_LIST_RESULT (vMaNGOS WorldSession::HandleGetMailList, 1.12: one item per letter).
 struct MailEntry {

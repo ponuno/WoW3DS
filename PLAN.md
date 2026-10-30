@@ -2483,3 +2483,9 @@ FPS при `--terrain-centers`.
 - Windows-сборка снова возможна в песочнице: релиз llvm-mingw 20240619 (ucrt) скачивается с GitHub; `cmake -DCMAKE_SYSTEM_NAME=Windows` с
   x86_64-w64-mingw32-clang++, FETCHCONTENT_SOURCE_DIR_* на локальные клоны (glm, meshoptimizer, rg-etc1, WoWee, StormLib). Собраны
   w3dconv.exe (со StormLib), w3dgui.exe, w3dpreview.exe — зависят только от системных DLL (UCRT, Windows 10+). Пак: w3dconv-win64-7g.zip.
+
+## Часть 68. Этап 6.22 — меню грифонов показывало чужие точки полёта
+- Симптом: орк 1 уровня, знающий только Оргриммар, видел в списке перелёт в Мулгор (Громовой Утёс), которого у него нет.
+- Причина: маска известных узлов из SMSG_SHOWTAXINODES индексируется **номером узла минус 1** (vMaNGOS `PlayerTaxi::IsTaximaskNodeKnown`: `(nodeidx - 1) / 32`, `1 << ((nodeidx - 1) % 32)`), а `TaxiWindow::known()` читал бит с номером узла: Оргриммар (23, бит 22) выглядел как Громовой Утёс (22), а после изучения Перекрёстка (25, бит 24) «известным» становился узел 24. Все маршруты (taxiCost, цена, перелёт) строятся по тому же `known()`.
+- Исправление: `known(n)`: `mask[(n-1)/32] >> ((n-1)%32)`, n = 1..256 (net/game.hpp). Тест `net/tests/taxi_mask_test.cpp` (5 проверок, в run_stage5.sh): Оргриммар известен, соседи нет; границы слов 32/33; 256.
+- Побочно: перелёт в «неизученную» точку теперь отказывается сразу строкой «You haven't learned that flight path yet.», а не ответом сервера.
