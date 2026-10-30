@@ -498,7 +498,7 @@ void rendererDrawScene(const Camera& cam, float vfovDeg, float nearZ, float farZ
 // that is current (C3D_FrameDrawOn; a square texture). ci: the unit as the world draws it (display, worn items); its
 // position, facing and animation are replaced (standing, at the origin). corr: 2x2 signed permutation (row-major) applied
 // to clip x / y so that the picture lands upright in the texture (portrait.cpp finds it once by drawing a test pattern).
-bool rendererDrawPortrait(const CreatureInstance& ci, const float corr[4], FrameCounters& fc);   // the sky's colour behind everything (RGBA8), water when under it
+bool rendererDrawPortrait(const CreatureInstance& ci, const float corr[4], FrameCounters& fc, bool body = false, float turn = 0);   // the sky's colour behind everything (RGBA8), water when under it
 // Stage 6.3: call right before C3D_FrameEnd. After an early GPU kick citro3d's queue is running, so FrameEnd's last command
 // list goes to the GPU at once - before FrameEnd's own cache flush: flush here first, and end the frame with
 // C3D_FrameEnd(GX_CMDLIST_FLUSH) so that the list's last words (written by the split) are flushed too (stage 6.8).

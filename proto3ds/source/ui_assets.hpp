@@ -20,6 +20,7 @@ constexpr uint16_t kTexNone = 0, kTexBuiltinFont = 1, kTexPack0 = 2;
 // frames - kTexExternal0 + 0 ours, + 1 the target's. Their picture is the whole texture (kPortraitSize square).
 constexpr uint16_t kTexExternal0 = 0xFFF0, kExternalCount = 4;
 constexpr int kPortraitSize = 64;
+constexpr int kDollSize = 128;      // UI stage 14: the character window's full-figure picture (external texture 2)
 inline bool isExternalTex(uint16_t id) { return id >= kTexExternal0 && id < kTexExternal0 + kExternalCount; }
 
 // A picture in a texture: source rectangle in texels, 9-slice margins.

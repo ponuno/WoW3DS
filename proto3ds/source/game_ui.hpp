@@ -86,6 +86,8 @@ public:
     };
     Panel panel(const w3n::GameSession& g) const;   // what the centre area shows now
     Tab tab() const { return tab_; }
+    // UI stage 14: the Equipment page is shown (no window over it): the top screen shows the character window instead of the HUD
+    bool charSheetOpen(const w3n::GameSession& g) const { return tab_ == Tab::Bags && subBags_ == 1 && panel(g) == Panel::Tabs; }
     bool pinned() const { return pinned_; }
     uint64_t aimed() const { return aim_; }          // unit under the C-Stick ring (L/R held), 0 = none
     int shownSet() const { return shownSet_; }       // hotbar set on the bars

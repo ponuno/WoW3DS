@@ -6,6 +6,9 @@
 #include <cstdlib>
 #include <string>
 
+#include <cstring>
+
+#include "charsheet.hpp"
 #include "hud_game.hpp"
 #include "ui_raster.hpp"
 
@@ -105,6 +108,22 @@ int main(int argc, char** argv) {
             if (!o.self && o.hasPos && o.isUnitLike() && !o.name.empty()) { best = g; break; }
         if (best) s.setTarget(best, last);
         s.cast.active = true; s.cast.spell = 78; s.cast.startMs = last - 900; s.cast.durMs = 2000;
+    }
+    if (getenv("W3D_SHEET")) {   // UI stage 14: the character window with made-up stats
+        in.charSheet = true;
+        if (w3n::WorldObject* me = s.objects.find(s.objects.self())) {
+            auto setF = [&](uint16_t f, uint32_t v) { if (me->fields.size() <= f) me->fields.resize(f + 1u, 0); me->fields[f] = v; };
+            auto bits = [](float x) { uint32_t u; memcpy(&u, &x, 4); return u; };
+            setF(w3n::UF::UNIT_LEVEL, 38);
+            const uint32_t st[5] = {96, 71, 120, 40, 55};
+            for (int i = 0; i < 5; ++i) { setF(w3n::SF::STAT0 + i, st[i]); setF(w3n::SF::POSSTAT0 + i, i == 2 ? 14 : 0); }
+            setF(w3n::SF::RESISTANCE0, 1432); setF(w3n::SF::RESISTANCE0 + 2, 25);
+            setF(w3n::SF::MINDAMAGE, bits(61.0f)); setF(w3n::SF::MAXDAMAGE, bits(98.0f));
+            setF(w3n::SF::ATTACK_POWER, 350);
+            setF(w3n::SF::CRIT, bits(5.5f)); setF(w3n::SF::DODGE, bits(4.17f)); setF(w3n::SF::PARRY, bits(5.0f)); setF(w3n::SF::BLOCK, bits(13.0f));
+            setF(w3n::SF::RANGED_ATTACK_POWER, 120); setF(w3n::SF::MINRANGEDDAMAGE, bits(20.0f)); setF(w3n::SF::MAXRANGEDDAMAGE, bits(31.0f));
+            setF(w3n::SF::RANGED_CRIT, bits(2.0f));
+        }
     }
     static HudPadView pv;   // "pad": the Forever bars (stage 5.11) with a sample layout, ZR held, the aim ring
     if (argc > 5 && std::string(argv[5]) == "pad") {

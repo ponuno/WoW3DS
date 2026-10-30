@@ -1726,7 +1726,7 @@ void rendererDrawScene(const Camera& cam, float vfovDeg, float nearZ, float farZ
     g_far = keepFar;
 }
 
-bool rendererDrawPortrait(const CreatureInstance& ciIn, const float corr[4], FrameCounters& fc) {
+bool rendererDrawPortrait(const CreatureInstance& ciIn, const float corr[4], FrameCounters& fc, bool body, float turn) {
     const CreatureDisplay* d = ciIn.disp;
     if (!d || !d->ready()) return false;
     const uint8_t* blob = d->model->blob;
@@ -1750,16 +1750,24 @@ bool rendererDrawPortrait(const CreatureInstance& ciIn, const float corr[4], Fra
             break;
         }
     }
-    // framing: about a sixth of the unit's height above and below the head's centre (head and shoulders of a person)
+    // framing: about a sixth of the unit's height above and below the head's centre (head and shoulders of a person);
+    // the character window (UI stage 14, body): the whole figure, turned by 'turn' from the front
     const float height = std::max(0.3f, (h->bmax[2] - h->bmin[2]) * s);
-    const float half = std::clamp(0.16f * height, 0.12f, 4.0f);
-    const float fov = 40.0f, dist = half / tanf(fov * 0.5f * 3.14159265f / 180.0f);
-    const float side = 0.35f;     // a little from the unit's left (the original portraits look slightly sideways)
+    float half = std::clamp(0.16f * height, 0.12f, 4.0f);
+    float focus[3] = {head[0], head[1], head[2]};
+    if (body) {
+        half = 0.56f * height;
+        focus[0] = 0.5f * (h->bmin[0] + h->bmax[0]) * s;
+        focus[1] = 0.5f * (h->bmin[1] + h->bmax[1]) * s;
+        focus[2] = (h->bmin[2] + 0.5f * (h->bmax[2] - h->bmin[2])) * s;
+    }
+    const float fov = body ? 30.0f : 40.0f, dist = half / tanf(fov * 0.5f * 3.14159265f / 180.0f);
+    const float side = body ? 0.25f + turn : 0.35f;     // a little from the unit's left (the original portraits look slightly sideways)
     Camera cam;
-    cam.pos[0] = head[0] + cosf(side) * dist;
-    cam.pos[1] = head[1] + sinf(side) * dist;
-    cam.pos[2] = head[2] + 0.12f * dist;
-    const float dx = head[0] - cam.pos[0], dy = head[1] - cam.pos[1], dz = head[2] - 0.05f * half - cam.pos[2];
+    cam.pos[0] = focus[0] + cosf(side) * dist;
+    cam.pos[1] = focus[1] + sinf(side) * dist;
+    cam.pos[2] = focus[2] + (body ? 0.04f : 0.12f) * dist;
+    const float dx = focus[0] - cam.pos[0], dy = focus[1] - cam.pos[1], dz = focus[2] - (body ? 0.0f : 0.05f * half) - cam.pos[2];
     cam.yaw = atan2f(dy, dx);
     cam.pitch = atan2f(dz, sqrtf(dx * dx + dy * dy));
     cam.drawDist = dist + 4.0f * height + 10.0f;

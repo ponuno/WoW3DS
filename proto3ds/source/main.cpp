@@ -1843,6 +1843,8 @@ int main() {
             hi.zoneAlpha = g_zoneBanner.alpha(netMs);
             hi.zoneBig = g_zoneBanner.big().c_str();
             hi.zoneSmall = g_zoneBanner.small().c_str();
+            hi.charSheet = gameUi.charSheetOpen(*game);   // UI stage 14: the Equipment tab = the character window up here
+            if (hi.charSheet) hi.doll = portrait::doll(game->selfGuid());
             hi.portrait[0] = portrait::image(0, game->selfGuid());
             hi.portrait[1] = portrait::image(1, game->target());
             hudBuildGame(hud, hi);
@@ -2027,6 +2029,13 @@ int main() {
         perf::lap(perf::kStream);
         perf::mark("portraits");
         if (online && !loginUi && !bench.running) portrait::frame(portraitUnit, portraitGuid, netMs, fc);   // (its own targets)
+        {   // UI stage 14: the figure of the character window (only while it is shown; nothing is drawn otherwise)
+            static bool dollShown = false;
+            const bool want = online && !loginUi && !bench.running && game && gameUi.charSheetOpen(*game);
+            if (want) portrait::frameDoll(portraitUnit[0], portraitGuid[0], 0.0f, netMs, fc);
+            else if (dollShown) portrait::dollForget();
+            dollShown = want;
+        }
         perf::lap(perf::kPortrait);
         {
             C3D_RenderTarget* left = topModeNow == 1 ? topWide : top;   // wide: the 400-wide HUD layout is stretched x2 (pixels are half as wide)
@@ -2257,7 +2266,7 @@ int main() {
             // reserve for the other modes, the two portraits (colour + depth24)
             pc.vramTargets = 240 * 400 * 8 + (bottomT ? 240 * 320 * 4 : 0) + (topWide ? 240 * 800 * 8 : 0) + (topRight ? 240 * 400 * 8 : 0);
             pc.vramReserve = 0;   // (stage 6.5: no reserve any more)
-            pc.vramPortraits = 2 * ui::kPortraitSize * ui::kPortraitSize * 7;
+            pc.vramPortraits = (2 * ui::kPortraitSize * ui::kPortraitSize + ui::kDollSize * ui::kDollSize) * 7;
             pc.cmdBufBytes = C3D_DEFAULT_CMDBUF_SIZE * 8;
             perf::second(pc);
         }

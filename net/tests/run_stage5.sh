@@ -250,6 +250,9 @@ g++ -std=c++20 $SAN -Wall "$N/tests/water_test.cpp" $SRC -o "$OUT/water_test"
 g++ -std=c++20 $SAN -Wall "$N/tests/areatrigger_test.cpp" $SRC -o "$OUT/areatrigger_test"
 # Stage 5.40: cooldowns computed by the client (spells.txt @cd, item numbers, categories, COOLDOWN_EVENT)
 g++ -std=c++20 $SAN -Wall "$N/tests/cooldown_test.cpp" $SRC -o "$OUT/cooldown_test"
+# UI stage 14: the character window's stats and the average item level
+g++ -std=c++20 $SAN -Wall -I"$N" "$N/tests/charsheet_test.cpp" $SRC -o "$OUT/charsheet_test"
+"$OUT/charsheet_test"
 "$OUT/cooldown_test"
 "$OUT/areatrigger_test"
 # Stage 5.29: the character list's looks and equipment, creating and deleting characters (w3dlogin = the 3DS net code)
