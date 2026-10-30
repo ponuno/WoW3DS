@@ -32,6 +32,8 @@ echo "GROUND (streamer): PASS"
 python3 "$T/../../converter/tests/gen_far_wdl.py" "$OUT/Rough"
 "$B/w3dconv" --data "$OUT/Rough" --map Test --tiles 32 48 32 48 -o "$OUT/far.w3dp" > "$OUT/conv_far.log" 2>&1
 FAR_EXPECT=3 "$OUT/holes" "$OUT/far.w3dp" 300 > "$OUT/far.log" 2>&1 || true
+grep "beyond the detail distance (6.34c)" "$OUT/far.log"
+grep -q "beyond the detail distance (6.34c): [1-9][0-9]* draws, 0 inside it" "$OUT/far.log"
 grep "far ground" "$OUT/far.log"
 grep -q "far ground: 3 tiles, drawn in [1-9][0-9]* frames, 0 wrong" "$OUT/far.log"
 grep -q "far ground: 1 tiles, drawn in [0-9]* frames, 0 wrong" "$OUT/holes.log"

@@ -45,6 +45,7 @@ static size_t g_foFrames = 0, g_foWrong = 0, g_foHiddenFrames = 0, g_foBeyondDra
 static size_t g_pk[5] = {0, 0, 0, 0, 0};   // submesh problems by kind: not ready, index range, texture, vertex index, radius/position
 
 static int g_maxRingTiles = 0;   // 6.31
+static size_t g_farLoadedFar = 0, g_farLoadedWrong = 0;   // 6.34c
 static std::map<int, int> g_ownMax;   // 6.33: owned doodads per tile (most seen)
 static size_t g_ownWrong = 0;
 int main(int argc, char** argv) {
@@ -125,7 +126,23 @@ int main(int argc, char** argv) {
             GpuTex* atlas = nullptr;
             const uint16_t* fidx = nullptr;
             float zs = 0;
-            if (streamerFarDraws(cam, dist, far, &atlas, &fidx, &zs)) {
+            {   // 6.34c: detailed only within 40 yd - loaded tiles wholly beyond get their far mesh, never the camera's own tile
+                static std::vector<FarDraw> f2;
+                GpuTex* a2 = nullptr;
+                const uint16_t* i2 = nullptr;
+                float z2 = 0;
+                if (streamerFarDraws(cam, dist + 1000.0f, 40.0f, f2, &a2, &i2, &z2))
+                    for (const FarDraw& d : f2) {
+                        const int tx = (int)std::floor(32.0f - (d.origin[1] + 1.0f) / kTileSize), ty = (int)std::floor(32.0f - (d.origin[0] + 1.0f) / kTileSize);
+                        for (Tile* t : streamerReadyTiles())
+                            if (t->tx == tx && t->ty == ty) {
+                                if (tileBeyond(tx, ty, cam, 40.0f)) ++g_farLoadedFar; else ++g_farLoadedWrong;
+                            }
+                        volatile int16_t probe = d.verts[W3D_FAR_VERTS - 1].z;
+                        (void)probe;
+                    }
+            }
+            if (streamerFarDraws(cam, dist, dist, far, &atlas, &fidx, &zs)) {
                 ++g_farFrames;
                 for (const FarDraw& d : far) {
                     const int tx = (int)std::floor(32.0f - (d.origin[1] + 1.0f) / kTileSize), ty = (int)std::floor(32.0f - (d.origin[0] + 1.0f) / kTileSize);
@@ -538,6 +555,8 @@ int main(int argc, char** argv) {
         std::printf("far ground: %d tiles, drawn in %zu frames, %zu wrong (drawn over a tile with its detailed ground)\n", ss.farTiles,
                     g_farFrames, g_farOverlap);
         if (ss.farTiles != std::atoi(fe) || g_farOverlap) { std::printf("far FAIL\n"); ++problems; }
+        std::printf("far ground over loaded tiles beyond the detail distance (6.34c): %zu draws, %zu inside it\n", g_farLoadedFar, g_farLoadedWrong);
+        if (!g_farLoadedFar || g_farLoadedWrong) { std::printf("far (6.34c) FAIL\n"); ++problems; }
     }
     // 6.18a (env GROUND_POINTS=file from converter/tests/ground_ref.py, GROUND_EXPECT=exact|old): the ground height and the hole
     // flag of streamerGroundHeightEx() at the reference points. exact: with GRND every point within 0.01 yd (and the hole flags

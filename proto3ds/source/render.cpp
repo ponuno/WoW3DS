@@ -391,7 +391,7 @@ void drawTerrain(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, cons
         GpuTex* atlas = nullptr;
         const uint16_t* fidx = nullptr;
         float zs = 0.25f;
-        if (streamerFarDraws(cam.pos, fr.horizon, far, &atlas, &fidx, &zs)) {
+        if (streamerFarDraws(cam.pos, fr.horizon, fr.maxDist, far, &atlas, &fidx, &zs)) {
             setTerrainEnv(2);
             bc.bind(0, atlas, fc);
             bc.bind(1, atlas, fc);
@@ -444,6 +444,7 @@ void drawTerrain(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, cons
         }
     }
     for (Tile* t : streamerReadyTiles()) {
+        if (tileBeyond(t->tx, t->ty, cam.pos, fr.maxDist)) continue;   // 6.34c: its far ground mesh is drawn instead (above)
         const W3dTerrainHeader* h = t->th;
         const uint16_t* tex2 = w3d_terrain_tex2(h, t->terr);
         setTerrainEnv(tex2 ? 3 : 2);
@@ -1203,6 +1204,7 @@ void drawWater(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, const 
     for (Tile* tile : streamerReadyTiles()) {
         const W3dWaterHeader* h = tile->wh;
         if (!h || !tile->waterReady) continue;
+        if (tileBeyond(tile->tx, tile->ty, cam.pos, fr.maxDist)) continue;   // 6.34c: a tile drawn as far ground has no water drawn
         C3D_BufInfo* buf = C3D_GetBufInfo();
         BufInfo_Init(buf);
         BufInfo_Add(buf, tile->water + h->offVertices, sizeof(W3dTerrainVertex), 3, 0x210);

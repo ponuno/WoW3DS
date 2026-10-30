@@ -2721,3 +2721,16 @@ User: "cool, but a bit hungry - make it optional". Settings -> Interface -> Hori
 `rendererSetHorizon(yards)` (0 = off) before rendererSetProjection: off = exactly as before 6.34 (far plane drawDist * 1.15 +
 30, fog 55%..100% of the draw distance, far ground / shells only inside the draw distance); on = the 6.34 horizon. Applied
 after pad.txt is read and on every graphics change. UI test: 57 scenes, 0 failed (settings_iface shows the row). ARM clean.
+
+## Part 87 — a cheaper horizon: far mesh for loaded tiles past the draw distance (6.34c)
+
+perf_prev.csv (7x, Stormwind online, the horizon always at 1200): FPS 49.8 / 43.4 / 40.2 at draw distance 120 / 250 / 533;
+CPU 11-14 ms + waiting for the GPU 9-11 ms (GPU 13-15 ms); terrain draws 216-371 a frame (LOD 2 ~310-340 of ~350): the loaded
+tiles' detailed batches out to the horizon, ~35k triangles - the cost is the number of draws (terrain CPU 2-3 ms), not the
+triangles. Water to the horizon up to 15k triangles. (perf.csv: login + 30 s of free camera at Dun Morogh, 60 FPS - no compare.)
+- `tileBeyond(tx, ty, cam, d)` (world.h): the tile's square wholly farther than d (x / y). With the horizon, a loaded tile
+  wholly beyond the draw distance is drawn with its far ground mesh (one draw, 1536 triangles) instead of its 30-60 detailed
+  batches, and its water is left out (render.cpp terrain / water loops; streamerFarDraws(cam, horizon, detailDist, ...) no
+  longer counts it as detailed). Horizon off: no change (such tiles were beyond the draw distance anyway).
+- Test: run_holes "FAR": with detailDist 40 yd, 150 far draws over loaded tiles wholly beyond it, 0 for a tile within it
+  (the camera's); the old checks unchanged. ARM clean. Not measured on the console yet.

@@ -1617,7 +1617,7 @@ void farUnload() {
 }
 }  // namespace
 
-bool streamerFarDraws(const float cam[3], float maxDist, std::vector<FarDraw>& out, GpuTex** atlas, const uint16_t** indices,
+bool streamerFarDraws(const float cam[3], float maxDist, float detailDist, std::vector<FarDraw>& out, GpuTex** atlas, const uint16_t** indices,
                       float* zScale) {
     out.clear();
     g_stats.farDrawn = 0;
@@ -1626,7 +1626,7 @@ bool streamerFarDraws(const float cam[3], float maxDist, std::vector<FarDraw>& o
     static bool detailed[64 * 64];
     memset(detailed, 0, sizeof detailed);
     for (const Tile* t : g_ready)
-        if (t->tx >= 0 && t->tx < 64 && t->ty >= 0 && t->ty < 64) detailed[t->ty * 64 + t->tx] = true;
+        if (t->tx >= 0 && t->tx < 64 && t->ty >= 0 && t->ty < 64 && !tileBeyond(t->tx, t->ty, cam, detailDist)) detailed[t->ty * 64 + t->tx] = true;
     const float TS = W3D_FAR_TILE_SIZE;
     const int ctx = (int)floorf(32.0f - cam[1] / TS), cty = (int)floorf(32.0f - cam[0] / TS);
     const int r = (int)ceilf(maxDist / TS) + 1;

@@ -17,6 +17,14 @@
 #include "hud.hpp"
 
 static constexpr float kTileSize = 533.33333f;
+// 6.34c: a whole tile farther than d from the camera (x / y, its square's nearest point): with the horizon on, such a loaded
+// tile is drawn with its far ground mesh (one draw) instead of its detailed batches, and its water is left out
+inline bool tileBeyond(int tx, int ty, const float cam[3], float d) {
+    const float x0 = (32.0f - ty - 1.0f) * kTileSize, y0 = (32.0f - tx - 1.0f) * kTileSize;
+    const float dx = cam[0] < x0 ? x0 - cam[0] : cam[0] > x0 + kTileSize ? cam[0] - x0 - kTileSize : 0.0f;
+    const float dy = cam[1] < y0 ? y0 - cam[1] : cam[1] > y0 + kTileSize ? cam[1] - y0 - kTileSize : 0.0f;
+    return dx * dx + dy * dy > d * d;
+}
 static constexpr int kHeightN = 129;  // height samples per tile edge (4.17 yd spacing)
 
 static inline double ticksToMs(u64 t) { return (double)t * 1000.0 / (double)SYSCLOCK_ARM11; }
@@ -361,7 +369,8 @@ struct FarObjDraw { const W3dTerrainVertex* verts; const uint16_t* idx; uint32_t
 // 6.34: maxDist = the horizon (far shells are drawn that far); detailDist = how far the real buildings are drawn - beyond it a
 // loaded tile's buildings are shells too
 bool streamerFarObjectDraws(const float cam[3], float maxDist, float detailDist, std::vector<FarObjDraw>& out, GpuTex** palette, float* zScale);
-bool streamerFarDraws(const float cam[3], float maxDist, std::vector<FarDraw>& out, GpuTex** atlas, const uint16_t** indices,
+// 6.34c: detailDist - a loaded tile wholly beyond it gets its far ground too (the renderer leaves out its detailed batches)
+bool streamerFarDraws(const float cam[3], float maxDist, float detailDist, std::vector<FarDraw>& out, GpuTex** atlas, const uint16_t** indices,
                       float* zScale);
 const StreamStats& streamerStats();
 bool streamerTileReadyAt(float wx, float wy);
