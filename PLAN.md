@@ -2652,3 +2652,13 @@ broke: the bogus gpuCmdBuf fits that.
 - `-Wmaybe-uninitialized` in game_ui_tabs.cpp (map u / v) and w3d_collision.h (qx / qy): initialised.
 - run_streaming.sh heap reserve: PACE_US 2000 (1500 frames at 200 us were 0.3 s - no tile loaded, the check passed empty) and
   the check needs tile loads; full: 25 tiles at 800 yd, 2 MB heap: 9 and one shrink.
+
+## Part 81 — the 178 MB CIA shows a black screen (6.32b)
+
+User: the CIA (7s, 178MB) stays black. 3dbrew (Memory layout): APPMEMTYPE 7 = 178 MB APPLICATION (SYSTEM shrinks to 46 MB),
+New 3DS kernel only, chosen by the FIRM-launch parameters; whether retail NS/firmware boots it is not documented. ctrtool labels
+it "snake dev1". Isolation:
+- RSF `SystemModeExt: $(APP_MEMORY)`, `UniqueId: $(APP_UNIQUE_ID)` (makerom -D); `make cia CIA_MEMORY=124MB` makes
+  `w3dproto-124.cia` (title 000400000F7D3B00, "w3dproto (124 MB)"), installable next to the 178MB one.
+- main.cpp prints on the touch screen right after consoleInit: region / heap / linear KB and (3dsx) / (CIA).
+- Test CIAs from the user's own 7o .elf sent (178MB and 124MB) - no rebuild needed to see which one boots.

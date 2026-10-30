@@ -82,7 +82,10 @@ struct Report {
     double worldMs = 0, fxMs = 0, fxPeakMs = 0, gpuMs = 0;
 };
 static Report g_report;
-extern "C" void gxCmdQueueInterrupt(GSPGPU_Event irq);   // libctru gxqueue.c (not in its headers): what a GX "done" does
+extern "C" void gxCmdQueueInterrupt(GSPGPU_Event irq);
+extern "C" {
+extern u32 __ctru_heap_size, __ctru_linear_heap_size;   // (source/heaps.cpp)
+}   // libctru gxqueue.c (not in its headers): what a GX "done" does
 static bool g_kickBroken = false;   // stage 6.7: the GPU queue got stuck with the early kick on (see the wait in the loop)
 static const SpellView* g_spellViewPtr = nullptr;   // stage 5.33: for report.txt
 static LoginFlow g_login;
@@ -564,6 +567,12 @@ int main() {
     romfsInit();
     PrintConsole bottom;
     consoleInit(GFX_BOTTOM, &bottom);
+    {   // 6.32b: the memory the system gave (a CIA in the 178 MB mode: region 182272 KB, heap 49152 KB) - on the touch screen
+        // until the game draws there, so a launch that stops early still says how far it got
+        printf("w3dproto: region %lu KB, heap %lu KB, linear %lu KB\n%s\n", (unsigned long)(osGetMemRegionSize(MEMREGION_APPLICATION) / 1024),
+               (unsigned long)(__ctru_heap_size / 1024), (unsigned long)(__ctru_linear_heap_size / 1024),
+               envIsHomebrew() ? "(3dsx)" : "(CIA)");
+    }
     C3D_Init(C3D_DEFAULT_CMDBUF_SIZE * 8);   // 2 MB: thousands of draws per frame
 
     C3D_RenderTarget* top = C3D_RenderTargetCreate(240, 400, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);

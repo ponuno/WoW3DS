@@ -12,7 +12,7 @@ RomFs:
 
 TitleInfo:
   Category                : Application
-  UniqueId                : 0xF7D3A
+  UniqueId                : $(APP_UNIQUE_ID)   # Makefile: 0xF7D3A (178MB), 0xF7D3B (124MB test build)
 
 Option:
   UseOnSD                 : true
@@ -33,7 +33,7 @@ AccessControlInfo:
   IoAccessControl:
   MemoryType                    : Application
   SystemMode                    : 64MB
-  SystemModeExt                 : 178MB
+  SystemModeExt                 : $(APP_MEMORY)   # Makefile CIA_MEMORY: 178MB (default) or 124MB
   CpuSpeed                      : 804MHz
   EnableL2Cache                 : true
   IdealProcessor                : 0
