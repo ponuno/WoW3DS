@@ -251,6 +251,9 @@ struct StreamStats {
     double uploadMsLastFrame = 0;
     u32 collBytes = 0;               // COLL (floors + walls) resident in the heap
     u32 collFailed = 0;              // COLL entries dropped because malloc failed (no walls/floors there)
+    int farTiles = 0;                // 6.24: tiles of the far ground (0: the pack has none)
+    int farDrawn = 0;                // ... drawn last frame (where the detailed ground was not there)
+    int farCached = 0;               // ... with a vertex buffer
     u32 floorHolds = 0;              // 6.16: floor queries with nothing under the feet and a surface far above (kept the height)
     int players = 0;                 // player displays (distinct looks) alive
     u32 composites = 0;              // body textures composited so far
@@ -333,6 +336,11 @@ void streamerSetView(float yaw);
 void streamerSetBoost(bool on);
 // Ready tiles for rendering.
 const std::vector<Tile*>& streamerReadyTiles();
+// 6.24: the far ground (w3d_farlod.h): the tiles to draw this frame - within maxDist of the camera, without detailed ground.
+// False when the pack has none or its atlas is not uploaded yet. The vertex buffers stay valid until the next call.
+struct FarDraw { const W3dTerrainVertex* verts; float origin[3]; float center[3]; float radius; };
+bool streamerFarDraws(const float cam[3], float maxDist, std::vector<FarDraw>& out, GpuTex** atlas, const uint16_t** indices,
+                      float* zScale);
 const StreamStats& streamerStats();
 bool streamerTileReadyAt(float wx, float wy);
 // The tile there is ready and so is its COLL (or it has none). COLL is read only for tiles

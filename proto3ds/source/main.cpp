@@ -404,6 +404,8 @@ static void writeReport(const Bench* b, float drawDist, const RenderSettings& rs
     fprintf(f, "terrain pool: %d slots\ntextures that had to wait for memory: %u total, %d now (drawn white until it frees)\ntextures white because not in the pack: %u, because the read failed: %u\n", s.slotsTotal,
             (unsigned)s.texOomTotal, s.texOom, (unsigned)s.texNotInPack, (unsigned)s.texReadFailed);
     fprintf(f, "time to first frame: %.0f ms\n", g_report.firstFrameMs);
+    fprintf(f, "far ground (6.24): %d tiles%s, %d drawn last frame, %d vertex buffers\n", s.farTiles,
+            s.farTiles ? "" : " (the pack has none: convert again)", s.farDrawn, s.farCached);
     fprintf(f, "APPLICATION region available: %lu KB\n\n", (unsigned long)(g_report.appRegion / 1024));
     fprintf(f, "now resident: %d tiles, %d models, %d textures\n", s.tilesReady, s.models, s.textures);
     fprintf(f, "  textures %lu KB VRAM + %lu KB linear, geometry %lu KB\n", (unsigned long)(s.texVram / 1024),

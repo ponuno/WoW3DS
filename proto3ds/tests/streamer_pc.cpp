@@ -8,6 +8,7 @@
 #include "../source/creature_view.hpp"
 #include "../source/fx.hpp"
 #include "w3d_anim.h"
+#include "w3d_farlod.h"
 
 #include <cmath>
 #include <cstdio>
@@ -38,6 +39,9 @@ void pcTestIoDelay(int file, uint32_t offset, uint32_t size) {
     lastEnd = offset + size;
     std::this_thread::sleep_for(std::chrono::microseconds((long long)us));
 }
+
+static size_t g_farFrames = 0, g_farOverlap = 0;
+static size_t g_pk[5] = {0, 0, 0, 0, 0};   // submesh problems by kind: not ready, index range, texture, vertex index, radius/position
 
 int main(int argc, char** argv) {
     if (argc < 2) return 2;
@@ -112,6 +116,22 @@ int main(int argc, char** argv) {
         float dist = std::getenv("CAM_WALK") ? 250.0f : (f / 500) % 2 ? 800.0f : 250.0f;   // switches the 3x3 / 5x5 radius too
         if (inFrame) { streamerUpdate(cam, dist, true); streamerUploadTextures(); }   // stage 6: the main loop's way
         else streamerUpdate(cam, dist);
+        {   // 6.24: the far ground - drawn only for tiles without their detailed ground, its buffers always valid
+            static std::vector<FarDraw> far;
+            GpuTex* atlas = nullptr;
+            const uint16_t* fidx = nullptr;
+            float zs = 0;
+            if (streamerFarDraws(cam, dist, far, &atlas, &fidx, &zs)) {
+                ++g_farFrames;
+                for (const FarDraw& d : far) {
+                    const int tx = (int)std::floor(32.0f - (d.origin[1] + 1.0f) / kTileSize), ty = (int)std::floor(32.0f - (d.origin[0] + 1.0f) / kTileSize);
+                    for (Tile* t : streamerReadyTiles()) if (t->tx == tx && t->ty == ty) ++g_farOverlap;
+                    if (!d.verts || !fidx || !atlas || zs <= 0) ++g_farOverlap;
+                    volatile int16_t probe = d.verts[W3D_FAR_VERTS - 1].z;   // ASan: the buffer is alive
+                    (void)probe;
+                }
+            }
+        }
         {   // stage 5.32: the effects of what is near, as render.cpp drawFx does (models freed meanwhile must take their
             // particles with them: ASan would catch a particle reading a freed blob)
             static std::vector<fx::Source> fsrc;
@@ -188,7 +208,7 @@ int main(int argc, char** argv) {
                 Model* m = in.model;
                 // stage 5.30: as the renderer, each model once it and its textures are in (the tile shows its ground first)
                 if (!m->drawable) continue;
-                if (m->state != AssetState::Ready || !m->h || !m->texturesReady()) { ++problems; continue; }
+                if (m->state != AssetState::Ready || !m->h || !m->texturesReady()) { ++problems; ++g_pk[0]; continue; }
                 if (in.radius <= 0) in.radius = m->h->radius * in.scale;
                 {
                     const uint64_t k2 = (uint64_t)(uintptr_t)t << 20 ^ (uint64_t)(&in - t->instances.data());
@@ -210,12 +230,14 @@ int main(int argc, char** argv) {
                 for (u32 s = 0; s < h->submeshCount; ++s) {
                     const W3dSubmesh& sm = m->subs[s];
                     ++checks;
-                    if ((u64)sm.firstIndex + sm.indexCount > h->indexCount || sm.indexCount % 3) { ++problems; continue; }
-                    if (sm.tex != W3D_NO_TEXTURE && (sm.tex >= m->tex.size() || !m->tex[sm.tex])) { ++problems; continue; }
+                    if ((u64)sm.firstIndex + sm.indexCount > h->indexCount || sm.indexCount % 3) { ++problems; ++g_pk[1]; continue; }
+                    if (sm.tex != W3D_NO_TEXTURE && (sm.tex >= m->tex.size() || !m->tex[sm.tex])) { ++problems; ++g_pk[2]; continue; }
                 }
                 if (modelsSeen.insert(m->id).second)
-                    for (u32 k = 0; k < h->indexCount; ++k) if (idx[k] >= h->vertexCount) { ++problems; break; }
-                if (!(in.radius > 0) || !std::isfinite(in.pos[0])) ++problems;
+                    for (u32 k = 0; k < h->indexCount; ++k) if (idx[k] >= h->vertexCount) { ++problems; ++g_pk[3]; break; }
+                // (a model with radius 0 is a one-vertex stand-in that only carries collision - 6.14: the renderer skips it; the check
+                // counted every such placement as a problem since then)
+                if (!std::isfinite(in.pos[0]) || (!(in.radius > 0) && m->h->radius > 0 && !m->meshHidden)) { ++problems; ++g_pk[4]; }
             }
         }
         maxInst = std::max(maxInst, inst);
@@ -395,7 +417,7 @@ int main(int argc, char** argv) {
         std::printf("show order: first fifth avg %.0f yd, last fifth avg %.0f yd (%zu placements)\n", a / q, b / q, shownOrder.size());
         if (std::getenv("ORDER_EXPECT") && !(a < b)) { std::printf("show order: the far ones came first\n"); ++problems; }
     }
-    std::printf("submesh checks %zu, problems %zu; linear peak %.1f MB\n", checks, problems, stubLinearPeak() / 1048576.0);
+    std::printf("submesh checks %zu, problems %zu (not ready %zu, index range %zu, texture %zu, vertex index %zu, radius %zu); linear peak %.1f MB\n", checks, problems, g_pk[0], g_pk[1], g_pk[2], g_pk[3], g_pk[4], stubLinearPeak() / 1048576.0);
     {   // stage 6: IO accounting for the perf log
         uint64_t kb = 0;
         uint32_t rd = 0;
@@ -443,6 +465,12 @@ int main(int argc, char** argv) {
         std::printf("terrain holes: %d uncovered points (membrane checks %d), ground checks %d, %d wrong\n", uncovered, membraneChecks,
                     groundChecks, holeBad);
         problems += holeBad;
+    }
+    if (const char* fe = std::getenv("FAR_EXPECT")) {   // 6.24: the pack's far ground: its tiles, frames it was drawn in, overlaps
+        const StreamStats& ss = streamerStats();
+        std::printf("far ground: %d tiles, drawn in %zu frames, %zu wrong (drawn over a tile with its detailed ground)\n", ss.farTiles,
+                    g_farFrames, g_farOverlap);
+        if (ss.farTiles != std::atoi(fe) || g_farOverlap) { std::printf("far FAIL\n"); ++problems; }
     }
     // 6.18a (env GROUND_POINTS=file from converter/tests/ground_ref.py, GROUND_EXPECT=exact|old): the ground height and the hole
     // flag of streamerGroundHeightEx() at the reference points. exact: with GRND every point within 0.01 yd (and the hole flags

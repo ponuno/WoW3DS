@@ -63,6 +63,7 @@ struct Options {
     bool spellFx = true;        // stage 5.33: spell visuals with the creatures (--no-spell-fx)
     bool noDoodadColl = false;  // no M2 doodad collision (fences, trunks, bridges) in COLL
     int doodadCollTris = 0;     // collision triangle budget per doodad model (0 = keep all; 6.18b: the 96 of before cut fences and bridges)
+    bool noFarLod = false;      // 6.24: no FARL entry (--no-far-lod)
     bool exactGround = true;    // 6.18a: a GRND entry per tile (the ADT's 145 heights + holes: the walker's ground); --no-exact-ground
     bool terrainCenters = true;    // 6.18a: the squares' centre vertices in the drawn ground too (LOD 0; +50% triangles); --terrain-centers
     // Creatures (stage 5.3): every CreatureDisplayInfo row -> CDSP + CMDL (skinned, animated)
@@ -274,6 +275,10 @@ struct ConvStats {
     // Collision triangles (render space) per tile id, clipped to the tile: 9 coords + flags.
     struct CollTri { float v[9]; uint16_t flags; };
     std::unordered_map<uint32_t, std::vector<CollTri>> collTris;
+    // 6.24: the far ground (farlod.cpp): per converted tile its chunk-corner heights and chunk colours, written by emitFarLod()
+    struct FarSrc { float h[289]; float rgb[256][3]; bool haveColor = false; };
+    std::unordered_map<uint32_t, FarSrc> far;
+    size_t farTiles = 0, farFromWdl = 0, farBytes = 0;
     size_t collSource = 0, collWalkable = 0, collWalls = 0, collPieces = 0, collBytes = 0, collMaxTileBytes = 0;
     // M2 bounding (collision) triangles in model space, 3 vertices x 3 floats each, by model id.
     std::unordered_map<uint32_t, std::vector<float>> m2Coll;
@@ -432,6 +437,10 @@ bool emitTile(const Options& o, const wowee::pipeline::ADTTerrain& adt, const st
 void collectAdtLiquids(const Options& o, const std::vector<uint8_t>* adtBytes, const wowee::pipeline::ADTTerrain& adt,
                        ConvStats& st);
 void emitLiquids(const Options& o, const DataDir* data, PackWriter& pack, ConvStats& st);
+// 6.24: far ground (FARL entry + its colour atlas): collectFarTile() per converted ADT, emitFarLod() once per map after the tiles
+// (adds the WDL's heights for the map's other tiles).
+void collectFarTile(const Options& o, const DataDir* data, const wowee::pipeline::ADTTerrain& adt, ConvStats& st);
+void emitFarLod(const Options& o, const DataDir* data, PackWriter& pack, ConvStats& st);
 // Kind (W3dLiquid) of a WMO group's MLIQ the way the server's extractor resolves it (vMaNGOS vmapextract), -1 = none.
 int wmoLiquidKind(uint32_t rootFlags, uint32_t rootId, uint32_t groupFlags, uint32_t groupLiquid, const uint8_t* tiles,
                   size_t tileCount);

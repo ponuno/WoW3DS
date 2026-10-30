@@ -100,6 +100,7 @@ bool convertTile(const Options& o, const DataDir& data, PackWriter& pack, ConvSt
                 placeWmo(pack, data, adt.wmoNames[p.nameId], pos, rot, p.doodadSet, o, st, modelFor, out);
             }
         };
+    if (!o.noFarLod) collectFarTile(o, &data, adt, st);   // 6.24: the far ground's heights and colours of this tile
     return emitTile(o, adt, texIds, mtexToSlot, modelFor, pack, st, wmoPlace, &bytes);
 }
 

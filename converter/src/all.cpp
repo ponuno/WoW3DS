@@ -169,6 +169,8 @@ int convertAll(const Options& oIn, const DataDir& data, const AllOptions& ao, Ui
         emitCollision(m, mp, st);
         trace("map %u (%s): liquids", id, dir.c_str());
         emitLiquids(m, &data, mp, st);
+        trace("map %u (%s): far ground", id, dir.c_str());
+        emitFarLod(m, &data, mp, st);
         trace("map %u (%s): writing", id, dir.c_str());
         if (st.tiles == tilesBefore) {
             std::printf("  map %u (%s): nothing converted\n", id, dir.c_str());

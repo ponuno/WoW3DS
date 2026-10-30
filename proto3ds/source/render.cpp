@@ -3,6 +3,7 @@
 // Everything is drawn camera-relative: the CPU builds per-object modelView
 // matrices in float32 from (object - camera), because PICA200 uniforms are
 // float24 and absolute coordinates (~17000 yd) would visibly jitter.
+#include "w3d_farlod.h"
 #include "world.h"
 
 #include <array>
@@ -366,6 +367,34 @@ void drawTerrain(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, cons
     C3D_CullFace(GPU_CULL_BACK_CCW);   // verified on hardware (stage 2)
 
     BindCache bc;
+    // 6.24: the far ground where a tile's detailed ground is not there (being read, or not loaded): instead of a hole into the
+    // sky. Both texture units sample the colour atlas (vertex a = 0), r = baked light; 0.6 yd lower than the true heights so
+    // that wherever it touches the detailed ground, the detailed one is in front.
+    {
+        static std::vector<FarDraw> far;
+        GpuTex* atlas = nullptr;
+        const uint16_t* fidx = nullptr;
+        float zs = 0.25f;
+        if (streamerFarDraws(cam.pos, fr.maxDist, far, &atlas, &fidx, &zs)) {
+            setTerrainEnv(2);
+            bc.bind(0, atlas, fc);
+            bc.bind(1, atlas, fc);
+            for (const FarDraw& d : far) {
+                if (!fr.sphere(d.center, d.radius)) continue;
+                C3D_BufInfo* buf = C3D_GetBufInfo();
+                BufInfo_Init(buf);
+                BufInfo_Add(buf, d.verts, sizeof(W3dTerrainVertex), 3, 0x210);
+                C3D_Mtx mv;
+                camRelative(&mv, view, d.origin, cam.pos);
+                C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_terrainSh.uMV, &mv);
+                C3D_FVUnifSet(GPU_VERTEX_SHADER, g_terrainSh.uScale, W3D_FAR_XY_SCALE, W3D_FAR_XY_SCALE, zs, W3D_FAR_UV_SCALE);
+                C3D_FVUnifSet(GPU_VERTEX_SHADER, g_terrainSh.uOffset, 0, 0, -W3D_FAR_SINK, 0);
+                C3D_DrawElements(GPU_TRIANGLES, W3D_FAR_INDICES, C3D_UNSIGNED_SHORT, fidx);
+                ++fc.drawCalls;
+                fc.tris += W3D_FAR_INDICES / 3;
+            }
+        }
+    }
     for (Tile* t : streamerReadyTiles()) {
         const W3dTerrainHeader* h = t->th;
         const uint16_t* tex2 = w3d_terrain_tex2(h, t->terr);

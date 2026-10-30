@@ -16,6 +16,7 @@
 #include "w3d_collision.h"
 #include "w3d_ground.h"
 #include "w3d_liquid.h"
+#include "w3d_farlod.h"
 
 #include <fcntl.h>
 #include <math.h>
@@ -1488,6 +1489,111 @@ void processDeferred() {
 }  // namespace
 
 // ================================================================== API
+// ------------------------------------------------------------------ 6.24: the far ground
+// The map's FARL entry stays in memory for the whole visit; vertex buffers (linear memory, 4.6 KB) are made for the tiles
+// actually drawn and the least recently used are dropped beyond kFarCache.
+namespace {
+std::vector<uint8_t> g_farBlob;
+const W3dFarHeader* g_farHd = nullptr;
+GpuTex* g_farTex = nullptr;
+uint16_t* g_farIdx = nullptr;          // linear: the shared index list
+struct FarVB { W3dTerrainVertex* v = nullptr; uint32_t used = 0; float zmin = 0, zmax = 0; };
+std::unordered_map<int, FarVB> g_farVB;   // [tileY * 64 + tileX]
+uint32_t g_farFrame = 0;
+constexpr size_t kFarCache = 96;
+
+void farLoad() {
+    const uint32_t size = streamerEntrySize(W3D_ENTRY_FARLOD, 0);
+    if (!size) return;
+    g_farBlob.resize(size);
+    if (!streamerReadEntry(W3D_ENTRY_FARLOD, 0, g_farBlob.data(), size) || !w3d_far_valid(g_farBlob.data(), size)) {
+        g_farBlob.clear();
+        return;
+    }
+    g_farIdx = (uint16_t*)linearAlloc(W3D_FAR_INDICES * sizeof(uint16_t));
+    if (!g_farIdx) { g_farBlob.clear(); return; }
+    w3d_far_build_indices(g_farIdx);
+    GSPGPU_FlushDataCache(g_farIdx, W3D_FAR_INDICES * sizeof(uint16_t));
+    g_farHd = (const W3dFarHeader*)g_farBlob.data();
+    const float here[3] = {0, 0, 0};
+    AnchorScope as(here, kClsTile);   // small, wanted at once (it hides the holes while the rest loads)
+    g_farTex = acquireTex(g_farHd->texId);
+    g_stats.farTiles = (int)g_farHd->tileCount;
+}
+
+void farUnload() {
+    for (auto& [k, vb] : g_farVB) if (vb.v) linearFree(vb.v);
+    g_farVB.clear();
+    if (g_farTex) releaseTex(g_farTex);
+    g_farTex = nullptr;
+    if (g_farIdx) linearFree(g_farIdx);
+    g_farIdx = nullptr;
+    g_farBlob.clear();
+    g_farHd = nullptr;
+    g_stats.farTiles = g_stats.farDrawn = g_stats.farCached = 0;
+}
+}  // namespace
+
+bool streamerFarDraws(const float cam[3], float maxDist, std::vector<FarDraw>& out, GpuTex** atlas, const uint16_t** indices,
+                      float* zScale) {
+    out.clear();
+    g_stats.farDrawn = 0;
+    if (!g_farHd || !g_farTex || g_farTex->state != AssetState::Ready || g_farTex == &g_white) return false;
+    ++g_farFrame;
+    static bool detailed[64 * 64];
+    memset(detailed, 0, sizeof detailed);
+    for (const Tile* t : g_ready)
+        if (t->tx >= 0 && t->tx < 64 && t->ty >= 0 && t->ty < 64) detailed[t->ty * 64 + t->tx] = true;
+    const float TS = W3D_FAR_TILE_SIZE;
+    const int ctx = (int)floorf(32.0f - cam[1] / TS), cty = (int)floorf(32.0f - cam[0] / TS);
+    const int r = (int)ceilf(maxDist / TS) + 1;
+    for (int ty = std::max(0, cty - r); ty <= std::min(63, cty + r); ++ty)
+        for (int tx = std::max(0, ctx - r); tx <= std::min(63, ctx + r); ++tx) {
+            if (detailed[ty * 64 + tx]) continue;
+            const W3dFarTile* ft = w3d_far_tile(g_farBlob.data(), tx, ty);
+            if (!ft) continue;
+            float minX, minY;
+            w3d_far_tile_origin(tx, ty, &minX, &minY);
+            // nearest point of the tile's square to the camera (x / y only: a coarse cut, the frustum test follows)
+            const float nx = std::clamp(cam[0], minX, minX + TS) - cam[0], ny = std::clamp(cam[1], minY, minY + TS) - cam[1];
+            if (nx * nx + ny * ny > maxDist * maxDist) continue;
+            FarVB& vb = g_farVB[ty * 64 + tx];
+            if (!vb.v) {
+                vb.v = (W3dTerrainVertex*)linearAlloc(W3D_FAR_VERTS * sizeof(W3dTerrainVertex));
+                if (!vb.v) { g_farVB.erase(ty * 64 + tx); continue; }
+                w3d_far_build_vertices(g_farHd, ft, vb.v);
+                GSPGPU_FlushDataCache(vb.v, W3D_FAR_VERTS * sizeof(W3dTerrainVertex));
+                int16_t lo = 32767, hi = -32767;
+                for (int k = 0; k < W3D_FAR_VERTS; ++k) { lo = std::min(lo, ft->h[k]); hi = std::max(hi, ft->h[k]); }
+                vb.zmin = lo * g_farHd->zScale;
+                vb.zmax = hi * g_farHd->zScale;
+            }
+            vb.used = g_farFrame;
+            FarDraw d;
+            d.verts = vb.v;
+            d.origin[0] = minX; d.origin[1] = minY; d.origin[2] = 0;
+            d.center[0] = minX + TS * 0.5f; d.center[1] = minY + TS * 0.5f; d.center[2] = 0.5f * (vb.zmin + vb.zmax);
+            const float hz = 0.5f * (vb.zmax - vb.zmin);
+            d.radius = sqrtf(2.0f * (TS * 0.5f) * (TS * 0.5f) + hz * hz);
+            out.push_back(d);
+        }
+    // drop the least recently used buffers beyond the cap (never one drawn this frame: the GPU reads it)
+    while (g_farVB.size() > kFarCache) {
+        auto old = g_farVB.end();
+        for (auto it = g_farVB.begin(); it != g_farVB.end(); ++it)
+            if (it->second.used != g_farFrame && (old == g_farVB.end() || it->second.used < old->second.used)) old = it;
+        if (old == g_farVB.end()) break;
+        deferFree(FreeKind::Linear, old->second.v);
+        g_farVB.erase(old);
+    }
+    g_stats.farDrawn = (int)out.size();
+    g_stats.farCached = (int)g_farVB.size();
+    *atlas = g_farTex;
+    *indices = g_farIdx;
+    *zScale = g_farHd->zScale;
+    return !out.empty();
+}
+
 bool streamerInit(PackIndex* index, char* err, size_t errLen) {
     g_index = index;
     g_quit = false;   // a map change shuts the streamer down and starts it again on the next pack
@@ -1539,6 +1645,7 @@ bool streamerInit(PackIndex* index, char* err, size_t errLen) {
         g_thread = threadCreate(workerMain, NULL, 32 * 1024, prio + 1, 0, false);
         if (g_thread) g_stats.workerCore = 0;
     }
+    farLoad();   // 6.24 (after the worker: the atlas is read like any texture)
     return true;
 }
 
@@ -1558,6 +1665,7 @@ void streamerShutdown() {
     }
     // Complete every outstanding job (unrun ones as failed) through the normal path,
     // so assets orphaned while loading are freed exactly as during play.
+    farUnload();   // 6.24: (the atlas is released before the jobs are drained: a read still running frees it on completion)
     // Completions may submit follow-up jobs (display -> model -> textures): loop until drained.
     for (;;) {
         for (Job* j : g_requests) j->ok = false;
@@ -1756,7 +1864,7 @@ void streamerUpdate(const float camPos[3], float drawDist, bool uploadsLater) {
         if (abs(t->tx - ctx) > keep || abs(t->ty - cty) > keep) releaseTile(t);
     }
 
-    struct Want { int tx, ty; float d2; };
+    struct Want { int tx, ty; float d2; bool ahead; };
     std::vector<Want> want;
     for (int dx = -r; dx <= r; ++dx)
         for (int dy = -r; dy <= r; ++dy) {
@@ -1764,15 +1872,32 @@ void streamerUpdate(const float camPos[3], float drawDist, bool uploadsLater) {
             if (!g_index->hasTile(tx, ty) || findTile(tx, ty)) continue;
             float cxw = (32.0f - ty - 0.5f) * kTileSize, cyw = (32.0f - tx - 0.5f) * kTileSize;
             float ddx = cxw - camPos[0], ddy = cyw - camPos[1];
-            want.push_back({tx, ty, ddx * ddx + ddy * ddy});
+            want.push_back({tx, ty, ddx * ddx + ddy * ddy, false});
         }
-    std::sort(want.begin(), want.end(), [](const Want& a, const Want& b) { return a.d2 < b.d2; });
+    // 6.24: read ahead - the tiles around the point 300 yards in front of the camera that lie beyond the wanted ring (still
+    // within 'keep', so they are not released again): by the time the walker gets there their ground is in. Only into free
+    // terrain slots (never evicting for it), after everything of the ring.
+    if (g_haveFwd) {
+        const float px = camPos[0] + g_fwd[0] * 300.0f, py = camPos[1] + g_fwd[1] * 300.0f;
+        const int ptx = (int)floorf(32.0f - py / kTileSize), pty = (int)floorf(32.0f - px / kTileSize);
+        for (int dx = -1; dx <= 1; ++dx)
+            for (int dy = -1; dy <= 1; ++dy) {
+                const int tx = ptx + dx, ty = pty + dy;
+                if (std::max(abs(tx - ctx), abs(ty - cty)) != r + 1) continue;   // only the next ring
+                if (!g_index->hasTile(tx, ty) || findTile(tx, ty)) continue;
+                const float cxw = (32.0f - ty - 0.5f) * kTileSize, cyw = (32.0f - tx - 0.5f) * kTileSize;
+                const float ddx = cxw - camPos[0], ddy = cyw - camPos[1];
+                want.push_back({tx, ty, ddx * ddx + ddy * ddy, true});
+            }
+    }
+    std::sort(want.begin(), want.end(), [](const Want& a, const Want& b) { return a.ahead != b.ahead ? !a.ahead : a.d2 < b.d2; });
 
     int loading = 0;
     for (TileExt* t : g_tiles) if (!t->doomed && t->state != TileState::Ready) ++loading;
     for (const Want& w : want) {
         static const int kMaxLoading = (int)tunable("W3D_TILES", 4.0f);
         if (loading >= kMaxLoading) break;   // the read queue puts the nearest tile's contents first (stage 5.30)
+        if (w.ahead && (g_freeSlots.empty() || loading > 0)) break;   // read-ahead: only when the ring is in and a slot is free
         if (g_freeSlots.empty()) {
             // Evict the farthest tile outside the wanted radius.
             TileExt* victim = nullptr;
