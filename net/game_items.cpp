@@ -308,7 +308,7 @@ void GameSession::equipItem(const InvItem& it, uint32_t nowMs) {
 }
 
 void GameSession::unequipItem(const InvItem& it, uint32_t nowMs) {
-    if (freeBagSlots() == 0) { addLocal(inventoryResultText(50 /* INVENTORY_FULL */), nowMs); return; }
+    if (freeBagSlots() == 0) { fail(inventoryResultText(50 /* INVENTORY_FULL */), nowMs); return; }
     Writer w;
     w.u8(it.bag);
     w.u8(it.slot);

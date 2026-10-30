@@ -218,9 +218,9 @@ void GameSession::petDismiss(uint32_t nowMs) {
 bool GameSession::petRename(const std::string& name, uint32_t nowMs) {
     const uint64_t g = petGuid();
     if (!g || !petCanRename()) { error("You cannot rename this pet", Vocal::None, nowMs); return false; }
-    if (name.size() < 2 || name.size() > 12) { addLocal("A pet's name has 2 to 12 letters.", nowMs); return false; }
+    if (name.size() < 2 || name.size() > 12) { fail("A pet's name has 2 to 12 letters.", nowMs); return false; }
     for (char c : name)
-        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) { addLocal("A pet's name has letters only.", nowMs); return false; }
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) { fail("A pet's name has letters only.", nowMs); return false; }
     Writer w;
     w.u64(g);
     w.cstr(name);
@@ -245,7 +245,7 @@ std::vector<InvItem> GameSession::petFoodCandidates() {
 
 bool GameSession::feedPet(const InvItem& food, uint32_t nowMs) {
     if (!petGuid()) { error("You have no pet", Vocal::None, nowMs); return false; }
-    if (!knowsSpell(kSpellFeedPet)) { addLocal("You do not know Feed Pet.", nowMs); return false; }
+    if (!knowsSpell(kSpellFeedPet)) { fail("You do not know Feed Pet.", nowMs); return false; }
     if (cast.active && nowMs - cast.startMs < 400) return false;
     Writer w;
     w.u32(kSpellFeedPet);
@@ -371,7 +371,7 @@ bool GameSession::handlePet(uint16_t op, const Bytes& data, uint32_t nowMs) {
         case SMSG_PET_NAME_INVALID: {
             r.u32();
             lastPetNameInvalid = r.cstr();
-            addLocal("That pet name is not allowed.", nowMs);
+            fail("That pet name is not allowed.", nowMs);
             return true;
         }
         case SMSG_PET_ACTION_FEEDBACK: {

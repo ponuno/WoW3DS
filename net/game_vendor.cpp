@@ -73,7 +73,7 @@ bool GameSession::buyItem(size_t index, uint32_t count, uint32_t nowMs) {
     if (!vendor.open || index >= vendor.items.size() || count == 0) return false;
     const VendorItem& v = vendor.items[index];
     if (count > 255) count = 255;
-    if (!v.unlimited() && v.stock == 0) { addLocal("That item is sold out.", nowMs); return false; }
+    if (!v.unlimited() && v.stock == 0) { fail("That item is sold out.", nowMs); return false; }
     if ((uint64_t)v.price * count > money()) { error("You don't have enough money.", Vocal::NotEnoughMoney, nowMs); return false; }
     Writer w;
     w.u64(vendor.npc);
@@ -92,9 +92,9 @@ uint32_t GameSession::sellValue(const InvItem& it) const {
 
 bool GameSession::sellItem(const InvItem& it, uint32_t nowMs) {
     if (!vendor.open || !it.guid) return false;
-    if (it.equipped()) { addLocal("Take it off first.", nowMs); return false; }
+    if (it.equipped()) { fail("Take it off first.", nowMs); return false; }
     const ItemInfo* info = itemInfoIfKnown(it.entry);
-    if (info && !info->missing && info->sellPrice == 0) { addLocal("The merchant doesn't want that item.", nowMs); return false; }
+    if (info && !info->missing && info->sellPrice == 0) { fail("The merchant doesn't want that item.", nowMs); return false; }
     Writer w;
     w.u64(vendor.npc);
     w.u64(it.guid);
@@ -137,7 +137,7 @@ bool GameSession::buybackItem(const BuybackItem& b, uint32_t nowMs) {
 }
 
 void GameSession::repairAll(uint32_t nowMs) {
-    if (!vendor.open || !vendor.canRepair) { addLocal("This merchant cannot repair.", nowMs); return; }
+    if (!vendor.open || !vendor.canRepair) { fail("This merchant cannot repair.", nowMs); return; }
     Writer w;
     w.u64(vendor.npc);
     w.u64(0);
@@ -156,7 +156,7 @@ void GameSession::openTrainer(uint64_t npc, uint32_t nowMs) {
 bool GameSession::trainSpell(size_t index, uint32_t nowMs) {
     if (!trainer.open || index >= trainer.spells.size()) return false;
     const TrainerSpell& t = trainer.spells[index];
-    if (t.state == 2) { addLocal("You already know that.", nowMs); return false; }
+    if (t.state == 2) { fail("You already know that.", nowMs); return false; }
     if (t.state == 1) {
         const WorldObject* me = selfObject();
         if (me && t.reqLevel > me->level()) error("You must be level " + std::to_string(t.reqLevel) + " to learn that.", Vocal::CantLearnSpell, nowMs);
@@ -289,7 +289,7 @@ bool GameSession::handleVendor(uint16_t op, const Bytes& data, uint32_t nowMs) {
             r.u32();
             uint32_t why = r.u32();
             if (r.bad) return true;
-            addLocal(why == 1 ? "You don't have enough money." : why == 2 ? "Your skill is not high enough." : "You can't learn that.", nowMs);
+            fail(why == 1 ? "You don't have enough money." : why == 2 ? "Your skill is not high enough." : "You can't learn that.", nowMs);
             return true;
         }
         case SMSG_BINDER_CONFIRM: {
@@ -303,7 +303,7 @@ bool GameSession::handleVendor(uint16_t op, const Bytes& data, uint32_t nowMs) {
             return true;
         }
         case SMSG_PLAYERBINDERROR:
-            addLocal("You can't make this place your home.", nowMs);
+            fail("You can't make this place your home.", nowMs);
             return true;
         case SMSG_BINDPOINTUPDATE: {
             float x = r.f32(), y = r.f32(), z = r.f32();
@@ -348,7 +348,7 @@ bool GameSession::handleVendor(uint16_t op, const Bytes& data, uint32_t nowMs) {
             lastSellError = e;
             pendingSells_.erase(std::remove_if(pendingSells_.begin(), pendingSells_.end(),
                                                [&](const PendingSell& p) { return p.guid == item; }), pendingSells_.end());
-            addLocal(sellErrorText(e), nowMs);
+            fail(sellErrorText(e), nowMs);
             return true;
         }
         default:

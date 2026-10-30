@@ -120,8 +120,8 @@ uint32_t GameSession::taxiCost(uint32_t node) const {
 
 bool GameSession::flyTo(uint32_t node, uint32_t nowMs) {
     if (!taxi.open) return false;
-    if (node == taxi.current) { addLocal("You are already there.", nowMs); return false; }
-    if (!taxi.known(node)) { addLocal("You haven't learned that flight path yet.", nowMs); return false; }
+    if (node == taxi.current) { fail("You are already there.", nowMs); return false; }
+    if (!taxi.known(node)) { fail("You haven't learned that flight path yet.", nowMs); return false; }
     Writer w;
     w.u64(taxi.npc);
     if (!taxiTable.loaded() || taxiTable.directCost(taxi.current, node)) {   // without taxi.txt: let the server decide
@@ -132,8 +132,8 @@ bool GameSession::flyTo(uint32_t node, uint32_t nowMs) {
     }
     uint32_t cost = 0;
     std::vector<uint32_t> route = taxiTable.route(taxi.current, node, [&](uint32_t n) { return taxi.known(n); }, &cost);
-    if (route.size() < 2) { addLocal("There is no flight path to that destination.", nowMs); return false; }
-    if (cost > money()) { addLocal("You don't have enough money.", nowMs); return false; }
+    if (route.size() < 2) { fail("There is no flight path to that destination.", nowMs); return false; }
+    if (cost > money()) { fail("You don't have enough money.", nowMs); return false; }
     w.u32(cost);
     w.u32((uint32_t)route.size());
     for (uint32_t n : route) w.u32(n);
@@ -190,17 +190,17 @@ bool GameSession::learnTalent(uint32_t talentId, uint32_t nowMs) {
     const Talent* t = talents.find(talentId);
     if (!t) return false;
     const int rank = talentRank(*t);
-    if (rank >= t->maxRank()) { addLocal("You already know every rank of that talent.", nowMs); return false; }
-    if (!talentPoints()) { addLocal("You have no talent points.", nowMs); return false; }
+    if (rank >= t->maxRank()) { fail("You already know every rank of that talent.", nowMs); return false; }
+    if (!talentPoints()) { fail("You have no talent points.", nowMs); return false; }
     uint32_t spent = 0;
     for (const Talent* o : talents.talentsOf(t->tree)) spent += (uint32_t)talentRank(*o);
     if (spent < t->row * 5) {
-        addLocal("You need " + std::to_string(t->row * 5) + " points in this tree first.", nowMs);
+        fail("You need " + std::to_string(t->row * 5) + " points in this tree first.", nowMs);
         return false;
     }
     if (t->reqTalent) {
         const Talent* req = talents.find(t->reqTalent);
-        if (req && talentRank(*req) < (int)t->reqRank + 1) { addLocal("You need the talent before it first.", nowMs); return false; }
+        if (req && talentRank(*req) < (int)t->reqRank + 1) { fail("You need the talent before it first.", nowMs); return false; }
     }
     Writer w;
     w.u32(talentId);
@@ -263,8 +263,8 @@ bool GameSession::handleServices(uint16_t op, const Bytes& data, uint32_t nowMs)
         case SMSG_BUY_BANK_SLOT_RESULT: {
             uint32_t res = r.u32();
             if (r.bad) return true;
-            if (res == 3) addLocal("You bought a bank slot.", nowMs);
-            else addLocal(res == 1 ? "You don't have enough money." : res == 0 ? "You can't buy more bank slots." : "You are not at a banker.", nowMs);
+            if (res == 3) notice("You bought a bank slot.", nowMs);
+            else fail(res == 1 ? "You don't have enough money." : res == 0 ? "You can't buy more bank slots." : "You are not at a banker.", nowMs);
             return true;
         }
         case SMSG_SHOWTAXINODES: {
@@ -283,11 +283,11 @@ bool GameSession::handleServices(uint16_t op, const Bytes& data, uint32_t nowMs)
             uint32_t code = r.u32();
             if (r.bad) return true;
             if (code == 0) { ++flights; closeTaxi(); addLocal("You take a flight.", nowMs); }
-            else addLocal(taxiError(code), nowMs);
+            else fail(taxiError(code), nowMs);
             return true;
         }
         case SMSG_TAXINODE_STATUS: case SMSG_NEW_TAXI_PATH:
-            if (op == SMSG_NEW_TAXI_PATH) addLocal("New flight path discovered!", nowMs);
+            if (op == SMSG_NEW_TAXI_PATH) notice("New flight path discovered!", nowMs);
             return true;
         default:
             return false;

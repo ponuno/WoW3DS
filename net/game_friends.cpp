@@ -247,7 +247,7 @@ bool GameSession::handleFriends(uint16_t op, const Bytes& data, uint32_t nowMs) 
                                          "That player is not in your guild", "Player not found", "Not allied", "Rank too high",
                                          "Rank too low"};
             (void)cmd;
-            addLocal(res < sizeof(kErr) / sizeof(kErr[0]) ? std::string(kErr[res]) + (s.empty() ? "" : ": " + s) : "Guild error " + std::to_string(res), nowMs);
+            fail(res < sizeof(kErr) / sizeof(kErr[0]) ? std::string(kErr[res]) + (s.empty() ? "" : ": " + s) : "Guild error " + std::to_string(res), nowMs);
             return true;
         }
         case SMSG_GUILD_EVENT: {

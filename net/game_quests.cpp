@@ -249,7 +249,7 @@ void GameSession::acceptQuest(uint32_t nowMs) {
 
 void GameSession::continueQuest(uint32_t nowMs) {
     if (questDialog.kind != QuestDialog::Kind::RequestItems) return;
-    if (!questDialog.completable) { addLocal("You haven't finished that quest yet.", nowMs); return; }
+    if (!questDialog.completable) { fail("You haven't finished that quest yet.", nowMs); return; }
     Writer w;
     w.u64(questDialog.npc);
     w.u32(questDialog.quest);
@@ -259,7 +259,7 @@ void GameSession::continueQuest(uint32_t nowMs) {
 void GameSession::completeQuest(size_t choice, uint32_t nowMs) {
     if (questDialog.kind != QuestDialog::Kind::OfferReward) return;
     if (!questDialog.choices.empty() && choice >= questDialog.choices.size()) {
-        addLocal("Choose a reward first.", nowMs);
+        fail("Choose a reward first.", nowMs);
         return;
     }
     Writer w;
@@ -290,7 +290,7 @@ void GameSession::updateQuests(uint32_t nowMs) {
             for (const QuestLogEntry& e : log)
                 if (!questLogIds_.count(e.id)) {
                     ++questsAccepted;
-                    addLocal("Quest accepted: " + questTitle(e.id), nowMs);
+                    notice("Quest accepted: " + questTitle(e.id), nowMs);
                     sound("questaccept");
                 }
         }
@@ -341,7 +341,7 @@ void GameSession::updateQuests(uint32_t nowMs) {
         for (auto it = pendingItemLines_.begin(); it != pendingItemLines_.end();) {
             uint32_t have = countItem(inv, it->item);
             if (have == it->before && nowMs - it->ms < 1500) { ++it; continue; }
-            if (it->need) addLocal(itemName(it->item) + ": " + std::to_string(std::min(have, it->need)) + "/" + std::to_string(it->need), nowMs);
+            if (it->need) notice(itemName(it->item) + ": " + std::to_string(std::min(have, it->need)) + "/" + std::to_string(it->need), nowMs);
             it = pendingItemLines_.erase(it);
         }
     }
@@ -472,13 +472,13 @@ bool GameSession::handleQuests(uint16_t op, const Bytes& data, uint32_t nowMs) {
             uint32_t why = r.u32();
             if (r.bad) return true;
             lastQuestInvalid = why;
-            addLocal(invalidText(why), nowMs);
+            fail(invalidText(why), nowMs);
             return true;
         }
         case SMSG_QUESTGIVER_QUEST_FAILED: {
             uint32_t q = r.u32(), why = r.u32();
             if (r.bad) return true;
-            addLocal(questTitle(q) + " failed: " + invalidText(why), nowMs);
+            fail(questTitle(q) + " failed: " + invalidText(why), nowMs);
             return true;
         }
         case SMSG_QUESTGIVER_QUEST_COMPLETE: {
@@ -499,19 +499,19 @@ bool GameSession::handleQuests(uint16_t op, const Bytes& data, uint32_t nowMs) {
             return true;
         }
         case SMSG_QUESTLOG_FULL:
-            addLocal("Your quest log is full.", nowMs);
+            fail("Your quest log is full.", nowMs);
             return true;
         case SMSG_QUESTUPDATE_FAILED: case SMSG_QUESTUPDATE_FAILEDTIMER: {
             uint32_t q = r.u32();
             if (r.bad) return true;
-            addLocal(questTitle(q) + (op == SMSG_QUESTUPDATE_FAILED ? " failed." : " failed: out of time."), nowMs);
+            fail(questTitle(q) + (op == SMSG_QUESTUPDATE_FAILED ? " failed." : " failed: out of time."), nowMs);
             return true;
         }
         case SMSG_QUESTUPDATE_COMPLETE: {
             uint32_t q = r.u32();
             if (r.bad) return true;
             ++questUpdates;
-            addLocal(questTitle(q) + " (Complete)", nowMs);
+            notice(questTitle(q) + " (Complete)", nowMs);
             statusAskedMs_.clear();
             return true;
         }
@@ -529,7 +529,7 @@ bool GameSession::handleQuests(uint16_t op, const Bytes& data, uint32_t nowMs) {
                     if (ob.type == ObjType::Unit && ob.entry() == entry && !ob.name.empty()) { what = ob.name + " slain"; break; }
                 if (what.empty()) what = "Creature slain";
             }
-            addLocal(what + ": " + std::to_string(count) + "/" + std::to_string(need), nowMs);
+            notice(what + ": " + std::to_string(count) + "/" + std::to_string(need), nowMs);
             return true;
         }
         case SMSG_QUESTUPDATE_ADD_ITEM: {

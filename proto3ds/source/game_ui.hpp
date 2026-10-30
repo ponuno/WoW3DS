@@ -231,6 +231,8 @@ private:
     void questPrimary(w3n::GameSession& g, const Input& in);              // Accept / Continue / Complete
     std::vector<int> trainerRows(const w3n::GameSession& g) const;   // indices into trainer.spells shown now
     void hint(const std::string& s, uint32_t nowMs) { hint_ = s; hintMs_ = nowMs; dirty_ = true; }
+    // a "why not" (no target, none left ...): the touch screen's line as before and the red line at the top of the screen
+    void refuse(w3n::GameSession& g, const std::string& s, uint32_t nowMs) { hint(s, nowMs); g.uiLine(s, nowMs, false); }
     void dropOnSlot(const Input& in, int slot, Output& out);
     void showInfo(w3n::GameSession& g, const Button& b);
     const Button* hit(int x, int y) const;

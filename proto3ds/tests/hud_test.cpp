@@ -109,6 +109,26 @@ int main(int argc, char** argv) {
         if (best) s.setTarget(best, last);
         s.cast.active = true; s.cast.spell = 78; s.cast.startMs = last - 900; s.cast.durMs = 2000;
     }
+    if (getenv("W3D_NOTICES")) {   // 6.27: the top-screen lines (red errors, yellow notices), experience gained, large damage numbers
+        s.uiLine("You don't have enough money.", last - 400, false);
+        s.uiLine("Out of range", last - 250, false);
+        s.uiLine("Wolves slain: 3/8", last - 100, true);
+        s.xpGains.push_back({54, last - 1100, true});
+        s.xpGains.push_back({120, last - 300, false});
+        const uint64_t self = s.objects.self();
+        uint64_t victim = s.target();
+        if (!victim) for (auto& [g, o] : s.objects.all()) if (!o.self && o.hasPos && o.isUnitLike()) { victim = g; break; }
+        auto hit = [&](uint64_t from, uint64_t to, int dmg, uint32_t info, uint32_t age) {
+            w3n::MeleeHit h;
+            h.ms = last - age; h.attacker = from; h.victim = to; h.damage = dmg; h.hitInfo = info;
+            s.hits.push_back(h);
+        };
+        int k = 0;
+        for (auto& [g, o] : s.objects.all())   // on every unit around (some are in view)
+            if (!o.self && o.hasPos && o.isUnitLike() && k < 30) { hit(self, g, k % 2 ? 310 : 123, k % 2 ? 0x80 : 0, 300 + 10 * k); ++k; }
+        (void)victim;
+        hit(victim, self, 47, 0, 500);
+    }
     if (getenv("W3D_SHEET")) {   // UI stage 14: the character window with made-up stats
         in.charSheet = true;
         if (w3n::WorldObject* me = s.objects.find(s.objects.self())) {

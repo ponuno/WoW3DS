@@ -636,12 +636,16 @@ void hudBuildGame(HudList& l, const HudInput& in) {
             float head[3] = {p[0], p[1], p[2] + 2.6f};
             float sx, sy;
             if (!hudProject(in, head, &sx, &sy)) continue;
-            std::string t = h.miss() ? "Miss" : h.victimState >= 2 && h.victimState <= 8 ? "Parry" : num((uint32_t)std::max<int32_t>(0, h.damage));
+            const bool word = h.miss() || (h.victimState >= 2 && h.victimState <= 8);
+            std::string t = h.miss() ? "Miss" : word ? "Parry" : num((uint32_t)std::max<int32_t>(0, h.damage));
             if (h.crit()) t += "!";
             uint32_t col = onMe ? hudRgba(255, 60, 60) : h.crit() ? hudRgba(255, 120, 0) : hudRgba(255, 230, 40);
-            int rise = (int)(age * 30 / 1000);
+            // larger numbers (the Large font); a crit also jumps out a little as it appears; misses are a word in the middle size
+            const ui::Font nf = word ? ui::Font::Normal : ui::Font::Large;
+            int rise = (int)(age * 36 / 1000);
+            if (h.crit() && age < 160) rise -= (int)(160 - age) / 16;
             if (age > 1100) col = (col & 0x00FFFFFF) | ((uint32_t)(255 - (age - 1100) * 255 / 500) << 24);
-            l.textCentered((int)sx + (onMe ? -24 : 18), (int)sy - 22 - rise, t, col);
+            l.textCentered((int)sx + (onMe ? -28 : 22), (int)sy - 28 - rise, t, col, true, nf);
         }
     }
 
@@ -914,16 +918,28 @@ void hudBuildGame(HudList& l, const HudInput& in) {
             }
         }
     }
-    // ---- UI stage 8: the red error lines (the original's UIErrorsFrame): what could not be done, newest at the bottom
+    // ---- UI stage 8: the original's UIErrorsFrame at the top centre: red = what could not be done (not enough money, out of
+    // range, ...), yellow = what happened (quest progress, a spell learned); newest at the bottom, each fades after 4 s
     {
         l.fade = 255;
-        int y = 58;
+        int y = 62;
         for (const w3n::UiError& e : g.uiErrors) {
             const uint32_t age = now - e.ms;
             if (age > 4000) continue;
             const int a = age > 3000 ? (int)(255 - (age - 3000) * 255 / 1000) : 255;
-            l.textCentered(kHudW / 2, y, ui::trText(e.text), hudRgba(255, 26, 26, a), true, ui::Font::Normal);
+            l.textCentered(kHudW / 2, y, ui::trText(e.text), e.info ? hudRgba(255, 209, 0, a) : hudRgba(255, 26, 26, a), true, ui::Font::Normal);
             y += HudList::lineHeight(ui::Font::Normal);
+        }
+        // experience just gained: "+54 XP", large, rising from the middle of the top screen and fading (older ones above)
+        int slot = 0;
+        for (auto it = g.xpGains.rbegin(); it != g.xpGains.rend(); ++it, ++slot) {
+            const uint32_t age = now - it->ms;
+            if (age > 2600) continue;
+            const int rise = (int)(age * 16 / 1000) + slot * 16;
+            const int a = age > 1900 ? (int)(255 - (age - 1900) * 255 / 700) : 255;
+            char t[48];
+            snprintf(t, sizeof t, "+%u XP", (unsigned)it->xp);
+            l.textCentered(kHudW / 2, 150 - rise, t, hudRgba(190, 140, 255, a), true, ui::Font::Large);
         }
     }
     // ---- UI stage 9: duels (the countdown, leaving the area, who won) and following

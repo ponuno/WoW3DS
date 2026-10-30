@@ -316,7 +316,7 @@ bool GameSession::sendTyped(const std::string& lineIn, uint32_t nowMs) {
     if (cmd == "r" || cmd == "reply") {
         std::string name = lastWhisperGuid ? objects.nameOf(lastWhisperGuid) : std::string();
         if (name.empty()) name = lastWhisperTo;
-        if (name.empty()) { addLocal("There is no one to reply to.", nowMs); return false; }
+        if (name.empty()) { fail("There is no one to reply to.", nowMs); return false; }
         if (!need(!rest.empty(), "/r text")) return false;
         lastWhisperTo = name;
         sendChat(Chat::Whisper, rest, name, nowMs);
@@ -940,7 +940,7 @@ bool GameSession::handleSocial(uint16_t op, const Bytes& data, uint32_t nowMs) {
         }
         case SMSG_CHAT_PLAYER_NOT_FOUND: {
             std::string who = r.cstr();
-            if (!r.bad) addLocal("No player named '" + who + "' is currently playing.", nowMs);
+            if (!r.bad) fail("No player named '" + who + "' is currently playing.", nowMs);
             return true;
         }
         case SMSG_NOTIFICATION: {
@@ -1128,6 +1128,8 @@ bool GameSession::handleSocial(uint16_t op, const Bytes& data, uint32_t nowMs) {
             uint8_t kind = r.u8();
             if (r.bad) return true;
             xpGained += xp;
+            xpGains.push_back({xp, nowMs, kind == 0});
+            while (xpGains.size() > 4) xpGains.pop_front();
             if (kind == 0) {
                 ++kills;
                 std::string v = objects.nameOf(victim);

@@ -2072,7 +2072,7 @@ int main() {
             C3D_RenderTarget* left = topModeNow == 1 ? topWide : top;   // wide: the 400-wide HUD layout is stretched x2 (pixels are half as wide)
             const float slider = topModeNow == 2 ? osGet3DSliderState() : 0.0f;
             const bool stereo = slider > 0.02f && topRight;
-            const float iod = slider * 0.12f;   // yards; the zero-parallax plane is 5 yd away (render.cpp)
+            const float iod = slider * 0.30f;   // yards (6.27: stronger, was 0.12); the zero-parallax plane is 5 yd away (render.cpp)
             rs.gpuKick = padCfg.gpuKick && !stereo && !g_kickBroken;   // stage 6.3 (two eyes share the passes' buffers: no early kick)
             for (int eye = 0; eye < (stereo ? 2 : 1); ++eye) {
                 C3D_RenderTarget* t = eye == 0 ? left : topRight;

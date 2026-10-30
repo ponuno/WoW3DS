@@ -209,7 +209,7 @@ void GameUi::faceTarget(const w3n::GameSession& g, const Input& in, Output& out)
 
 // ------------------------------------------------------------------ actions
 void GameUi::pressSpell(w3n::GameSession& g, uint32_t spell, const Input& in, Output& out) {
-    if (g.life() != w3n::Life::Alive) { hint("You are dead", in.nowMs); return; }
+    if (g.life() != w3n::Life::Alive) { refuse(g, "You are dead", in.nowMs); return; }
     if (g.spellNames.ground(spell)) { beginPlace(g, in, spell, 0, out); return; }   // UI stage 10
     const w3n::WorldObject* t = g.objects.find(g.target());
     bool toggleOff = spell == w3n::kSpellAttack && g.attackWanted();
@@ -286,7 +286,7 @@ void GameUi::confirmPlace(w3n::GameSession& g, const Input& in, Output& out) {
     if (place_.item) {
         w3n::InvItem it;
         if (barsView_ && barsView_->findItem(g, place_.item, &it)) g.useItemAt(it, place_.pos, in.nowMs);
-        else hint("None left: " + g.itemName(place_.item), in.nowMs);
+        else refuse(g, "None left: " + g.itemName(place_.item), in.nowMs);
     } else {
         g.castSpellAt(place_.spell, place_.pos, in.nowMs);
     }
@@ -305,7 +305,7 @@ void GameUi::useItemFaced(w3n::GameSession& g, const w3n::InvItem& it, const Inp
 void GameUi::useSlot(w3n::GameSession& g, const Input& in, int slot, Output& out) {
     if (!in.bars || slot < 0 || slot >= kPadSlots) return;
     if (slot >= 4 && slot < 8) {   // set 0 face buttons: the fixed actions
-        if (bindArmed_) { hint(tr("That button is fixed: pick another", "Эта кнопка занята: выберите другую"), in.nowMs); return; }
+        if (bindArmed_) { refuse(g, tr("That button is fixed: pick another", "Эта кнопка занята: выберите другую"), in.nowMs); return; }
         if (slot == 4) open_ = open_ == Panel::Context ? Panel::Tabs : Panel::Context;
         else if (slot == 5) cancelAction(g, in);
         else if (slot == 7) interactAction(g, in, out);
@@ -325,7 +325,7 @@ void GameUi::useSlot(w3n::GameSession& g, const Input& in, int slot, Output& out
         pressSpell(g, a.id, in, out);
     } else if (a.type == ActionSlot::Item) {
         w3n::InvItem it;
-        if (!in.bars->findItem(g, a.id, &it)) hint("None left: " + g.itemName(a.id), in.nowMs);
+        if (!in.bars->findItem(g, a.id, &it)) refuse(g, "None left: " + g.itemName(a.id), in.nowMs);
         else if (uint32_t gs = g.itemGroundSpell(a.id)) beginPlace(g, in, gs, a.id, out);   // bombs, dummies: on the ground
         else useItemFaced(g, it, in, out);
     } else if (a.type == ActionSlot::PetCmd) {
@@ -401,7 +401,7 @@ void GameUi::interactAction(w3n::GameSession& g, const Input& in, Output& out) {
         if (s) { use = s; g.setTarget(s, in.nowMs); }
     }
     std::string why = g.interact(use, in.pos, in.nowMs);
-    if (!why.empty()) hint(why, in.nowMs);
+    if (!why.empty()) refuse(g, why, in.nowMs);
     else faceTarget(g, in, out);
 }
 
@@ -697,12 +697,12 @@ GameUi::Output GameUi::updateInner(w3n::GameSession& g, const Input& in, bool wa
     if (p->lastHostile) {
         const w3n::WorldObject* o = g.objects.find(lastHostile_);
         if (o && !o->dead()) g.setTarget(lastHostile_, in.nowMs);
-        else hint("No recent enemy", in.nowMs);
+        else refuse(g, "No recent enemy", in.nowMs);
     }
     if (p->assist) {
         uint64_t tt = g.targetOf(g.target());
         if (tt) g.setTarget(tt, in.nowMs);
-        else hint("Your target has no target", in.nowMs);
+        else refuse(g, "Your target has no target", in.nowMs);
     }
     if (p->selfTarget) g.setTarget(g.selfGuid(), in.nowMs);
     if (p->partyPick >= 0) {   // stage 5.17: L + D-pad up/right/down/left = party member 1..4 (else the next friend)
@@ -725,7 +725,7 @@ void GameUi::questPrimary(w3n::GameSession& g, const Input& in) {
         case w3n::QuestDialog::Kind::Details: g.acceptQuest(in.nowMs); break;
         case w3n::QuestDialog::Kind::RequestItems: g.continueQuest(in.nowMs); break;
         case w3n::QuestDialog::Kind::OfferReward:
-            if (!d.choices.empty() && rewardPick_ < 0) hint("Choose a reward first (tap it)", in.nowMs);
+            if (!d.choices.empty() && rewardPick_ < 0) refuse(g, "Choose a reward first (tap it)", in.nowMs);
             else g.completeQuest((size_t)std::max(0, rewardPick_), in.nowMs);
             break;
         case w3n::QuestDialog::Kind::List:
@@ -781,7 +781,7 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
         case Act::Release: g.releaseSpirit(now); break;
         case Act::Reclaim: {
             std::string why = g.interact(0, in.pos, now);
-            if (!why.empty()) hint(why, now);
+            if (!why.empty()) refuse(g, why, now);
             break;
         }
         case Act::ResAccept: g.answerResurrect(true, now); break;
@@ -880,7 +880,7 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
         case Act::QuestAccept: g.acceptQuest(now); break;
         case Act::QuestContinue: g.continueQuest(now); break;
         case Act::QuestComplete:
-            if (!g.questDialog.choices.empty() && rewardPick_ < 0) hint("Choose a reward first.", now);
+            if (!g.questDialog.choices.empty() && rewardPick_ < 0) refuse(g, "Choose a reward first.", now);
             else g.completeQuest((size_t)std::max(0, rewardPick_), now);
             break;
         case Act::QuestReward: rewardPick_ = arg; break;
@@ -986,7 +986,7 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
                 case 5: case 6: case 7: {   // stage 5.17: party
                     const w3n::WorldObject* t = g.objects.find(g.target());
                     std::string nm = t ? (t->name.empty() ? g.objects.nameOf(t->guid) : t->name) : std::string();
-                    if (!t || t->type != w3n::ObjType::Player || nm.empty()) { hint("Target a player first", now); break; }
+                    if (!t || t->type != w3n::ObjType::Player || nm.empty()) { refuse(g, "Target a player first", now); break; }
                     if (arg == 5) g.inviteToGroup(nm, now);
                     else if (arg == 6) g.uninvite(nm, now);
                     else g.promoteLeader(t->guid, now);
@@ -996,21 +996,21 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
                 case 9: {   // UI stage 6: trade, add friend, guild invite
                     const w3n::WorldObject* t = g.objects.find(g.target());
                     if (t && t->type == w3n::ObjType::Player && !t->self) g.proposeTrade(t->guid, now);
-                    else hint("Target a player first", now);
+                    else refuse(g, "Target a player first", now);
                     break;
                 }
                 case 10: {
                     const w3n::WorldObject* t = g.objects.find(g.target());
                     std::string nm = t ? (t->name.empty() ? g.objects.nameOf(t->guid) : t->name) : std::string();
                     if (t && t->type == w3n::ObjType::Player && !nm.empty()) g.addFriend(nm, now);
-                    else hint("Target a player first", now);
+                    else refuse(g, "Target a player first", now);
                     break;
                 }
                 case 11: {
                     const w3n::WorldObject* t = g.objects.find(g.target());
                     std::string nm = t ? (t->name.empty() ? g.objects.nameOf(t->guid) : t->name) : std::string();
                     if (t && t->type == w3n::ObjType::Player && !nm.empty()) g.guildInvite(nm, now);
-                    else hint("Target a player first", now);
+                    else refuse(g, "Target a player first", now);
                     break;
                 }
                 case 12:   // UI stage 9: inspect, follow, duel, ignore, stop following
@@ -1022,7 +1022,7 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
                     const w3n::WorldObject* t = g.objects.find(g.target());
                     std::string nm = t ? (t->name.empty() ? g.objects.nameOf(t->guid) : t->name) : std::string();
                     if (t && t->type == w3n::ObjType::Player && !nm.empty()) { g.addIgnore(nm, now); g.setTarget(0, now); }
-                    else hint("Target a player first", now);
+                    else refuse(g, "Target a player first", now);
                     break;
                 }
                 case 16: g.stopFollow(now); break;
@@ -1244,7 +1244,7 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
         case Act::PetOpen: open_ = Panel::Pet; petFeedList_ = false; page_ = 0; break;
         case Act::PetCommand: {
             petSel_ = arg;
-            if (!g.pet.active) { hint(tr("You have no pet", "У вас нет питомца"), now); break; }
+            if (!g.pet.active) { refuse(g, tr("You have no pet", "У вас нет питомца"), now); break; }
             switch (arg) {
                 case kPetCmdAttack: g.petCommand(w3n::kPetAttack, now); break;
                 case kPetCmdFollow: g.petCommand(w3n::kPetFollow, now); break;
@@ -1257,7 +1257,7 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
         }
         case Act::PetCast:
             petSel_ = 100000 + arg;
-            if (!g.pet.active) hint(tr("You have no pet", "У вас нет питомца"), now);
+            if (!g.pet.active) refuse(g, tr("You have no pet", "У вас нет питомца"), now);
             else g.petCastSpell((uint32_t)arg, now);
             break;
         case Act::PetAuto: g.petSetAutocast((uint32_t)arg, !g.petAutocast((uint32_t)arg), now); break;
@@ -1415,11 +1415,11 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
         case Act::TradePick: tradeSel_ = arg; break;
         case Act::TradeOffer: {
             std::vector<w3n::InvItem> items = sellable(g);
-            if (tradeSel_ < 0 || tradeSel_ >= (int)items.size()) { hint(tr("Tap one of your items first", "Сначала выберите свой предмет"), now); break; }
+            if (tradeSel_ < 0 || tradeSel_ >= (int)items.size()) { refuse(g, tr("Tap one of your items first", "Сначала выберите свой предмет"), now); break; }
             int slot = -1;
             for (int i = 0; i < 6 && slot < 0; ++i)
                 if (!g.trade.myItems[i].guid) slot = i;
-            if (slot < 0) { hint(tr("All six slots are used", "Все шесть ячеек заняты"), now); break; }
+            if (slot < 0) { refuse(g, tr("All six slots are used", "Все шесть ячеек заняты"), now); break; }
             g.offerTradeItem(slot, items[tradeSel_], now);
             tradeSel_ = -1;
             break;

@@ -56,6 +56,8 @@ void GameSession::attach(WorldClient& wc, uint32_t nowMs) {
     reclaimAt_ = corpseAskedMs_ = invScanMs_ = 0;
     lastLife_ = Life::Alive;
     lifeSeen_ = false;
+    uiErrors.clear();
+    xpGains.clear();
     channels_.clear();    // the server dropped us from every channel at logout
     autoZone_ = 0;
     autoJoined_.clear();

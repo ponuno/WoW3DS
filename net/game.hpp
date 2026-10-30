@@ -449,7 +449,9 @@ Vocal vocalForCastResult(uint32_t code, uint8_t powerType, uint32_t cls);
 Vocal vocalForInventoryResult(uint32_t code);
 Vocal vocalForLootError(uint8_t error);
 // A red line at the top of the screen (the original's UIErrorsFrame): errors of casts, items, attacks, loot.
-struct UiError { std::string text; uint32_t ms = 0; };
+struct UiError { std::string text; uint32_t ms = 0; bool info = false; };   // info: a yellow line (quest progress ...), else red
+// Experience gained (SMSG_LOG_XPGAIN): shown at the top of the screen as it comes.
+struct XpGain { uint32_t xp = 0, ms = 0; bool kill = false; };
 
 class GameSession {
 public:
@@ -670,6 +672,12 @@ public:
     void vocal(Vocal v) { if (v != Vocal::None && vocals.size() < 8) vocals.push_back(v); }
     std::deque<UiError> uiErrors;
     void error(const std::string& text, Vocal v, uint32_t nowMs, const std::string& chatLine = std::string());
+    // The original's UIErrorsFrame at the top of the screen, and the chat line as well: red for what could not be done
+    // (fail), yellow for what happened (notice: quest accepted / progress, a spell learned, a flight path found).
+    void fail(const std::string& text, uint32_t nowMs) { error(text, Vocal::None, nowMs); }
+    void notice(const std::string& text, uint32_t nowMs);
+    void uiLine(const std::string& text, uint32_t nowMs, bool info);   // the top line only (no chat line)
+    std::deque<XpGain> xpGains;                        // newest last, at most 4
     // Text emotes heard (SMSG_TEXT_EMOTE: ours echoed back and the players' around): the client plays the emote's voice
     // for the race and gender of who did it (EmotesTextSound.dbc, sounds.txt "T").
     struct HeardEmote { uint64_t guid = 0; uint32_t textEmote = 0; };
