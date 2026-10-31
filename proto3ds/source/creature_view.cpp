@@ -509,7 +509,7 @@ void CreatureView::noteUnit(const CreatureSeen& c) {
 // 6.43c: the first time a display is drawn, what it plays: the animation, its frames and how many bones it poses against Stand (a model in its
 // bind pose - the wind riders' T-pose - shows "poses 0 of N" or "seq -1")
 void CreatureView::notePlay(const CreatureSeen& c, const uint8_t* blob, const AnimChoice& a, bool riding) {
-    if (notedPlay_.size() >= 96 || !notedPlay_.insert(c.displayId | (c.isGo ? 0x80000000u : 0u)).second) return;
+    if (notedPlay_.size() >= 400 || !notedPlay_.insert(c.displayId | (c.isGo ? 0x80000000u : 0u)).second) return;
     const W3dCreatureHeader* h = w3d_creature(blob);
     const W3dAnimSeq* sq = seqAt(blob, a.seq);
     const int stand = w3d_find_seq(blob, W3D_ANIM_STAND);
@@ -520,7 +520,7 @@ void CreatureView::notePlay(const CreatureSeen& c, const uint8_t* blob, const An
              sq ? (unsigned long)sq->frames : 0ul, sq ? (unsigned long)sq->durationMs : 0ul, (unsigned long)w3d_seq_posed_bones(blob, a.seq),
              (unsigned long)h->boneCount, stand < 0 ? "missing" : w3d_seq_animated(blob, stand) ? "moves" : "still",
              (unsigned long)w3d_seq_posed_bones(blob, stand), (int)c.standState, (int)c.flying, (int)riding, (unsigned long)c.moveFlags);
-    if (diag_.size() < 160) diag_.push_back(buf);
+    if (diag_.size() < 400) diag_.push_back(buf);
 }
 
 bool CreatureView::describeUnit(uint64_t guid, char* buf, size_t n) const {
