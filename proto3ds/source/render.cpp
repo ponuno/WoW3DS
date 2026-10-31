@@ -549,10 +549,6 @@ static constexpr float kPortalDist = 70.0f;
 static uint32_t g_portalFrame = 0;
 static bool g_haveViewer = false;
 static float g_viewer[3] = {0, 0, 0};
-void rendererSetViewer(const float* p) {
-    g_haveViewer = p != nullptr;
-    if (p) memcpy(g_viewer, p, sizeof g_viewer);
-}
 static bool portalSphere(void* ctx, const float c[3], float r) { return ((const Frustum*)ctx)->sphere(c, r); }
 static bool portalsReady(Tile* t, const Frustum& fr) {
     if (t->pstate == 2) return false;
@@ -1655,6 +1651,10 @@ void rendererSetProjection(float drawDist) {
 }
 
 void rendererSetHorizon(float yards) { g_horizonWant = yards; }
+void rendererSetViewer(const float* p) {   // 6.42: the character's position for the portal walk
+    g_haveViewer = p != nullptr;
+    if (p) memcpy(g_viewer, p, sizeof g_viewer);
+}
 
 bool rendererUnitPoint(uint64_t guid, int slot, float out[3]) {
     if (slot < 0 || slot > 5) return false;
