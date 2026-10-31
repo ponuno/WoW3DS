@@ -8,6 +8,8 @@
 .fvec lightDir          ; xyz = direction to the sun in MODEL space (normalised)
 .fvec lightParams       ; x = ambient, y = diffuse, w = minimum brightness (1 = unlit)
 .fvec fogParams         ; x = 1/(end-start), y = end/(end-start)
+.fvec uvRowA            ; 6.41: moving textures: u' = uvRowA . (u, v, 1)   (identity: 1, 0, 0)
+.fvec uvRowB            ;                        v' = uvRowB . (u, v, 1)   (identity: 0, 1, 0)
 
 .constf myconst(0.0, 1.0, 0.007874015748, 0.0)
 .alias  zeros   myconst.xxxx
@@ -38,7 +40,12 @@
 	dp4 outpos.w, projection[3], r1
 
 	mul r2, posScale.wwww, intc
-	mov outtc0, r2
+	mov r2.z, ones
+	dp3 r7.x, uvRowA, r2
+	dp3 r7.y, uvRowB, r2
+	mov r7.z, zeros
+	mov r7.w, ones
+	mov outtc0, r7
 
 	; light = clamp(ambient + diffuse * max(0, n.L), unlitFloor, 1)
 	mul r3.xyz, inv127, innrm.xyz

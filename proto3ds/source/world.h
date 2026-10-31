@@ -94,6 +94,7 @@ struct Model {
     // per-frame visibility bucket (filled by the renderer)
     std::vector<const struct Instance*> visible;
     uint32_t mvBase = 0;             // stage 6.10: where its visible instances' matrices start (renderer, per frame)
+    const W3dUvAnimTable* uva = nullptr;   // 6.41: moving textures of its submeshes (M2 texture transforms), null: none
     const W3dSubLod* lods = nullptr; // stage 6.12: lighter versions of the submeshes (null: none in this pack)
     uint32_t drawableMs = 0;         // stage 6.11: when it became drawable (kFadeMs of fading in start there), streamerNowMs() clock
     uint32_t fadeCount = 0;          // stage 6.11: its visible instances that are fading this frame (renderer, per frame)

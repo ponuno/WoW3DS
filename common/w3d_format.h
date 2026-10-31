@@ -14,6 +14,7 @@
 // and the CPU adds a camera-relative translation, because PICA200 floats are
 // 24-bit (16-bit mantissa) and absolute world coords (~17000 yd) would jitter.
 #pragma once
+#include <math.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -184,6 +185,8 @@ typedef struct {
     // after the full ones in the index buffer); absent in older packs
     uint32_t lodCount;            // W3D_MODEL_LODS, or 0
     uint32_t offLods;
+    // 6.41: moving textures (M2 texture transforms: lava, waterfalls, portals, runes): a W3dUvAnimTable, or 0; absent in older packs
+    uint32_t offUvAnim;
 } W3dModelHeader;
 
 // Stage 6.12: level k (1..W3D_MODEL_LODS) of a submesh: firstIndex[k-1] / indexCount[k-1]; a count of 0 = no lighter version
@@ -197,7 +200,8 @@ typedef struct {
 // Older blobs end their header earlier (the texture ids start right after the header the converter knew): 4 bytes without
 // uvScale, 8 more without the LOD table.
 #define W3D_MODEL_HDR_UV_END  ((uint32_t)(offsetof(W3dModelHeader, uvScale) + sizeof(float)))
-#define W3D_MODEL_HDR_LOD_END ((uint32_t)sizeof(W3dModelHeader))
+#define W3D_MODEL_HDR_LOD_END ((uint32_t)offsetof(W3dModelHeader, offUvAnim))
+#define W3D_MODEL_HDR_UVA_END ((uint32_t)sizeof(W3dModelHeader))
 static inline float w3d_model_uv_scale(const W3dModelHeader* h) {
     return (h->offTexIds >= W3D_MODEL_HDR_UV_END && h->uvScale > 0) ? h->uvScale : W3D_MODEL_UV_SCALE;
 }
@@ -217,6 +221,70 @@ static inline const W3dSubLod* w3d_model_lods(const uint8_t* blob, uint32_t size
     if (size < sizeof(W3dModelHeader) || h->offTexIds < W3D_MODEL_HDR_LOD_END || h->offSubmeshes < W3D_MODEL_HDR_LOD_END)
         return 0;
     return w3d_lods_check(blob, size, h->lodCount, h->offLods, h->submeshCount, h->indexCount);
+}
+
+// ---------------------------------------------------------------- moving textures (6.41)
+// An M2 texture transform (UV translation / rotation / scale tracks) baked to one looping table per transform:
+// W3D_UVA_MAX_KEYS samples at most over periodMs, each {du, dv, rot, su, sv} in the M2's own UV space (v not flipped): the
+// texture coordinate becomes R(rot) * S(su, sv) * (uv - 0.5) + 0.5 + (du, dv). The submesh's index (W3dUvAnimTable::offSub,
+// uint16_t[submeshCount]) picks the table (0xFFFF = a still texture). The last key is the value at the end of the period, so
+// a scroll that wraps by one texture is smooth between the last key and the first.
+#define W3D_UVA_MAX_KEYS 33
+#define W3D_UVA_NONE 0xFFFFu
+typedef struct { float du, dv, rot, su, sv; } W3dUvKey;          // 20 bytes
+typedef struct {
+    uint32_t periodMs;
+    uint16_t keyCount, pad;
+    uint32_t offKeys;             // blob offset of W3dUvKey[keyCount] (4-aligned)
+} W3dUvAnim;                      // 12 bytes
+typedef struct {
+    uint32_t animCount, offAnims; // W3dUvAnim[animCount]
+    uint32_t offSub;              // uint16_t[submeshCount]
+    uint32_t pad;
+} W3dUvAnimTable;                 // 16 bytes
+
+// The table of a model blob checked against its size, or null (old pack / none / broken).
+static inline const W3dUvAnimTable* w3d_model_uvanim(const uint8_t* blob, uint32_t size) {
+    const W3dModelHeader* h = (const W3dModelHeader*)blob;
+    if (!blob || size < sizeof(W3dModelHeader) || h->offTexIds < W3D_MODEL_HDR_UVA_END || !h->offUvAnim || (h->offUvAnim & 3) ||
+        (uint64_t)h->offUvAnim + sizeof(W3dUvAnimTable) > size)
+        return 0;
+    const W3dUvAnimTable* t = (const W3dUvAnimTable*)(blob + h->offUvAnim);
+    if (!t->animCount || t->animCount > 64 || (t->offAnims & 3) || (t->offSub & 1)) return 0;
+    if ((uint64_t)t->offAnims + (uint64_t)t->animCount * sizeof(W3dUvAnim) > size) return 0;
+    if ((uint64_t)t->offSub + (uint64_t)h->submeshCount * 2u > size) return 0;
+    const W3dUvAnim* a = (const W3dUvAnim*)(blob + t->offAnims);
+    for (uint32_t i = 0; i < t->animCount; ++i)
+        if (!a[i].periodMs || a[i].keyCount < 2 || a[i].keyCount > W3D_UVA_MAX_KEYS || (a[i].offKeys & 3) ||
+            (uint64_t)a[i].offKeys + (uint64_t)a[i].keyCount * sizeof(W3dUvKey) > size)
+            return 0;
+    return t;
+}
+// The animation of submesh s (null: it stands still).
+static inline const W3dUvAnim* w3d_uv_of(const uint8_t* blob, const W3dUvAnimTable* t, uint32_t s) {
+    const uint16_t i = ((const uint16_t*)(blob + t->offSub))[s];
+    return i < t->animCount ? (const W3dUvAnim*)(blob + t->offAnims) + i : 0;
+}
+// The shader's two rows {m00, m01, b, 0} / {m10, m11, b, 0} for the vertex's (u, v) as stored (v flipped: t = 1 - v) at timeMs:
+// uv' = M * uv + b. Derivation: with F(x) = (x.u, 1 - x.v), P' = F(R S (F(P) - c) + c + d), L = diag(1, -1).
+static inline void w3d_uv_rows(const uint8_t* blob, const W3dUvAnim* a, uint32_t timeMs, float row0[4], float row1[4]) {
+    const W3dUvKey* k = (const W3dUvKey*)(blob + a->offKeys);
+    const float pos = (float)(timeMs % a->periodMs) / (float)a->periodMs * (float)(a->keyCount - 1);
+    uint32_t i = (uint32_t)pos;
+    if (i >= (uint32_t)a->keyCount - 1) i = a->keyCount - 2;
+    const float f = pos - (float)i;
+    float v[5];
+    for (int c = 0; c < 5; ++c) v[c] = ((const float*)&k[i])[c] * (1.0f - f) + ((const float*)&k[i + 1])[c] * f;
+    // A = R(rot) * diag(su, sv) in the M2's UV space
+    const float cs = cosf(v[2]), sn = sinf(v[2]);
+    const float a00 = cs * v[3], a01 = -sn * v[4], a10 = sn * v[3], a11 = cs * v[4];
+    // M = L A L
+    row0[0] = a00;  row0[1] = -a01; row1[0] = -a10; row1[1] = a11;
+    // b = L A (F(0) - c) + L (c + d) + (0, 1), with F(0) - c = (-0.5, 0.5)
+    const float tx = a00 * -0.5f + a01 * 0.5f, ty = a10 * -0.5f + a11 * 0.5f;
+    row0[2] = tx + 0.5f + v[0];
+    row1[2] = -(ty + 0.5f + v[1]) + 1.0f;
+    row0[3] = row1[3] = 0.0f;
 }
 
 // ---------------------------------------------------------------- placements

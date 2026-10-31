@@ -400,7 +400,7 @@ int printPackInfo(const std::string& path) {
     for (auto& [t, n] : countBy)
         std::printf("  %s x%-4zu %8.1f KB\n", typeName(t), n, bytesBy[t] / 1024.0);
 
-    size_t texGpu = 0, missingTex = 0, totalPlacements = 0, fxModels = 0, fxEmitters = 0, fxGlows = 0, fxAnimated = 0, lodModels = 0, lodCreatures = 0;
+    size_t texGpu = 0, missingTex = 0, totalPlacements = 0, fxModels = 0, fxEmitters = 0, fxGlows = 0, fxAnimated = 0, uvModels = 0, lodModels = 0, lodCreatures = 0;
     std::map<uint8_t, size_t> fmtCount;
     for (uint32_t i = 0; i < h.entryCount; ++i) {
         const uint8_t* p = b.data() + e[i].offset;
@@ -483,6 +483,14 @@ int printPackInfo(const std::string& path) {
             if (m.offTexIds >= W3D_MODEL_HDR_LOD_END && m.lodCount) {   // stage 6.12
                 if (!w3d_model_lods(p, e[i].size)) return fail("model LOD table");
                 ++lodModels;
+            }
+            if (m.offTexIds >= W3D_MODEL_HDR_UVA_END && m.offUvAnim) {   // 6.41: moving textures
+                const W3dUvAnimTable* ut = w3d_model_uvanim(p, e[i].size);
+                if (!ut) return fail("model UV animation table");
+                const uint16_t* us = reinterpret_cast<const uint16_t*>(p + ut->offSub);
+                for (uint32_t k = 0; k < m.submeshCount; ++k)
+                    if (us[k] != W3D_UVA_NONE && us[k] >= ut->animCount) return fail("submesh UV animation index");
+                ++uvModels;
             }
             if (const W3dFxHeader* fx = w3d_model_fx(p, e[i].size)) {   // stage 5.32: effects behind the footer
                 ++fxModels;
@@ -678,6 +686,7 @@ int printPackInfo(const std::string& path) {
         }
     }
     std::printf("  placements: %zu\n", totalPlacements);
+    std::printf("  moving textures (6.41): %zu models\n", uvModels);
     std::printf("  LODs (6.12): %zu models, %zu creature models with lighter versions\n", lodModels, lodCreatures);
     if (fxModels) std::printf("  effects: %zu models, %zu particle emitters, %zu glow sprites, %zu with bone animation\n", fxModels, fxEmitters, fxGlows, fxAnimated);
     std::printf("  texture GPU memory: %.1f KB (", texGpu / 1024.0);

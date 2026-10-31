@@ -58,6 +58,7 @@ struct Options {
     std::string dumpPlacements; // debug: text file with every building group/doodad placement
     bool noFloors = false;      // skip COLL entirely (no floors, no walls)
     bool noWalls = false;       // COLL with floors only (walking passes through walls)
+    bool noUvAnim = false;      // 6.41: moving textures of doodads (M2 texture transforms) are not baked (--no-uv-anim)
     bool noFx = false;          // stage 5.32: no particle emitters / glow sprites on doodads (--no-fx)
     bool fxSpell = false;       // stage 5.33: the model being converted is a spell effect (internal)
     bool spellFx = true;        // stage 5.33: spell visuals with the creatures (--no-spell-fx)
@@ -228,7 +229,9 @@ uint32_t addTextureFromGame(PackWriter& pack, const DataDir& data, const std::st
 // ------------------------------------------------------------ geometry
 struct ModelSource {               // engine-neutral mesh before packing
     struct V { float p[3]; float n[3]; float uv[2]; };
-    struct Sub { uint32_t texId; uint8_t blend, flags; std::vector<uint32_t> idx; uint16_t tag = 0; };   // tag: stage 5.35, kept apart in the merge
+    struct Sub { uint32_t texId; uint8_t blend, flags; std::vector<uint32_t> idx; uint16_t tag = 0, uvAnim = 0xFFFF; };   // tag: stage 5.35; uvAnim: 6.41, an index into uvTracks - both kept apart in the merge
+    struct UvTrack { uint32_t periodMs = 0; std::vector<W3dUvKey> keys; };   // 6.41: one baked texture transform (see w3d_format.h)
+    std::vector<UvTrack> uvTracks;
     std::vector<V> verts;
     std::vector<Sub> subs;
     std::vector<uint32_t> texIds;   // TEX entry ids referenced by Sub::texId (index)
@@ -258,7 +261,7 @@ struct ConvStats {
     size_t tiles = 0, waterTris = 0, wmoSkipped = 0;
     size_t wmoOk = 0, wmoFailed = 0, wmoGroups = 0, wmoGroupsFailed = 0, wmoGroupsSkipped = 0, wmoTris = 0;
     size_t wmoPlacements = 0, wmoPlacedGroups = 0, wmoDoodads = 0, duplicatesSkipped = 0;
-    size_t m2SubsFlipped = 0, wmoSubsFlipped = 0;
+    size_t m2SubsFlipped = 0, wmoSubsFlipped = 0, uvAnims = 0;   // uvAnims: 6.41, texture transforms baked
     size_t fxModels = 0, fxEmitters = 0, fxGlows = 0;   // stage 5.32
     size_t fxAnimated = 0, fxEmittersDropped = 0, fxParticleOnly = 0;   // 5.35f: emitters without a rate or a life                                // stage 5.35: effect models with baked bone animation
     size_t creatureModelsOk = 0, creatureModelsFailed = 0, displaysOk = 0, displaysFailed = 0, creatureTris = 0;

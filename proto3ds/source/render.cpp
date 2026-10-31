@@ -37,6 +37,7 @@ struct Shader {
     shaderProgram_s prog;
     int uProj = -1, uMV = -1, uScale = -1, uOffset = -1, uUV = -1, uLight = -1, uLightParams = -1, uFog = -1, uBones = -1;
     int uMask = -1;
+    int uUvA = -1, uUvB = -1;   // 6.41: the model shader's texture transform rows
 };
 Shader g_terrainSh, g_modelSh, g_skinSh, g_fxSh;
 C3D_AttrInfo g_terrainAttr, g_modelAttr, g_skinAttr, g_fxAttr;
@@ -61,6 +62,12 @@ W3dTerrainVertex* g_skyV = nullptr;
 uint16_t* g_skyI = nullptr;
 int g_skyIndexCount = 0;
 
+// 6.41: the model shader's texture transform: identity (a still texture), or the rows of one animated part
+void setUvIdentity() {
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, g_modelSh.uUvA, 1, 0, 0, 0);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, g_modelSh.uUvB, 0, 1, 0, 0);
+}
+
 void initShader(Shader& s, const u8* bin, u32 size) {
     s.dvlb = DVLB_ParseFile((u32*)bin, size);
     shaderProgramInit(&s.prog);
@@ -76,6 +83,8 @@ void initShader(Shader& s, const u8* bin, u32 size) {
     s.uFog = loc("fogParams");
     s.uBones = loc("bones");
     s.uMask = loc("fogMask");
+    s.uUvA = loc("uvRowA");
+    s.uUvB = loc("uvRowB");
 }
 
 void buildSky() {
@@ -649,6 +658,7 @@ static void buildMatrices(const Camera& cam, const C3D_Mtx& view) {
 
 void drawModels(const Camera& cam, const C3D_Mtx& view, const RenderSettings& rs, bool blendedPass, FrameCounters& fc) {
     C3D_BindProgram(&g_modelSh.prog);
+    setUvIdentity();   // 6.41: the uniform registers are shared by the shaders: never left to chance
     C3D_SetAttrInfo(&g_modelAttr);
     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_modelSh.uProj, &g_proj);
     C3D_TexEnv* env = C3D_GetTexEnv(0);
@@ -673,6 +683,7 @@ void drawModels(const Camera& cam, const C3D_Mtx& view, const RenderSettings& rs
 
     if (!g_mvReady) buildMatrices(cam, view);
     BindCache bc;
+    bool uvMoved = false;   // 6.41: the shader holds a part's texture transform now
     for (Model* m : g_activeModels) {
         const W3dModelHeader* h = m->h;
         C3D_BufInfo* buf = C3D_GetBufInfo();
@@ -714,6 +725,16 @@ void drawModels(const Camera& cam, const C3D_Mtx& view, const RenderSettings& rs
             bc.bind(0, sm.tex == W3D_NO_TEXTURE ? streamerWhiteTexture() : m->tex[sm.tex], fc);
             const float unlit = (sm.flags & W3D_SUBF_UNLIT) ? 1.0f : 0.0f;
             C3D_FVUnifSet(GPU_VERTEX_SHADER, g_modelSh.uLightParams, 0.55f, 0.6f, 0, unlit);   // (6.10: once a part)
+            if (const W3dUvAnim* ua = m->uva ? w3d_uv_of(m->blob, m->uva, s) : nullptr) {   // 6.41: a moving texture (lava, falls, portals, runes)
+                float r0[4], r1[4];
+                w3d_uv_rows(m->blob, ua, g_nowMs, r0, r1);
+                C3D_FVUnifSet(GPU_VERTEX_SHADER, g_modelSh.uUvA, r0[0], r0[1], r0[2], 0);
+                C3D_FVUnifSet(GPU_VERTEX_SHADER, g_modelSh.uUvB, r1[0], r1[1], r1[2], 0);
+                uvMoved = true;
+            } else if (uvMoved) {
+                setUvIdentity();
+                uvMoved = false;
+            }
             const float* lastLight = nullptr;
             const C3D_Mtx* mvs = g_instMv.data() + m->mvBase;
             for (u32 vi = 0; vi < m->visible.size(); ++vi) {
@@ -767,6 +788,7 @@ void drawMarkers(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, cons
                  const std::vector<Marker>& markers, FrameCounters& fc) {
     if (markers.empty()) return;
     C3D_BindProgram(&g_modelSh.prog);
+    setUvIdentity();   // 6.41: the uniform registers are shared by the shaders: never left to chance
     C3D_SetAttrInfo(&g_modelAttr);
     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_modelSh.uProj, &g_proj);
     C3D_BufInfo* buf = C3D_GetBufInfo();
@@ -863,6 +885,7 @@ std::vector<WornDraw> g_worn;
 void drawWorn(const RenderSettings& rs, FrameCounters& fc) {
     if (g_worn.empty()) return;
     C3D_BindProgram(&g_modelSh.prog);
+    setUvIdentity();   // 6.41: the uniform registers are shared by the shaders: never left to chance
     C3D_SetAttrInfo(&g_modelAttr);
     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_modelSh.uProj, &g_proj);
     C3D_TexEnv* env = C3D_GetTexEnv(0);
@@ -1787,6 +1810,8 @@ void rendererDrawScene(const Camera& cam, float vfovDeg, float nearZ, float farZ
                        const std::vector<CreatureInstance>* creatures, FrameCounters& fc) {
     const C3D_Mtx keepProj = g_proj;
     const float keepNear = g_near, keepFar = g_far;
+    const uint32_t keepNowMs = g_nowMs;
+    g_nowMs = streamerNowMs();   // 6.41: rendererPrepare does not run behind the login screens: the portal's textures move on this clock
     g_near = std::max(nearZ, 0.1f);
     g_far = std::max(farZ, g_near + 1.0f);
     if (g_iod == 0) Mtx_PerspTilt(&g_proj, C3D_AngleFromDegrees(vfovDeg), C3D_AspectRatioTop, g_near, g_far, false);
@@ -1824,6 +1849,7 @@ void rendererDrawScene(const Camera& cam, float vfovDeg, float nearZ, float farZ
     if (creatures) drawCreatures(cam, view, fr, rs, *creatures, fc);
     drawModels(cam, view, rs, true, fc);
     clearVisible();
+    g_nowMs = keepNowMs;
     g_proj = keepProj;
     g_near = keepNear;
     g_far = keepFar;

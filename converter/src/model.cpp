@@ -135,10 +135,10 @@ std::vector<uint8_t> buildModelBlob(ModelSource& m, int maxTris, size_t* trisOut
     if (flippedOut) *flippedOut = flipped;
 
     // ---- 1. merge submeshes sharing material
-    std::map<std::tuple<uint32_t, uint8_t, uint8_t, uint16_t>, ModelSource::Sub> merged;
+    std::map<std::tuple<uint32_t, uint8_t, uint8_t, uint16_t, uint16_t>, ModelSource::Sub> merged;
     for (auto& s : m.subs) {
-        auto& d = merged[{s.texId, s.blend, s.flags, s.tag}];
-        d.texId = s.texId; d.blend = s.blend; d.flags = s.flags; d.tag = s.tag;
+        auto& d = merged[{s.texId, s.blend, s.flags, s.tag, s.uvAnim}];
+        d.texId = s.texId; d.blend = s.blend; d.flags = s.flags; d.tag = s.tag; d.uvAnim = s.uvAnim;
         d.idx.insert(d.idx.end(), s.idx.begin(), s.idx.end());
     }
     std::vector<ModelSource::Sub> subs;
@@ -195,6 +195,7 @@ std::vector<uint8_t> buildModelBlob(ModelSource& m, int maxTris, size_t* trisOut
     // ---- 3. single index buffer, vertex cache + fetch optimisation
     std::vector<uint32_t> all;
     std::vector<W3dSubmesh> outSubs;
+    std::vector<uint16_t> outUv;   // 6.41: the texture transform of every submesh of the blob (index into m.uvTracks)
     for (auto& s : subs) {
         if (s.idx.empty()) continue;
         meshopt_optimizeVertexCache(s.idx.data(), s.idx.data(), s.idx.size(), m.verts.size());
@@ -206,6 +207,7 @@ std::vector<uint8_t> buildModelBlob(ModelSource& m, int maxTris, size_t* trisOut
         d.indexCount = (uint32_t)s.idx.size();
         all.insert(all.end(), s.idx.begin(), s.idx.end());
         outSubs.push_back(d);
+        outUv.push_back(s.uvAnim < m.uvTracks.size() ? s.uvAnim : (uint16_t)W3D_UVA_NONE);
         m.outTags.push_back(s.tag);
     }
     std::vector<ModelSource::V> verts(m.verts.size());
@@ -288,7 +290,44 @@ std::vector<uint8_t> buildModelBlob(ModelSource& m, int maxTris, size_t* trisOut
     size_t offL = b.putArray(lods);
     b.align(4);
 
+    // ---- 4b. 6.41: moving textures: the transforms that a submesh uses, baked keys + the table
+    size_t offUva = 0;
+    {
+        std::vector<uint16_t> remap(m.uvTracks.size(), (uint16_t)W3D_UVA_NONE);
+        std::vector<uint16_t> used;
+        for (uint16_t& u : outUv)
+            if (u != W3D_UVA_NONE) {
+                if (remap[u] == W3D_UVA_NONE) { remap[u] = (uint16_t)used.size(); used.push_back(u); }
+                u = remap[u];
+            }
+        if (!used.empty() && used.size() <= 64) {
+            std::vector<W3dUvAnim> anims;
+            for (uint16_t u : used) {
+                const ModelSource::UvTrack& t = m.uvTracks[u];
+                W3dUvAnim a{};
+                a.periodMs = t.periodMs;
+                a.keyCount = (uint16_t)t.keys.size();
+                b.align(4);
+                a.offKeys = (uint32_t)b.putArray(t.keys);
+                anims.push_back(a);
+            }
+            b.align(4);
+            const size_t offAnims = b.putArray(anims);
+            b.align(4);
+            const size_t offSubUv = b.putArray(outUv);
+            b.align(4);
+            W3dUvAnimTable tab{};
+            tab.animCount = (uint32_t)anims.size();
+            tab.offAnims = (uint32_t)offAnims;
+            tab.offSub = (uint32_t)offSubUv;
+            offUva = b.data.size();
+            b.put(tab);
+            b.align(4);
+        }
+    }
+
     auto* hp = b.at<W3dModelHeader>(0);
+    hp->offUvAnim = (uint32_t)offUva;
     hp->offTexIds = (uint32_t)offTex;
     hp->offSubmeshes = (uint32_t)offSub;
     hp->offVertices = (uint32_t)offV;
@@ -445,6 +484,55 @@ void appendFxBlock(std::vector<uint8_t>& blob, std::vector<W3dFxEmitter>& em, st
 bool fireLikePath(const std::string& lowerPath) { return fireLike(lowerPath); }
 
 
+
+// 6.41: an M2 texture transform baked to a looping table (see common/w3d_format.h, W3dUvAnim). False: it does not move.
+// The period is the global sequence the tracks run on, else the first Stand sequence's length (else its last key); the
+// rotation is the quaternion's turn about the UV plane's normal (Z), unwrapped over the samples. Rotation and scale pivot
+// on the middle of the texture (0.5, 0.5) - the translation comes after, as in the M2 matrix T * R * S.
+bool bakeUvTrack(const wowee::pipeline::M2Model& m, uint16_t transformIdx, ModelSource::UvTrack& out) {
+    using namespace wowee::rendering::m2_track;
+    if (transformIdx >= m.textureTransforms.size()) return false;
+    const auto& tt = m.textureTransforms[transformIdx];
+    const wowee::pipeline::M2AnimationTrack* tr[3] = {&tt.translation, &tt.rotation, &tt.scale};
+    int seq = 0;
+    for (size_t i = 0; i < m.sequences.size(); ++i)
+        if (m.sequences[i].id == 0) { seq = (int)i; break; }
+    uint32_t period = 0;
+    bool any = false;
+    for (const auto* t : tr) {
+        if (!t->hasData()) continue;
+        any = true;
+        if (t->globalSequence >= 0 && (size_t)t->globalSequence < m.globalSequenceDurations.size()) {
+            period = std::max(period, m.globalSequenceDurations[(size_t)t->globalSequence]);
+        } else if ((size_t)seq < t->sequences.size() && !t->sequences[(size_t)seq].timestamps.empty()) {
+            period = std::max(period, t->sequences[(size_t)seq].timestamps.back());
+        }
+    }
+    if (!any || period < 100) return false;
+    period = std::min<uint32_t>(period, 30000);
+    const uint32_t n = std::clamp<uint32_t>((period + 249) / 250, 8, 32) + 1;
+    std::vector<W3dUvKey> keys(n);
+    float prev = 0;
+    bool moves = false;
+    for (uint32_t i = 0; i < n; ++i) {
+        const float t = std::min((float)period * (float)i / (float)(n - 1), (float)period - 1.0f);
+        const glm::vec3 d = sampleVec3(tt.translation, seq, t, t, m.globalSequenceDurations, glm::vec3(0.0f));
+        const glm::quat q = sampleQuat(tt.rotation, seq, t, t, m.globalSequenceDurations);
+        const glm::vec3 s = sampleVec3(tt.scale, seq, t, t, m.globalSequenceDurations, glm::vec3(1.0f));
+        float ang = 2.0f * std::atan2(q.z, q.w);
+        if (i) {
+            while (ang - prev > 3.14159265f) ang -= 6.2831853f;
+            while (ang - prev < -3.14159265f) ang += 6.2831853f;
+        }
+        prev = ang;
+        keys[i] = {d.x, d.y, ang, s.x, s.y};
+        if (std::fabs(d.x) > 1e-4f || std::fabs(d.y) > 1e-4f || std::fabs(ang) > 1e-4f || std::fabs(s.x - 1) > 1e-4f || std::fabs(s.y - 1) > 1e-4f) moves = true;
+    }
+    if (!moves) return false;
+    out.periodMs = period;
+    out.keys = std::move(keys);
+    return true;
+}
 
 // Stage 5.35: the loop of an effect model: the first Stand sequence (else the first), or the longest global sequence
 // when the tracks run on those. False: no loop (nothing to animate).
@@ -640,6 +728,7 @@ static uint32_t addModelFromGameImpl(PackWriter& pack, const DataDir& data, cons
     }
 
     std::map<uint32_t, uint32_t> texSlot;  // TEX entry id -> slot
+    std::map<uint16_t, int> uvSlot;        // 6.41: M2 texture transform -> index in src.uvTracks (-1: it does not move)
     const std::string lowerPath = lowerStr(m2Path);
     const bool fire = !o.fxSpell && fireLike(lowerPath);   // "Spells\\Fireball..." is not a torch
     std::vector<W3dFxGlow> glows;
@@ -763,6 +852,17 @@ static uint32_t addModelFromGameImpl(PackWriter& pack, const DataDir& data, cons
             // type != 0 = replaceable (creature skin, hair...) -> untextured in the prototype
         }
         s.idx.assign(mdl.indices.begin() + b.indexStart, mdl.indices.begin() + b.indexStart + b.indexCount);
+        if (!o.noUvAnim && b.textureAnimIndex != 0xFFFF && b.textureAnimIndex < mdl.textureTransformLookup.size()) {   // 6.41
+            const uint16_t ti = mdl.textureTransformLookup[b.textureAnimIndex];
+            auto it = uvSlot.find(ti);
+            if (it == uvSlot.end()) {
+                ModelSource::UvTrack t;
+                int slot = -1;
+                if (src.uvTracks.size() < 64 && bakeUvTrack(mdl, ti, t)) { slot = (int)src.uvTracks.size(); src.uvTracks.push_back(std::move(t)); ++st.uvAnims; }
+                it = uvSlot.emplace(ti, slot).first;
+            }
+            if (it->second >= 0) s.uvAnim = (uint16_t)it->second;
+        }
         if (animOk) s.tag = tagFor(dominantBone(b));
         {
             bool invisible = false;

@@ -40,6 +40,7 @@ static void usage() {
         "  --no-walls            COLL with floors only (walking passes through walls)\n"
         "  --no-doodad-coll      no collision of doodads (fences, tree trunks, model bridges)\n"
         "  --no-fx               no particle emitters and lamp glows on doodads (stage 5.32)\n"
+        "  --no-uv-anim          doodad textures stand still (no M2 texture transforms: lava, falls, portals; 6.41)\n"
         "  --no-spell-fx         no spell effects with the creatures (stage 5.33)\n"
         "  --explain-spell L     print the Spell -> SpellVisual -> Kit -> EffectName chain of these spell ids (comma list)\n"
         "  --spell-fx            only the spell effects into -o pack (normally with the creatures / --all)\n"
@@ -147,6 +148,7 @@ int main(int argc, char** argv) {
         else if (a == "--no-walls") o.noWalls = true;
         else if (a == "--no-doodad-coll") o.noDoodadColl = true;
         else if (a == "--no-fx") o.noFx = true;
+        else if (a == "--no-uv-anim") o.noUvAnim = true;
         else if (a == "--no-spell-fx") o.spellFx = false;
         else if (a == "--doodad-coll-tris") o.doodadCollTris = std::atoi(next());
         else if (a == "--no-exact-ground") o.exactGround = false;
@@ -451,6 +453,7 @@ int main(int argc, char** argv) {
         std::printf("  items: %zu displays, %zu body layers (%.1f MB), %zu models (%zu failed, %zu tris), %zu helmets, %zu cloaks\n",
                     st.itemDisplays, st.itemLayers, st.itemLayerBytes / 1048576.0, st.itemModels, st.itemModelsFailed,
                     st.itemModelTris, st.itemHelms, st.itemCapes);
+    std::printf("  moving textures: %zu texture transforms baked into doodad models\n", st.uvAnims);
     std::printf("  winding: %zu M2 and %zu WMO submeshes flipped to match their normals\n", st.m2SubsFlipped, st.wmoSubsFlipped);
     std::printf("  effects: %zu models with %zu particle emitters and %zu glow sprites (%zu animated), %zu emitters dropped (no rate / life)\n", st.fxModels, st.fxEmitters, st.fxGlows, st.fxAnimated, st.fxEmittersDropped);
     if (st.duplicatesSkipped) std::printf("  %zu duplicate placements skipped (same uniqueId listed by several tiles)\n", st.duplicatesSkipped);

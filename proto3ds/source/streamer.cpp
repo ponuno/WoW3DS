@@ -1128,6 +1128,7 @@ void onJobDone(Job* j) {
             m->building = m->h->submeshCount && (m->subs[0].flags & W3D_SUBF_BUILDING);
             m->interior = m->h->submeshCount && (m->subs[0].flags & W3D_SUBF_INTERIOR);
             m->lods = w3d_model_lods(m->blob, m->size);   // stage 6.12
+            m->uva = w3d_model_uvanim(m->blob, m->size);  // 6.41
             const uint32_t* ids = (const uint32_t*)(m->blob + m->h->offTexIds);
             {   // its textures are read where the model is needed; a building's before a doodad's
                 AnchorScope as(m->anchor, m->cls == kClsUnit ? kClsUnit : m->building ? kClsBuilding : kClsDoodad);
