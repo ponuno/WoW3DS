@@ -1463,6 +1463,14 @@ int main() {
                                 perf::event("  object platform here: z %.2f (object at %.1f %.1f %.1f)", dz, sd.pos[0], sd.pos[1], sd.pos[2]);
                         }
                         if (!doorBoxes.empty()) perf::event("  closed doors near: %d", (int)doorBoxes.size());
+                        for (auto& [guid, o] : game->objects.all()) {   // 6.44c: the creatures within 15 yd and what they play (T-poses)
+                            if (o.type != w3n::ObjType::Unit || !o.hasPos) continue;
+                            const float ddx = o.mv.x - pl[0], ddy = o.mv.y - pl[1];
+                            if (ddx * ddx + ddy * ddy > 225.0f) continue;
+                            char ub[200];
+                            if (creatureView.describeUnit(guid, ub, sizeof ub))
+                                perf::event("  unit near: entry %u at %.1f %.1f %.1f, %s", (unsigned)o.entry(), o.mv.x, o.mv.y, o.mv.z, ub);
+                        }
                         for (auto& [guid, o] : game->objects.all()) {
                             if (o.type != w3n::ObjType::GameObject || !o.hasPos) continue;
                             const float ddx = o.mv.x - pl[0], ddy = o.mv.y - pl[1];

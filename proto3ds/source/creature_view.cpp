@@ -523,6 +523,20 @@ void CreatureView::notePlay(const CreatureSeen& c, const uint8_t* blob, const An
     if (diag_.size() < 160) diag_.push_back(buf);
 }
 
+bool CreatureView::describeUnit(uint64_t guid, char* buf, size_t n) const {
+    auto it = units_.find(guid);
+    if (it == units_.end() || !it->second.lastBlob || !it->second.drawn) return false;
+    const Unit& u = it->second;
+    const W3dCreatureHeader* h = w3d_creature(u.lastBlob);
+    const W3dAnimSeq* sq = seqAt(u.lastBlob, u.last.seq);
+    const int stand = w3d_find_seq(u.lastBlob, W3D_ANIM_STAND);
+    snprintf(buf, n, "display %lu: anim %d (seq %d of %lu, %lu frames, poses %lu of %lu bones; Stand poses %lu)%s", (unsigned long)u.displayId,
+             sq ? (int)sq->animId : -1, u.last.seq, (unsigned long)h->seqCount, sq ? (unsigned long)sq->frames : 0ul,
+             (unsigned long)w3d_seq_posed_bones(u.lastBlob, u.last.seq), (unsigned long)h->boneCount,
+             (unsigned long)w3d_seq_posed_bones(u.lastBlob, stand), u.mount ? " (mounted)" : "");
+    return true;
+}
+
 void CreatureView::update(const std::vector<CreatureSeen>& seen, uint32_t nowMs, std::vector<CreatureInstance>& out) {
     out.clear();
     ++frame_;
@@ -617,6 +631,8 @@ void CreatureView::update(const std::vector<CreatureSeen>& seen, uint32_t nowMs,
         }
         AnimChoice a = u.anim.update(blob, c, riding, nowMs);
         notePlay(c, blob, a, riding);
+        u.last = a;
+        u.lastBlob = blob;
         ci.seq = a.seq;
         ci.timeMs = u.anim.timeMs();
         ci.loop = a.loop;

@@ -115,6 +115,8 @@ public:
     void clear();
     // 6.36: models drawn for the first time that cannot animate (no sequences, no Stand, or a Stand that is a still pose):
     // one line each, for perf_events.txt (the caller drains them)
+    // 6.44c: one line on what a drawn unit plays (perf log "unit near"): animation, frames, bones it poses against Stand; false: not drawn
+    bool describeUnit(uint64_t guid, char* buf, size_t n) const;
     std::vector<std::string> takeDiag() { std::vector<std::string> d; d.swap(diag_); return d; }
     int tracked() const { return (int)units_.size(); }
     int ready() const { return ready_; }
@@ -137,6 +139,8 @@ private:
         uint32_t frame = 0;
         bool drawn = false;
         UnitAnimator anim, mountAnim;
+        AnimChoice last;                     // 6.44c: what it played last frame (describeUnit)
+        const uint8_t* lastBlob = nullptr;
     };
     std::unordered_map<uint64_t, Unit> units_;
     std::vector<std::string> diag_;
