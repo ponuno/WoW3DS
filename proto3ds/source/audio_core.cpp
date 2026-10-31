@@ -24,6 +24,8 @@ const char* fallbackOf(const std::string& e) {
         {"auctionopen", "npcopen"}, {"auctionclose", "npcclose"}, {"questabandon", "close"}, {"mail", "click"},
         {"questaccept", "click"}, {"tab", "click"}, {"targetfriend", "targethostile"}, {"targetneutral", "targethostile"},
         {"invite", "whisper"}, {"equip", "lootitem"}, {"trade", "coin"}, {"questupdate", "click"}, {"error", "targetlost"},
+        {"spellcast_fire", "spellcast"}, {"spellcast_frost", "spellcast"}, {"spellcast_holy", "spellcast"}, {"spellcast_nature", "spellcast"},
+        {"spellcast_shadow", "spellcast"}, {"spellcast_arcane", "spellcast"},
     };
     for (const auto& [a, b] : k)
         if (e == a) return b;

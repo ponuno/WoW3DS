@@ -158,12 +158,15 @@ int main(int argc, char** argv) {
         CHECK(!snd::spatialize(45, 0, 0, 0, 0, 8, 40, &l, &r), "beyond the cutoff");
     }
 
+    clipCheck(bank, "error", 220, 0.25);           // 6.40: an event by the file path (\"@Sound\\Interface\\Error.wav\")
+    clipCheck(bank, "spellcast_fire", 440, 0.3);
+
     snd::SfxBank synth;
     CHECK(synth.synthesize(), "built-in sounds");
     for (const char* e : {"click", "tab", "open", "close", "coin", "levelup", "questcomplete", "whisper", "targethostile",
                           "bagsopen", "npcclose", "questaccept", "invite", "targetfriend"})
         CHECK(synth.pick(e) != nullptr, "built-in %s", e);
-    for (const char* e : {"lootitem", "spellcast", "spellfail", "equip", "trade", "questupdate"})   // 6.39 (the last three by fallback)
+    for (const char* e : {"lootitem", "spellcast", "spellfail", "equip", "trade", "questupdate", "spellcast_fire", "spellcast_arcane", "error"})   // 6.39 (the last three by fallback)
         CHECK(synth.pick(e) != nullptr, "built-in %s", e);
     {   // 6.39: a loaded pack gets the built-in sound for what it lacks, and keeps its own for what it has
         snd::SfxBank b;

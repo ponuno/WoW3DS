@@ -28,6 +28,8 @@ def ffmpeg(src, dst, *args):
 tmp = path("tmp\\x")
 os.makedirs(os.path.dirname(tmp), exist_ok=True)
 # interface sounds (Sound\Interface)
+tone_wav(path("Sound\\Interface\\Error.wav"), 220, 0.25)                      # 6.40: found by its path, no SoundEntries row
+tone_wav(path("Sound\\Spells\\Cast\\FireCast.wav"), 440, 0.3)
 tone_wav(path("Sound\\Interface\\click.wav"), 1000, 0.2)                      # PCM16 44.1 kHz -> resampled
 tone_wav(path("Sound\\Interface\\open8.wav"), 500, 0.3, rate=22050, width=1)  # 8-bit
 src = os.path.join(out, "tmp", "tab_src.wav"); tone_wav(src, 800, 0.25, rate=22050)

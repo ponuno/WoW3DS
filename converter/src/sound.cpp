@@ -30,7 +30,7 @@ namespace {
 
 // event -> SoundEntries names tried in order (the first that exists wins); --sound-events overrides / adds
 const std::vector<std::pair<std::string, std::vector<std::string>>> kDefaultEvents = {
-    {"click", {"igMainMenuOptionCheckBoxOn", "igMainMenuOption"}},
+    {"click", {"igMainMenuOptionCheckBoxOn", "igMainMenuOption", "@Sound\\Interface\\iUiInterfaceButtonA.wav"}},
     {"tab", {"igCharacterInfoTab"}},
     {"open", {"igCharacterInfoOpen", "igMainMenuOpen"}},
     {"close", {"igCharacterInfoClose", "igMainMenuClose"}},
@@ -43,13 +43,22 @@ const std::vector<std::pair<std::string, std::vector<std::string>>> kDefaultEven
     {"npcopen", {"igQuestListOpen", "igCharacterInfoOpen"}},
     {"npcclose", {"igQuestListClose", "igCharacterInfoClose"}},
     {"questaccept", {"igQuestListSelect", "igQuestListOpen"}},
-    {"questcomplete", {"igQuestListComplete"}},
+    {"questcomplete", {"igQuestListComplete", "@Sound\\Interface\\iQuestComplete.wav"}},
     {"questabandon", {"igQuestLogAbandonQuest"}},
-    {"coin", {"LOOTWINDOWCOINSOUND", "LootWindowCoinSound", "*coinsound"}},
+    {"coin", {"LOOTWINDOWCOINSOUND", "LootWindowCoinSound", "*coinsound", "@Sound\\Interface\\LootCoinSmall.wav"}},
     // 6.39: an item landing in the bags / being put on (the names are guesses; the built-in blip fills in when this client has none)
-    {"lootitem", {"PickUpCloth_Leather01", "PickUpMetalSmall", "PickUpGems"}},
-    {"equip", {"PickUpMetalLarge", "PickUpCloth_Leather01"}},
-    {"levelup", {"LevelUp", "LEVELUPSOUND"}},
+    {"lootitem", {"PickUpCloth_Leather01", "PickUpMetalSmall", "PickUpGems", "@Sound\\Interface\\igLootCreature.wav", "@Sound\\Interface\\PickUp\\PickUpBag.wav"}},
+    {"equip", {"PickUpMetalLarge", "PickUpCloth_Leather01", "@Sound\\Interface\\PickUp\\PickUpBag.wav"}},
+    {"error", {"@Sound\\Interface\\Error.wav"}},
+    {"questupdate", {"@Sound\\Interface\\iQuestUpdate.wav"}},
+    // our own spell going off by its school of magic, for spells whose data gave no sound (the files WoWee plays)
+    {"spellcast_fire", {"@Sound\\Spells\\Cast\\FireCast.wav"}},
+    {"spellcast_frost", {"@Sound\\Spells\\Cast\\IceCast.wav"}},
+    {"spellcast_holy", {"@Sound\\Spells\\Cast\\HolyCast.wav"}},
+    {"spellcast_nature", {"@Sound\\Spells\\Cast\\NatureCast.wav"}},
+    {"spellcast_shadow", {"@Sound\\Spells\\Cast\\ShadowCast.wav"}},
+    {"spellcast_arcane", {"@Sound\\Spells\\Arcane_Form_Precast.wav"}},
+    {"levelup", {"LevelUp", "LEVELUPSOUND", "@Sound\\Interface\\LevelUp.wav"}},
     // an area explored for the first time (stage 5.45): the exact names are a guess; "*word" takes the first SoundEntries name
     // containing the word (alphabetical), so an odd spelling in this client is still found (the log says which one it took)
     {"discover", {"DiscoverArea", "AreaDiscovered", "ZoneDiscovered", "UI_DiscoverArea", "Discovery", "*discover", "*explor"}},
@@ -833,13 +842,20 @@ bool convertSound(const SoundOptions& so, const DataDir& data, bool verbose) {
                 it = best.empty() ? byName.end() : byName.find(best);
                 used = best;
             }
-            if (it == byName.end()) continue;
-            SoundRow s = soundRow(se, it->second);
+            SoundRow s;
+            if (!nm.empty() && nm[0] == '@') {   // 6.40: "@Sound\\Interface\\Error.wav": a file of the client itself, not a SoundEntries name
+                s.files.push_back(nm.substr(1));
+                s.volume = 1.0f;
+                used = nm;
+            } else {
+                if (it == byName.end()) continue;
+                s = soundRow(se, it->second);
+            }
             for (size_t k = 0; k < s.files.size() && k < 3; ++k) {
                 std::vector<uint8_t> f;
                 Pcm p;
                 if (!data.read(s.files[k], f) || !decodeSound(f, p)) {
-                    if (verbose) std::fprintf(stderr, "  sound %s: cannot decode %s\n", ev.c_str(), s.files[k].c_str());
+                    if (verbose && nm[0] != '@') std::fprintf(stderr, "  sound %s: cannot decode %s\n", ev.c_str(), s.files[k].c_str());
                     continue;
                 }
                 resample(p, so.sfxRate);

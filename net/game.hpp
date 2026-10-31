@@ -85,8 +85,12 @@ public:
     void addCooldown(uint32_t id, const Cooldown& c) { cd_[id] = c; }
     size_t cooldownCount() const { return cd_.size(); }
     size_t groundCount() const { return ground_.size(); }
+    // 6.40: school of magic of a spell (1 holy, 2 fire, 3 nature, 4 frost, 5 shadow, 6 arcane; 0 physical / unknown; spells.txt "@school id n")
+    uint8_t school(uint32_t id) const { auto it = school_.find(id); return it == school_.end() ? 0 : it->second; }
+    void addSchool(uint32_t id, uint8_t s) { school_[id] = s; }
     SpellNames();
 private:
+    std::unordered_map<uint32_t, uint8_t> school_;
     std::unordered_map<uint32_t, std::pair<std::string, std::string>> names_;
     std::unordered_map<uint32_t, Ground> ground_;
     std::unordered_set<uint32_t> selfCast_;

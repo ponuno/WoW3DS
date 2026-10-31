@@ -104,6 +104,10 @@ bool exportSpellNames(const DataDir& data, const std::string& path, bool verbose
         for (char& ch : rank) if (ch == '\t' || ch == '\n' || ch == '\r') ch = ' ';
         out += std::to_string(id) + '\t' + name + '\t' + rank + '\n';
         ++n;
+        // 6.40: the school of magic (1.12 Spell.dbc column 1: 1 holy, 2 fire, 3 nature, 4 frost, 5 shadow, 6 arcane; 0 physical):
+        // the client picks a cast sound by it for spells the sound data knows nothing of
+        const uint32_t school = spell.u32(r, 1);
+        if (school >= 1 && school <= 6) out += "@school\t" + std::to_string(id) + "\t" + std::to_string(school) + "\n";
     }
     // Trainers (stage 5.13b) list the spells that teach (effect 36 LEARN_SPELL, the taught spell in
     // EffectTriggerSpell): write them under the name and rank of what they teach. 1.12 columns: Effect 61-63,

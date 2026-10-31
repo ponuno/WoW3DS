@@ -107,7 +107,9 @@ void SoundWorld::update(GameSession& g, const float pos[3], bool moving, bool on
                     if (mine && w.spell != w3n::kSpellAttack && nowMs - castBlipMs_ > 250) {
                         castBlipMs_ = nowMs;
                         SoundReq r;
-                        r.event = "spellcast";
+                        static const char* kBySchool[7] = {"spellcast", "spellcast_holy", "spellcast_fire", "spellcast_nature", "spellcast_frost",
+                                                           "spellcast_shadow", "spellcast_arcane"};
+                        r.event = kBySchool[g.spellNames.school(w.spell) % 7];
                         r.self = true;
                         r.what = "spellcast";
                         out.push_back(r);

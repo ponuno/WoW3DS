@@ -72,6 +72,11 @@ bool SpellNames::load(const char* path) {
             if (sscanf(line + 8, "%u %f %f", &id, &range, &radius) == 3 && id) addGround(id, range, radius);
             continue;
         }
+        if (!strncmp(line, "@school\t", 8)) {   // 6.40: "@school id school"
+            unsigned id = 0, sc = 0;
+            if (sscanf(line + 8, "%u %u", &id, &sc) == 2 && id && sc <= 6) addSchool(id, (uint8_t)sc);
+            continue;
+        }
         if (!strncmp(line, "@self\t", 6)) {   // 5.48: "@self id": no unit target needed
             unsigned id = 0;
             if (sscanf(line + 6, "%u", &id) == 1 && id) addSelfCast(id);
