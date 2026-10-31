@@ -130,6 +130,8 @@ public:
         PetBind,     // arg = PetCmdId (< 100) or 100000 + spell: arm the hotbar binding
         PetRename, PetDismiss, PetFeed, PetFeedPick,
         StablePick, StableStable, StableUnstable, StableBuy, StableClose,
+        // 6.38: the profession window (Spells tab, Craft)
+        CraftSkill, CraftPick, CraftMake, CraftAll, CraftStop, CraftItem,
     };
     // A tap region of the last draw (pixels). Long press shows info (kind 1 item entry / inventory index, 2 spell,
     // 3 aura spell); drag carries a spell (dragKind 1) or an item entry (2) to a hotbar slot.
@@ -248,6 +250,9 @@ private:
     void drawSpells(w3n::GameSession& g, const Input& in);
     void drawTalents(w3n::GameSession& g, const Input& in);
     void drawSkills(w3n::GameSession& g, const Input& in);   // 6.19
+    void drawCraft(w3n::GameSession& g, const Input& in);    // 6.38: professions - recipes, reagents, Create / Create All
+    void craftTick(w3n::GameSession& g, const Input& in);    // 6.38: the next piece of a Create All
+    bool craftCast(w3n::GameSession& g, const Input& in, uint32_t spell, uint64_t itemGuid);
     void spellTabs(int active);                               // the Book / Talents / Skills buttons
     void drawQuestLog(w3n::GameSession& g, const Input& in);
     void drawSocial(w3n::GameSession& g, const Input& in);
@@ -322,6 +327,10 @@ private:
     int talentTree_ = 0, talentSel_ = -1;
     uint32_t skillSel_ = 0;          // 6.19: the selected skill line; skillFolded_: bit per category (5..11) folded away
     uint32_t skillFolded_ = 0;
+    // 6.38: the profession window - the chosen skill line and recipe, the pieces still to make, the item picker of an enchant
+    uint32_t craftSkill_ = 0, craftSel_ = 0, craftCastMs_ = 0, craftLastMs_ = 0;
+    int craftLeft_ = 0;
+    bool craftPick_ = false;
     int socialSel_ = -1;
     // confirmation dialog
     std::string confirmText_;

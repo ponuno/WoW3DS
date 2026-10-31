@@ -49,6 +49,26 @@ public:
 private:
     std::unordered_map<uint32_t, SkillLine> lines_;
 };
+// recipes.txt (6.38, converter texts.cpp exportRecipes): what the profession window lists. kind 0 creates 'item' ('count' of them),
+// 1 enchants an item. The difficulty colours follow the skill: orange below the middle of [minRank, low), yellow up to 'low',
+// green up to 'high', grey from there (the original's SkillLineAbility numbers).
+struct Recipe {
+    uint32_t skill = 0, spell = 0, minRank = 0, low = 0, high = 0, kind = 0, item = 0, count = 1;
+    struct Part { uint32_t entry = 0, count = 1; };
+    std::vector<Part> tools, reagents;
+    int difficulty(uint32_t skillValue) const;   // 0 orange, 1 yellow, 2 green, 3 grey
+};
+class RecipeTable {
+public:
+    bool load(const char* path);
+    bool loaded() const { return !all_.empty(); }
+    void add(const Recipe& r) { all_.push_back(r); }
+    const std::vector<Recipe>& all() const { return all_; }
+    const Recipe* find(uint32_t spell) const;
+    bool anyFor(uint32_t skill) const;
+private:
+    std::vector<Recipe> all_;
+};
 // spelldesc.bin (6.20, converter spelltext.cpp): the descriptions of spells with their numbers filled in. Only the index (12 bytes
 // a spell) lives in memory; the text is read from the file when asked for (a few are kept).
 class SpellDescTable {

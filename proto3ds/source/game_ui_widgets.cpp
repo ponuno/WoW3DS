@@ -401,7 +401,7 @@ void GameUi::drawPanel(w3n::GameSession& g, const Input& in) {
                 case Tab::Map: drawMap(g, in); break;
                 case Tab::Chat: drawChat(g, in); break;
                 case Tab::Bags: case Tab::Gear: if (subBags_) drawPaperDoll(g, in); else drawItems(g, in); break;
-                case Tab::Spells: if (subSpells_ == 2) drawSkills(g, in); else if (subSpells_) drawTalents(g, in); else drawSpells(g, in); break;
+                case Tab::Spells: if (subSpells_ == 3) drawCraft(g, in); else if (subSpells_ == 2) drawSkills(g, in); else if (subSpells_) drawTalents(g, in); else drawSpells(g, in); break;
                 case Tab::Quests: drawQuestLog(g, in); break;
                 case Tab::Social: drawSocial(g, in); break;
                 case Tab::Settings: drawSettings(in); break;

@@ -349,6 +349,8 @@ std::string resolveSpellText(const std::string& text, const SpellTextVals& v,
 bool exportSpellDescriptions(const DataDir& data, const std::string& path, bool verbose);
 // skills.txt (SkillLine.dbc, stage 6.19): "S id category name description" - the skills page of the 3DS client.
 bool exportSkills(const DataDir& data, const std::string& path, bool verbose);
+// recipes.txt (6.38): the profession window - recipes of the professions with their reagents, tools and the item they make.
+bool exportRecipes(const DataDir& data, const std::string& path, bool verbose);
 bool exportLocks(const DataDir& data, const std::string& path, bool verbose);
 // areatriggers.txt (AreaTrigger.dbc, stage 5.28): the zones the client reports with CMSG_AREATRIGGER (dungeon doors, the tram).
 bool exportAreaTriggers(const DataDir& data, const std::string& path, bool verbose);

@@ -80,6 +80,7 @@ int convertAll(const Options& oIn, const DataDir& data, const AllOptions& ao, Ui
         exportFactions(data, folder + "factions.txt", o.verbose);
         exportTalents(data, folder + "talents.txt", o.verbose);
         exportSkills(data, folder + "skills.txt", o.verbose);
+        exportRecipes(data, folder + "recipes.txt", o.verbose);
         exportTaxi(data, folder + "taxi.txt", o.verbose);
         exportLocks(data, folder + "locks.txt", o.verbose);
         exportAreaTriggers(data, folder + "areatriggers.txt", o.verbose);

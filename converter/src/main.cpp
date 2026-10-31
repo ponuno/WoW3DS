@@ -288,6 +288,7 @@ int main(int argc, char** argv) {
         exportFactions(data, textDir() + "factions.txt", o.verbose);
         exportTalents(data, textDir() + "talents.txt", o.verbose);
         exportSkills(data, textDir() + "skills.txt", o.verbose);
+        exportRecipes(data, textDir() + "recipes.txt", o.verbose);
         exportTaxi(data, textDir() + "taxi.txt", o.verbose);
         exportLocks(data, textDir() + "locks.txt", o.verbose);
         exportAreaTriggers(data, textDir() + "areatriggers.txt", o.verbose);
@@ -305,6 +306,7 @@ int main(int argc, char** argv) {
         bool facts = exportFactions(data, textDir() + "factions.txt", o.verbose);
         exportTalents(data, textDir() + "talents.txt", o.verbose);
         exportSkills(data, textDir() + "skills.txt", o.verbose);
+        exportRecipes(data, textDir() + "recipes.txt", o.verbose);
         exportTaxi(data, textDir() + "taxi.txt", o.verbose);
         exportLocks(data, textDir() + "locks.txt", o.verbose);
         exportAreaTriggers(data, textDir() + "areatriggers.txt", o.verbose);
@@ -385,6 +387,7 @@ int main(int argc, char** argv) {
         exportFactions(data, textDir() + "factions.txt", o.verbose);
         exportTalents(data, textDir() + "talents.txt", o.verbose);
         exportSkills(data, textDir() + "skills.txt", o.verbose);
+        exportRecipes(data, textDir() + "recipes.txt", o.verbose);
         exportTaxi(data, textDir() + "taxi.txt", o.verbose);
         exportLocks(data, textDir() + "locks.txt", o.verbose);
         exportAreaTriggers(data, textDir() + "areatriggers.txt", o.verbose);

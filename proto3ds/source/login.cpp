@@ -354,6 +354,7 @@ void LoginFlow::network() {
                 if (!game_.talents.loaded()) game_.talents.load("sdmc:/3ds/w3dproto/talents.txt");   // UI stage 4
                 if (!game_.spellDesc.loaded()) game_.spellDesc.load("sdmc:/3ds/w3dproto/spelldesc.bin");   // 6.20
                 if (!game_.skills.loaded()) game_.skills.load("sdmc:/3ds/w3dproto/skills.txt");      // 6.19: names of the skills page
+                if (!game_.recipes.loaded()) game_.recipes.load("sdmc:/3ds/w3dproto/recipes.txt");   // 6.38: the profession window
                 if (!game_.taxiTable.loaded()) game_.taxiTable.load("sdmc:/3ds/w3dproto/taxi.txt");  // UI stage 6
                 if (!game_.locks.loaded()) game_.locks.load("sdmc:/3ds/w3dproto/locks.txt");         // herbs, ore, chests
                 if (!game_.areaTriggers.loaded()) game_.areaTriggers.load("sdmc:/3ds/w3dproto/areatriggers.txt");   // dungeon doors, the tram

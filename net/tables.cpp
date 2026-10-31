@@ -72,6 +72,63 @@ bool SkillTable::load(const char* path) {
     return !lines_.empty();
 }
 
+int Recipe::difficulty(uint32_t v) const {
+    if (high && v >= high) return 3;
+    if (low && v >= low) return 2;
+    if (v >= (minRank + low) / 2 && low) return 1;
+    return 0;
+}
+
+namespace {
+std::vector<Recipe::Part> parseParts(const std::string& s) {
+    std::vector<Recipe::Part> out;
+    if (s.empty() || s == "-") return out;
+    size_t i = 0;
+    while (i < s.size()) {
+        size_t e = s.find(',', i);
+        if (e == std::string::npos) e = s.size();
+        Recipe::Part p;
+        p.entry = (uint32_t)strtoul(s.c_str() + i, nullptr, 10);
+        const size_t c = s.find(':', i);
+        if (c != std::string::npos && c < e) p.count = std::max<uint32_t>(1, (uint32_t)strtoul(s.c_str() + c + 1, nullptr, 10));
+        if (p.entry) out.push_back(p);
+        i = e + 1;
+    }
+    return out;
+}
+}  // namespace
+
+bool RecipeTable::load(const char* path) {
+    FILE* f = fopen(path, "r");
+    if (!f) return false;
+    all_.clear();
+    static char line[1024];
+    while (fgets(line, sizeof line, f)) {
+        std::vector<std::string> c = fields(line);
+        if (c[0] != "R" || c.size() < 11) continue;
+        Recipe r;
+        r.skill = num(c[1]); r.spell = num(c[2]); r.minRank = num(c[3]); r.low = num(c[4]); r.high = num(c[5]);
+        r.kind = num(c[6]); r.item = num(c[7]); r.count = std::max<uint32_t>(1, num(c[8]));
+        r.tools = parseParts(c[9]);
+        r.reagents = parseParts(c[10]);
+        if (r.skill && r.spell) all_.push_back(r);
+    }
+    fclose(f);
+    return !all_.empty();
+}
+
+const Recipe* RecipeTable::find(uint32_t spell) const {
+    for (const Recipe& r : all_)
+        if (r.spell == spell) return &r;
+    return nullptr;
+}
+
+bool RecipeTable::anyFor(uint32_t skill) const {
+    for (const Recipe& r : all_)
+        if (r.skill == skill) return true;
+    return false;
+}
+
 SpellDescTable::~SpellDescTable() = default;
 
 bool SpellDescTable::load(const char* path) {

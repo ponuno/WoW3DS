@@ -590,6 +590,7 @@ void GameUi::spellTabs(int active) {
     btn(2, kTop + 2, 72, 18, tr("Book", "Книга"), Act::SubView, 0, active == 0 ? Style::ToggleOn : Style::Toggle, Font::Small);
     btn(76, kTop + 2, 72, 18, tr("Talents", "Таланты"), Act::SubView, 1, active == 1 ? Style::ToggleOn : Style::Toggle, Font::Small);
     btn(150, kTop + 2, 72, 18, tr("Skills", "Навыки"), Act::SubView, 2, active == 2 ? Style::ToggleOn : Style::Toggle, Font::Small);
+    btn(224, kTop + 2, 78, 18, tr("Crafting", "Ремёсла"), Act::SubView, 3, active == 3 ? Style::ToggleOn : Style::Toggle, Font::Small);
 }
 
 void GameUi::drawSpells(w3n::GameSession& g, const Input& in) {
@@ -823,6 +824,192 @@ void GameUi::drawSkills(w3n::GameSession& g, const Input& in) {
     }
     if (selLine && selLine->category == 11) btn(2, by, 110, 22, tr("Unlearn", "Забыть навык"), Act::SkillAbandon, 0, Style::Danger, Font::Small);
     pager(by, page_, pages);
+}
+
+// ------------------------------------------------------------------ Crafting (6.38): the profession window
+// The professions we have recipes for (recipes.txt) as chips, the known recipes of the chosen one coloured by difficulty, and
+// for the chosen recipe: what it makes, the tools and the reagents with what the bags hold. Create casts the recipe once, Create
+// All as often as the reagents allow (one cast after another); an enchant asks which item to put it on.
+namespace {
+uint32_t craftColour(int difficulty) {
+    static const uint32_t c[4] = {hudRgba(255, 128, 64), hudRgba(255, 210, 0), hudRgba(64, 192, 64), hudRgba(150, 150, 150)};
+    return c[difficulty & 3];
+}
+}  // namespace
+
+bool GameUi::craftCast(w3n::GameSession& g, const Input& in, uint32_t spell, uint64_t itemGuid) {
+    craftCastMs_ = in.nowMs ? in.nowMs : 1;
+    craftLastMs_ = craftCastMs_;
+    return itemGuid ? g.castSpellOnItem(spell, itemGuid, in.nowMs) : g.castSpell(spell, in.nowMs);
+}
+
+void GameUi::craftTick(w3n::GameSession& g, const Input& in) {
+    if (craftLeft_ <= 0) return;
+    const w3n::Recipe* r = g.recipes.find(craftSel_);
+    bool stop = !r || r->kind != 0 || g.life() != w3n::Life::Alive;
+    if (!stop && g.lastCastFailMs && g.lastCastFailMs >= craftCastMs_) stop = true;   // the last piece failed (moved, no reagents ...)
+    if (!stop && g.cast.active) return;                                               // still casting
+    if (!stop && in.nowMs - craftLastMs_ < 250) return;
+    if (!stop)
+        for (const w3n::Recipe::Part& p : r->reagents)
+            if (g.itemCount(p.entry) < p.count) stop = true;
+    if (!stop && !craftCast(g, in, r->spell, 0)) stop = true;
+    if (stop) { craftLeft_ = 0; dirty_ = true; return; }
+    --craftLeft_;
+    dirty_ = true;
+}
+
+void GameUi::drawCraft(w3n::GameSession& g, const Input& in) {
+    spellTabs(3);
+    if (!g.recipes.loaded()) {
+        window(10, kTop + 30, kTouchW - 20, 70);
+        list_.textCentered(kTouchW / 2, kTop + 44, tr("No recipes.txt on the SD card", "Нет recipes.txt на SD-карте"), kText, true, Font::Normal);
+        list_.textCentered(kTouchW / 2, kTop + 64, tr("(w3dconv --ui or --texts-only writes it)", "(его пишет w3dconv --ui или --texts-only)"), kGrey);
+        return;
+    }
+    std::vector<w3n::GameSession::SkillState> lines;
+    for (const w3n::GameSession::SkillState& s : g.playerSkills())
+        if (g.recipes.anyFor(s.id) && !g.knownRecipes(s.id).empty()) lines.push_back(s);
+    if (lines.empty()) {
+        list_.text(8, kTop + 30, tr("You know no crafting recipes.", "Вы не знаете ни одного рецепта."), kGrey, true, Font::Normal);
+        list_.text(8, kTop + 46, tr("Learn a profession from a trainer.", "Выучите профессию у учителя."), kGrey, false, Font::Small);
+        return;
+    }
+    bool have = false;
+    for (const auto& s : lines) have = have || s.id == craftSkill_;
+    if (!have) { craftSkill_ = lines[0].id; craftSel_ = 0; page_ = 0; }
+    const w3n::GameSession::SkillState* sk = nullptr;
+    const int chipW = (kTouchW - 4) / (int)std::min<size_t>(lines.size(), 5);
+    for (size_t i = 0; i < lines.size() && i < 5; ++i) {
+        const w3n::SkillLine* l = g.skills.find(lines[i].id);
+        const bool on = lines[i].id == craftSkill_;
+        if (on) sk = &lines[i];
+        btn(2 + (int)i * chipW, kTop + 22, chipW - 2, 18, l ? l->name : std::to_string(lines[i].id), Act::CraftSkill, (int)lines[i].id,
+            on ? Style::ToggleOn : Style::Toggle, Font::Small);
+    }
+    if (!sk) return;
+    const uint32_t skillValue = sk->value + (uint32_t)std::max<int>(0, sk->tempBonus + sk->permBonus);
+    std::vector<const w3n::Recipe*> rs = g.knownRecipes(craftSkill_);
+    std::stable_sort(rs.begin(), rs.end(), [&](const w3n::Recipe* a, const w3n::Recipe* b) {
+        const int da = a->difficulty(skillValue), db = b->difficulty(skillValue);
+        if (da != db) return da < db;
+        return g.spellNames.name(a->spell) < g.spellNames.name(b->spell);
+    });
+    const int by = kTabY - 24;
+    // the item picker of an enchant
+    if (craftPick_) {
+        const w3n::Recipe* r = g.recipes.find(craftSel_);
+        list_.textFit(6, kTop + 44, (r ? g.spellNames.name(r->spell) : std::string()) + " - " + tr("pick an item", "выберите вещь"), kTouchW - 12, kGold, true, Font::Small);
+        std::vector<w3n::InvItem> items;
+        for (const w3n::InvItem& it : g.inventory()) {
+            const w3n::ItemInfo* info = g.itemInfo(it.entry);
+            if (info && info->equippable() && info->inventoryType != 18) items.push_back(it);
+        }
+        const int cols = 7, per = cols * 2, cell = 42;
+        const int pages = std::max(1, ((int)items.size() + per - 1) / per);
+        page_ = std::min(page_, pages - 1);
+        if (items.empty()) list_.text(10, kTop + 70, tr("No items to enchant.", "Нет вещей для зачарования."), kGrey, true, Font::Normal);
+        for (int k = 0; k < per; ++k) {
+            const int idx = page_ * per + k;
+            if (idx >= (int)items.size()) break;
+            const w3n::InvItem& it = items[idx];
+            const int x = 6 + (k % cols) * cell, y = kTop + 58 + (k / cols) * cell;
+            const w3n::ItemInfo* info = g.itemInfo(it.entry);
+            iconBox(x + 1, y + 1, cell - 4, itemIcon(g, it.entry), g.itemName(it.entry), qualityColor(info ? info->quality : 1));
+            Button& b = region(x - 1, y - 1, cell, cell, Act::CraftItem, idx);
+            b.infoKind = 4;
+            b.infoId = it.entry;
+            b.guid = it.guid;
+        }
+        btn(2, by, 70, 22, tr("Back", "Назад"), Act::CraftPick, 0, Style::Normal, Font::Small);
+        if (pages > 1) pager(by, page_, pages);
+        return;
+    }
+    // left: the recipes, right: the chosen one
+    const int per = 5, rowH = 21, top = kTop + 43, lw = 152;
+    const int pages = std::max(1, ((int)rs.size() + per - 1) / per);
+    page_ = std::min(page_, pages - 1);
+    const w3n::Recipe* sel = nullptr;
+    for (const w3n::Recipe* r : rs)
+        if (r->spell == craftSel_) sel = r;
+    if (!sel && !rs.empty()) { sel = rs[0]; craftSel_ = sel->spell; }
+    for (int k = 0; k < per; ++k) {
+        const int idx = page_ * per + k;
+        if (idx >= (int)rs.size()) break;
+        const w3n::Recipe* r = rs[idx];
+        const int y = top + k * rowH;
+        list_.rect(2, y, lw, rowH - 1, r == sel ? kRowSel : (k % 2 ? kRowAlt : kRow));
+        const uint32_t icon = r->kind == 0 ? r->item : 0;
+        if (icon) iconBox(4, y + 1, rowH - 3, itemIcon(g, icon), g.spellNames.name(r->spell), kFrameDim);
+        else iconBox(4, y + 1, rowH - 3, spellIcon(r->spell), g.spellNames.name(r->spell), kFrameDim);
+        bool can = true;
+        for (const w3n::Recipe::Part& p : r->reagents) can = can && g.itemCount(p.entry) >= p.count;
+        list_.textFit(4 + rowH, y + 5, g.spellNames.name(r->spell), lw - rowH - 8, can ? craftColour(r->difficulty(skillValue)) : hudAlpha(craftColour(r->difficulty(skillValue)), 150),
+                      false, Font::Small);
+        Button& b = region(2, y, lw, rowH - 1, Act::CraftPick, (int)r->spell);   // arg 0 (Back) closes the item picker
+        b.infoKind = 2;
+        b.infoId = r->spell;
+    }
+    // the chosen recipe
+    const int rx = lw + 6, rw = kTouchW - rx - 2;
+    window(rx, top - 1, rw, by - top - 2);
+    char b[96];
+    if (!sel) {
+        list_.text(rx + 6, top + 6, tr("No recipes.", "Нет рецептов."), kGrey);
+    } else {
+        int y = top + 3;
+        const int diff = sel->difficulty(skillValue);
+        if (sel->kind == 0 && sel->item) {
+            const w3n::ItemInfo* info = g.itemInfo(sel->item);
+            iconBox(rx + 4, y, 22, itemIcon(g, sel->item), g.itemName(sel->item), qualityColor(info ? info->quality : 1));
+            snprintf(b, sizeof b, sel->count > 1 ? "%s x%u" : "%s", g.itemName(sel->item).c_str(), (unsigned)sel->count);
+            list_.textFit(rx + 30, y + 1, b, rw - 34, qualityColor(info ? info->quality : 1), true, Font::Small);
+        } else {
+            iconBox(rx + 4, y, 22, spellIcon(sel->spell), g.spellNames.name(sel->spell), kFrameDim);
+            list_.textFit(rx + 30, y + 1, g.spellNames.name(sel->spell), rw - 34, kGold, true, Font::Small);
+        }
+        static const char* kDiffEn[] = {"Difficult", "Medium", "Easy", "Trivial"};
+        static const char* kDiffRu[] = {"Сложно", "Средне", "Легко", "Тривиально"};
+        list_.text(rx + 30, y + 12, tr(kDiffEn[diff], kDiffRu[diff]), craftColour(diff), false, Font::Small);
+        y += 27;
+        if (!sel->tools.empty()) {
+            std::string t = tr("Tools: ", "Инструменты: ");
+            for (size_t i = 0; i < sel->tools.size(); ++i) t += (i ? ", " : "") + g.itemName(sel->tools[i].entry);
+            list_.textFit(rx + 6, y, t, rw - 10, kGrey, false, Font::Small);
+            y += 11;
+        }
+        list_.text(rx + 6, y, tr("Reagents:", "Реагенты:"), kText, false, Font::Small);
+        y += 11;
+        for (const w3n::Recipe::Part& p : sel->reagents) {
+            if (y + 10 > by - 4) break;
+            const uint32_t have = g.itemCount(p.entry);
+            snprintf(b, sizeof b, "%u/%u", (unsigned)std::min<uint32_t>(have, 999), (unsigned)p.count);
+            list_.textRight(rx + rw - 5, y, b, have >= p.count ? kGreen : kRed, false, Font::Small);
+            list_.textFit(rx + 6, y, g.itemName(p.entry), rw - 46, have >= p.count ? kText : kGrey, false, Font::Small);
+            y += 11;
+        }
+    }
+    // buttons: Create, Create All / Stop
+    bool can = sel != nullptr && !g.cast.active;
+    uint32_t most = 0;
+    if (sel) {
+        most = 9999;
+        for (const w3n::Recipe::Part& p : sel->reagents) most = std::min<uint32_t>(most, g.itemCount(p.entry) / p.count);
+        if (sel->reagents.empty()) most = 1;
+    }
+    if (craftLeft_ > 0) {
+        snprintf(b, sizeof b, "%s (%d)", tr("Stop", "Стоп"), craftLeft_);
+        btn(2, by, 90, 22, b, Act::CraftStop, 0, Style::Danger, Font::Small);
+    } else {
+        btn(2, by, 62, 22, sel && sel->kind == 1 ? tr("Enchant", "Зачаровать") : tr("Create", "Создать"), Act::CraftMake, 0,
+            can && (most > 0 || (sel && sel->kind == 1)) ? Style::Primary : Style::Disabled, Font::Small);
+        if (sel && sel->kind == 0) {
+            snprintf(b, sizeof b, "%s %u", tr("All", "Все"), (unsigned)(most < 999 ? most : 999));
+            btn(66, by, 66, 22, b, Act::CraftAll, 0, can && most > 1 ? Style::Normal : Style::Disabled, Font::Small);
+        }
+    }
+    if (pages > 1) pager(by, page_, pages);
+    (void)in;
 }
 
 // ------------------------------------------------------------------ Quests: log, one quest, reputation

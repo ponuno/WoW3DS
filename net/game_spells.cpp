@@ -246,6 +246,39 @@ bool GameSession::castSpell(uint32_t spell, uint32_t nowMs) {
     return true;
 }
 
+std::vector<const Recipe*> GameSession::knownRecipes(uint32_t skill) const {
+    std::vector<const Recipe*> out;
+    for (const Recipe& r : recipes.all())
+        if (r.skill == skill && knowsSpell(r.spell)) out.push_back(&r);
+    return out;
+}
+
+uint32_t GameSession::itemCount(uint32_t entry) const {
+    uint32_t n = 0;
+    for (const InvItem& it : inventory())
+        if (it.entry == entry && !it.equipped()) n += it.count;
+    return n;
+}
+
+bool GameSession::castSpellOnItem(uint32_t spell, uint64_t itemGuid, uint32_t nowMs) {
+    if (!spells.empty() && !knowsSpell(spell)) { fail("You do not know " + spellNames.name(spell), nowMs); return false; }
+    if (cast.active && (cast.durMs == 0 ? nowMs - cast.startMs < 400 : nowMs - cast.startMs < cast.durMs)) {
+        error("Another action is in progress", Vocal::None, nowMs, "Already casting");
+        return false;
+    }
+    Writer w;
+    w.u32(spell);
+    w.u16(0x0010);   // TARGET_FLAG_ITEM: the packed guid of the item
+    w.packedGuid(itemGuid);
+    send(CMSG_CAST_SPELL, w.b, nowMs);
+    cast.active = true;
+    cast.spell = spell;
+    cast.startMs = nowMs;
+    cast.durMs = 0;
+    cast.target = itemGuid;
+    return true;
+}
+
 bool GameSession::castSpellAt(uint32_t spell, const float pos[3], uint32_t nowMs) {
     if (!spells.empty() && !knowsSpell(spell)) { fail("You do not know " + spellNames.name(spell), nowMs); return false; }
     if (cast.active && (cast.durMs == 0 ? nowMs - cast.startMs < 400 : nowMs - cast.startMs < cast.durMs)) {

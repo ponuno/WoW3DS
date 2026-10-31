@@ -885,6 +885,12 @@ public:
     uint32_t classId() const;                            // UNIT_BYTES_0 byte 1
     // ---- skills (stage 6.19): the skill page - weapon skills, professions, languages ... with their progress
     SkillTable skills;                                   // skills.txt
+    RecipeTable recipes;                                 // recipes.txt (6.38): the profession window
+    // 6.38: the recipes of a skill that the spell book knows (several ranks of one recipe do not exist in the professions)
+    std::vector<const Recipe*> knownRecipes(uint32_t skill) const;
+    uint32_t itemCount(uint32_t entry) const;            // how many of an item the bags hold (the backpack and the bags, not worn)
+    // An enchant: CMSG_CAST_SPELL with TARGET_FLAG_ITEM and the item's guid; same checks as castSpell.
+    bool castSpellOnItem(uint32_t spell, uint64_t itemGuid, uint32_t nowMs);
     SpellDescTable spellDesc;                            // spelldesc.bin (6.20): descriptions of spells, numbers filled in
     struct SkillState { uint32_t id = 0; uint16_t value = 0, max = 0; int16_t tempBonus = 0, permBonus = 0; };
     std::vector<SkillState> playerSkills() const;        // the 128 skill slots of the player's fields, empty ones left out

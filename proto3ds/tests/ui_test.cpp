@@ -1140,6 +1140,98 @@ int main(int argc, char** argv) {
                "page opens, Unlearn asks then 0x202 (186) for a profession, never for a weapon skill (" + std::to_string(ok) + std::to_string(onPage) +
                    std::to_string(sentUnlearn) + std::to_string(weaponSafe) + ")");
     }
+    {   // 6.38: the profession window - recipes of a skill, reagents counted in the bags, Create / Create All / Enchant
+        Rig q;
+        q.dir = dir;
+        q.replay(fight, [](GameSession&) { return false; });
+        q.in.nowMs += 300;
+        w3n::WorldObject* me = const_cast<w3n::WorldObject*>(q.s.selfObject());
+        bool ok = me != nullptr;
+        bool onPage = false, listed = false, made = false, all = false, stopped = false, enchPick = false, enchSent = false, noReagent = false;
+        if (ok) {
+            FILE* f = fopen("/tmp/w3d_ui/skills.txt", "w");
+            fprintf(f, "S\t185\t9\tCooking\tCook food.\nS\t333\t11\tEnchanting\tEnchant.\n");
+            fclose(f);
+            q.s.skills.load("/tmp/w3d_ui/skills.txt");
+            f = fopen("/tmp/w3d_ui/recipes.txt", "w");
+            fprintf(f, "# test\nR\t185\t2538\t1\t20\t60\t0\t2679\t1\t-\t2672:1\nR\t185\t2540\t10\t60\t100\t0\t2681\t1\t-\t2677:2,2672:1\n"
+                       "R\t333\t7418\t1\t1\t70\t1\t0\t1\t6339:1\t10940:1\n");
+            fclose(f);
+            q.s.recipes.load("/tmp/w3d_ui/recipes.txt");
+            q.s.spellNames.add(2538, "Charred Wolf Meat", "");
+            q.s.spellNames.add(2540, "Roasted Boar Meat", "");
+            q.s.spellNames.add(7418, "Enchant Bracer - Minor Health", "");
+            for (uint32_t sp : {2538u, 2540u, 7418u}) q.s.spells.push_back(sp);
+            me->fields.resize(std::max<size_t>(me->fields.size(), w3n::UF::PLAYER_SKILL_INFO_1_1 + 128 * 3));
+            const uint32_t sk[][3] = {{185, 30, 75}, {333, 5, 75}};
+            for (int i = 0; i < 2; ++i) {
+                const int b = w3n::UF::PLAYER_SKILL_INFO_1_1 + i * 3;
+                me->fields[b] = sk[i][0] | (1u << 16);
+                me->fields[b + 1] = sk[i][1] | (sk[i][2] << 16);
+                me->fields[b + 2] = 0;
+            }
+            // 3 pieces of raw wolf meat (2672) in the backpack slot 23, a vellum-like item (4562, equippable) in slot 24
+            auto item = [&](uint64_t guid, uint32_t entry, uint32_t count, int slot) {
+                w3n::WorldObject it;
+                it.guid = guid;
+                it.type = w3n::ObjType::Item;
+                it.fields.assign(w3n::UF::ITEM_FIELD_MAXDURABILITY + 4, 0);
+                it.fields[w3n::UF::OBJECT_ENTRY] = entry;
+                it.fields[w3n::UF::ITEM_FIELD_STACK_COUNT] = count;
+                const_cast<std::unordered_map<uint64_t, w3n::WorldObject>&>(q.s.objects.all())[guid] = it;
+                const int fi = w3n::UF::PLAYER_FIELD_INV_SLOT_HEAD + 2 * slot;
+                me->fields.resize(std::max<size_t>(me->fields.size(), fi + 2));
+                me->fields[fi] = (uint32_t)guid;
+                me->fields[fi + 1] = (uint32_t)(guid >> 32);
+            };
+            item(0x4001, 2672, 3, 23);
+            item(0x4002, 4562, 1, 24);
+            w3n::ItemInfo info;
+            info.entry = 4562; info.inventoryType = 9; info.name = "Test Bracers"; info.quality = 2;
+            q.s.testSetItemInfo(info);
+        }
+        q.tap(GameUi::Act::Tab, (int)GameUi::Tab::Spells);
+        onPage = q.tap(GameUi::Act::SubView, 3);
+        q.draw("craft");
+        listed = q.s.knownRecipes(185).size() == 2 && q.s.itemCount(2672) == 3 && q.s.itemCount(2677) == 0;
+        // Charred Wolf Meat: Create casts spell 2538
+        q.tap(GameUi::Act::CraftSkill, 185);
+        q.tap(GameUi::Act::CraftPick, 2538);
+        q.draw("craft_pick");
+        q.sent.clear();
+        q.tap(GameUi::Act::CraftMake);
+        made = q.sentOp(0x12E) && q.s.cast.spell == 2538;
+        // Boar Meat needs 2 x 2677 that we do not have: Create is refused (no packet)
+        q.s.cast = w3n::CastState();
+        q.tap(GameUi::Act::CraftPick, 2540);
+        q.sent.clear();
+        q.tap(GameUi::Act::CraftMake);
+        noReagent = !q.sentOp(0x12E);   // missing reagents: a hint, no packet
+        // Create All: 3 wolf meat -> the first cast now, two more as each goes off
+        q.s.cast = w3n::CastState();
+        q.tap(GameUi::Act::CraftPick, 2538);
+        q.sent.clear();
+        q.tap(GameUi::Act::CraftAll);
+        all = q.sentOp(0x12E);
+        q.draw("craft_all");
+        q.tap(GameUi::Act::CraftStop);
+        stopped = q.sentOp(0x12F);
+        // an enchant: Enchant opens the item picker, the item gives CMSG_CAST_SPELL with TARGET_FLAG_ITEM
+        q.s.cast = w3n::CastState();
+        q.tap(GameUi::Act::CraftSkill, 333);
+        q.tap(GameUi::Act::CraftPick, 7418);
+        q.tap(GameUi::Act::CraftMake);
+        q.draw("craft_enchant");
+        enchPick = true;
+        q.sent.clear();
+        q.tap(GameUi::Act::CraftItem, 0);
+        for (const Sent& x : q.sent)
+            if (x.op == 0x12E) { Reader r(x.data); enchSent = r.u32() == 7418 && r.u16() == 0x0010; }
+        result("craft", ok && onPage && listed && made && all && stopped && enchPick && enchSent && noReagent,
+               "Crafting page, Create -> CAST 2538, Create All, Stop, Enchant -> item picker -> CAST 7418 with an item target (" + std::to_string(ok) +
+                   std::to_string(onPage) + std::to_string(listed) + std::to_string(made) + std::to_string(all) + std::to_string(stopped) +
+                   std::to_string(enchPick) + std::to_string(enchSent) + ")");
+    }
     {   // 6.20: spell descriptions (spelldesc.bin) in the spell window and in the Use: lines of an item
         Rig q;
         q.dir = dir;

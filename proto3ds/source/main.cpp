@@ -562,7 +562,6 @@ static void fail(const char* msg) {
 }
 
 int main() {
-    const u64 bootTick = svcGetSystemTick();   // 6.37: the start-up timeline (perf_events "startup:")
     crashInstall();   // 6.31: crash.txt on a CPU exception
     osSetSpeedupEnable(true);  // 804 MHz + L2 on New 3DS
     gfxInitDefault();
@@ -580,7 +579,6 @@ int main() {
     C3D_RenderTarget* top = C3D_RenderTargetCreate(240, 400, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
     C3D_RenderTargetSetOutput(top, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
     rendererInit();
-    const double tGfx = ticksToMs(svcGetSystemTick() - bootTick);
     // UI stages 1/7: the touch screen through the GPU while in the game; ui.w3dp (optional) gives the skin
     C3D_RenderTarget* bottomT = C3D_RenderTargetCreate(240, 320, GPU_RB_RGBA8, C3D_DEPTHTYPE(-1));
     if (bottomT) C3D_RenderTargetSetOutput(bottomT, GFX_BOTTOM, GFX_LEFT, BOTTOM_TRANSFER_FLAGS);
@@ -591,7 +589,6 @@ int main() {
         snprintf(uiPath, sizeof uiPath, "%s/ui.w3dp", kOutDir);
         ui::assets().open(uiPath);
     }
-    const double tUi = ticksToMs(svcGetSystemTick() - bootTick);
     bool bottomGpu = false;   // the GPU drew the touch screen last (the console must clear it before printing)
 
     g_report.linearAtStart = linearSpaceFree();
@@ -612,7 +609,6 @@ int main() {
     }
     snprintf(g_report.packPath, sizeof g_report.packPath, "%s", packPath);
     for (const W3dEntry& e : index.entries) g_report.tilesInPack += e.type == W3D_ENTRY_TERRAIN;
-    const double tPack = ticksToMs(svcGetSystemTick() - bootTick);
 
     // Spawn above the centre of the region.
     int ctx = (index.minTileX + index.maxTileX) / 2, cty = (index.minTileY + index.maxTileY) / 2;
@@ -785,10 +781,6 @@ int main() {
     audio::init((std::string(kOutDir) + "/sound").c_str());
     audio::setVolumes(padCfg.musicVol, padCfg.sfxVol, padCfg.ambVol);
     soundWorld.load(audio::soundsTxt());
-    const double tSound = ticksToMs(svcGetSystemTick() - bootTick);
-    perf::event("startup: graphics %.0f ms, UI pack %.0f ms, map pack index + streamer %.0f ms, settings / sound %.0f ms (since the start)",
-                tGfx, tUi, tPack, tSound);
-    bool menuLogged = false;
     Pad pad;
     ActionLayout bars;
     std::string barsPath;
@@ -2033,10 +2025,6 @@ int main() {
                 camPlaced = true;
                 g_report.firstFrameMs = ticksToMs(svcGetSystemTick() - t0);
             }
-        }
-        if (!menuLogged && loginUi) {
-            menuLogged = true;
-            perf::event("startup: the first login screen frame at %.0f ms since the start", ticksToMs(svcGetSystemTick() - bootTick));
         }
         fc = FrameCounters();
         perf::lap(perf::kStream);

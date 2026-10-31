@@ -601,6 +601,7 @@ GameUi::Output GameUi::updateInner(w3n::GameSession& g, const Input& in, bool wa
     out.blockMove = life == w3n::Life::Dead;
     if (in.cfg) { ui::g_lang = in.cfg->lang; bigText_ = in.cfg->bigText; }
     barsView_ = in.bars;
+    craftTick(g, in);   // 6.38: Create All
     if (!gamePage_) {   // the debug page (console): the top-right corner comes back
         if (in.touched && in.touchY < 16 && in.touchX >= 260) { gamePage_ = true; dirty_ = true; }
         return out;
@@ -758,7 +759,7 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
                                                      : tr("Tabs switch with combat again", "Вкладки снова переключаются по бою"), now); break;
         case Act::SubView:
             if (tab_ == Tab::Bags) { subBags_ = arg; selected_ = page_ = 0; }
-            else if (tab_ == Tab::Spells) { subSpells_ = arg; page_ = 0; talentSel_ = -1; skillSel_ = 0; }
+            else if (tab_ == Tab::Spells) { subSpells_ = arg; page_ = 0; talentSel_ = -1; skillSel_ = 0; craftPick_ = false; }
             else if (tab_ == Tab::Social) {
                 subSocial_ = arg; socialSel_ = -1; page_ = 0;
                 if (arg == 1) g.requestGuildRoster(now);
@@ -1291,6 +1292,44 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
             break;
         }
         case Act::StablePick: stableSel_ = arg; break;
+        case Act::CraftSkill: craftSkill_ = (uint32_t)arg; craftSel_ = 0; craftPick_ = false; craftLeft_ = 0; page_ = 0; break;
+        case Act::CraftPick:
+            if (arg == 0) { craftPick_ = false; page_ = 0; }
+            else { craftSel_ = (uint32_t)arg; craftLeft_ = 0; }
+            break;
+        case Act::CraftMake: {
+            const w3n::Recipe* r = g.recipes.find(craftSel_);
+            if (!r) break;
+            if (r->kind == 1) { craftPick_ = true; page_ = 0; break; }
+            craftLeft_ = 0;
+            for (const w3n::Recipe::Part& p : r->reagents)
+                if (g.itemCount(p.entry) < p.count) { refuse(g, tr("You do not have the reagents", "Не хватает реагентов"), now); return; }
+            craftCast(g, in, r->spell, 0);   // (a refusal prints its own line)
+            break;
+        }
+        case Act::CraftAll: {
+            const w3n::Recipe* r = g.recipes.find(craftSel_);
+            if (!r || r->kind != 0) break;
+            uint32_t most = 9999;
+            for (const w3n::Recipe::Part& p : r->reagents) most = std::min<uint32_t>(most, g.itemCount(p.entry) / p.count);
+            if (r->reagents.empty()) most = 1;
+            if (most == 0) break;
+            if (craftCast(g, in, r->spell, 0)) craftLeft_ = (int)most - 1;
+            break;
+        }
+        case Act::CraftStop: craftLeft_ = 0; g.cancelCast(now); break;
+        case Act::CraftItem: {
+            std::vector<w3n::InvItem> items;
+            for (const w3n::InvItem& it : g.inventory()) {
+                const w3n::ItemInfo* info = g.itemInfo(it.entry);
+                if (info && info->equippable() && info->inventoryType != 18) items.push_back(it);
+            }
+            if (arg >= 0 && arg < (int)items.size()) {
+                craftPick_ = false;
+                craftCast(g, in, craftSel_, items[arg].guid);
+            }
+            break;
+        }
         case Act::StableStable: g.stableCurrentPet(now); stableSel_ = -1; break;
         case Act::StableUnstable:
             for (const w3n::StabledPet& p : g.stable.pets)
