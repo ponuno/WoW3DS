@@ -13,6 +13,7 @@
 // models, water and texture staging use the linear heap; textures go to VRAM
 // first and fall back to linear memory.
 #include "world.h"
+#include "vram_guard.hpp"
 #include "w3d_collision.h"
 #include "w3d_ground.h"
 #include "w3d_liquid.h"
@@ -760,8 +761,8 @@ GpuTex* compositeBody(const PlayerBuild* b) {
     p.maxLevel = 0;
     p.format = GPU_RGB565;
     p.type = GPU_TEX_2D;
-    p.onVram = true;
-    t->vram = C3D_TexInitWithParams(&t->tex, NULL, p);
+    p.onVram = vramRoomFor(A * A * 2);   // 6.43: never the last bytes of VRAM (vram_guard.hpp)
+    t->vram = p.onVram && C3D_TexInitWithParams(&t->tex, NULL, p);
     bool ok = t->vram;
     if (!ok) { p.onVram = false; ok = C3D_TexInitWithParams(&t->tex, NULL, p); }
     if (!ok) noteOom(g_stats.oomUpload, A * A * 2);
@@ -1334,9 +1335,9 @@ bool tryUpload(GpuTex* t) {
         default: p.format = GPU_RGB565;
     }
     p.type = GPU_TEX_2D;
-    p.onVram = true;
+    p.onVram = vramRoomFor(th.dataSize);   // 6.43: never the last bytes of VRAM (vram_guard.hpp)
     C3D_Tex tex;
-    bool vram = C3D_TexInitWithParams(&tex, NULL, p);
+    bool vram = p.onVram && C3D_TexInitWithParams(&tex, NULL, p);
     bool ok = vram;
     if (!ok) { p.onVram = false; ok = C3D_TexInitWithParams(&tex, NULL, p); }
     if (!ok) { noteOom(g_stats.oomUpload, th.dataSize); return false; }
@@ -2274,6 +2275,9 @@ const StreamStats& streamerStats() { return g_stats; }
 // The blocks fit now: tried with real allocations (VRAM is only allocated on the main thread).
 static bool vramBlocksFit(const uint32_t* blocks, int n) {
     void* got[4] = {};
+    uint32_t sum = 0;
+    for (int i = 0; i < n && i < 4; ++i) sum += blocks[i];
+    if (!vramRoomFor(sum)) return false;   // 6.43: probing them must not take the last bytes of VRAM (vram_guard.hpp)
     bool ok = true;
     for (int i = 0; i < n && i < 4 && ok; ++i) ok = (got[i] = vramAlloc(blocks[i])) != nullptr;
     for (int i = 0; i < n && i < 4; ++i) if (got[i]) vramFree(got[i]);

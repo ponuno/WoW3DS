@@ -1,4 +1,5 @@
 #include "portrait.hpp"
+#include "vram_guard.hpp"
 
 #include <3ds.h>
 #include <citro3d.h>
@@ -44,6 +45,8 @@ bool init() {
     shutdown();
     for (int k = 0; k < 2; ++k) {
         Slot& s = g_slot[k];
+        // 6.43: colour + depth, never the last bytes of VRAM (vram_guard.hpp)
+        if (!vramRoomFor(2u * ui::kPortraitSize * ui::kPortraitSize * 4u)) break;
         if (!C3D_TexInitVRAM(&s.tex, (u16)ui::kPortraitSize, (u16)ui::kPortraitSize, GPU_RGBA8)) break;
         s.target = C3D_RenderTargetCreateFromTex(&s.tex, GPU_TEXFACE_2D, 0, C3D_DEPTHTYPE(GPU_RB_DEPTH24));
         if (!s.target) { C3D_TexDelete(&s.tex); break; }
@@ -57,7 +60,7 @@ bool init() {
         snprintf(g_status, sizeof g_status, "portraits: off (no video memory)");
         return false;
     }
-    if (C3D_TexInitVRAM(&g_doll.tex, (u16)ui::kDollSize, (u16)ui::kDollSize, GPU_RGBA8)) {
+    if (vramRoomFor(2u * ui::kDollSize * ui::kDollSize * 4u) && C3D_TexInitVRAM(&g_doll.tex, (u16)ui::kDollSize, (u16)ui::kDollSize, GPU_RGBA8)) {
         g_doll.target = C3D_RenderTargetCreateFromTex(&g_doll.tex, GPU_TEXFACE_2D, 0, C3D_DEPTHTYPE(GPU_RB_DEPTH24));
         if (g_doll.target) {
             C3D_TexSetFilter(&g_doll.tex, GPU_LINEAR, GPU_LINEAR);

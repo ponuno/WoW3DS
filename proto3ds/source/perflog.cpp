@@ -961,11 +961,17 @@ void vramWatch(const char* where) {   // (6.35b; out of the anonymous namespace:
     static const char* lastWhere = "start";
     static int reported = 0;
     const u32 f = vramSpaceFree();
-    // a legitimate step frees at most a few textures / one render target; a pool reset frees nearly all 6 MB at once
+    // a legitimate step frees at most a few textures / one render target - or every texture of the world when leaving it; a pool
+    // re-creation (6.43: libctru re-initialises when both pools ran dry, vram_guard.hpp) leaves nearly all 6 MB free, more than the
+    // render targets (top 400x240 colour + depth, bottom 320x240: ~1 MB) allow
     if (last && f > last + (2u << 20) && reported < 3) {
         ++reported;
-        event("VRAM JUMP: free %lu KB -> %lu KB between \"%s\" and \"%s\" - libctru's VRAM allocator overwritten there", (unsigned long)(last / 1024),
-              (unsigned long)(f / 1024), lastWhere, where);
+        if (f > kVramSize - (600u << 10))
+            event("VRAM JUMP: free %lu KB -> %lu KB between \"%s\" and \"%s\" - libctru's VRAM allocator re-created (all free again over the "
+                  "textures in use)", (unsigned long)(last / 1024), (unsigned long)(f / 1024), lastWhere, where);
+        else
+            event("VRAM: %lu KB freed at once (free %lu KB -> %lu KB) between \"%s\" and \"%s\" (normal when leaving the world)",
+                  (unsigned long)((f - last) / 1024), (unsigned long)(last / 1024), (unsigned long)(f / 1024), lastWhere, where);
     }
     last = f;
     lastWhere = where;

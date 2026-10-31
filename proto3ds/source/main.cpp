@@ -21,6 +21,7 @@
 #include "spell_view.hpp"
 #include "world.h"
 #include "w3d_collision.h"
+#include "vram_guard.hpp"
 #include "glue_data.hpp"
 #include "login.hpp"
 #include "creature_view.hpp"
@@ -728,12 +729,12 @@ int main() {
     // farthest textures out of VRAM (streamerEvictVram, a GX copy each) and tries again.
     constexpr size_t kWideBytes = 240 * 800 * 4 * 2, kRightBytes = 240 * 400 * 4 * 2;
     auto makeTarget = [&](int w, size_t bytes) -> C3D_RenderTarget* {
-        (void)bytes;
-        C3D_RenderTarget* t = C3D_RenderTargetCreate(240, w, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+        // 6.43: never the last bytes of VRAM (vram_guard.hpp): without room it is made only after textures moved out
+        C3D_RenderTarget* t = vramRoomFor((u32)bytes) ? C3D_RenderTargetCreate(240, w, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8) : nullptr;
         if (!t) {   // colour (RGBA8) and depth (24 + stencil 8): two blocks of 240 x w x 4 bytes, each in one piece
             const uint32_t blocks[2] = {240u * (uint32_t)w * 4u, 240u * (uint32_t)w * 4u};
             const uint32_t moved = streamerEvictVram(blocks, 2);
-            t = C3D_RenderTargetCreate(240, w, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+            t = vramRoomFor((u32)bytes) ? C3D_RenderTargetCreate(240, w, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8) : nullptr;
             perf::event("VRAM for a %dx240 target: %lu KB of textures moved to linear memory - %s", w, (unsigned long)(moved / 1024),
                         t ? "created" : "STILL no room");
         }
