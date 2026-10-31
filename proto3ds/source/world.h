@@ -248,9 +248,9 @@ struct Tile {
     int bldgsClosed = 0;
     // 6.42: the portal graph of the tile's building groups (render.cpp portalsReady): built once every group is in, walked once a frame
     std::vector<wmoportal::Node> pnodes;
-    std::vector<uint32_t> pindex;    // the nodes sorted by model
     uint32_t pinstances = 0;         // instances.size() when built
     uint32_t pframe = 0;             // the frame the walk was made in
+    uint32_t pcomp = 0xFFFFFFFFu;    // the building culled this frame (wmoportal::reach), none: nothing culled
     uint8_t pstate = 0;              // 0: not built, 1: built, 2: no group of the tile has portals
     uint32_t readyMs = 0;            // when the ground became drawable (streamerNowMs): objects fade in from there
     // Stage 5.30: a tile is drawn as soon as its terrain and the terrain's textures are in (state Ready); its water when the
@@ -537,6 +537,7 @@ void fxForgetModel(const void* model);   // fx.cpp: a model with effects is bein
 void rendererShutdown();
 void rendererSetProjection(float drawDist);   // also rebuilds the fog LUT
 void rendererSetHorizon(float yards);         // 6.34b: 0 = off; else the ground / far shells to this distance (then call rendererSetProjection)
+void rendererSetViewer(const float* pos);    // 6.42: the character's position (seeds the portal walk too), null: none
 void rendererSetEye(float iod);               // stereoscopic 3D: the projection of one eye (-iod left, +iod right, 0 = mono)
 u32 rendererClearColor(const RenderSettings& rs);
 // Stage 5.29: a login / character screen scene: static models and creatures only (no terrain, sky, water or fog), seen

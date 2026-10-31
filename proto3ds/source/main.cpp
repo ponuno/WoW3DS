@@ -2040,6 +2040,10 @@ int main() {
         perf::mark("rendererPrepare");
         rs.fadeIn = padCfg.fadeIn;   // stage 6.11
         rs.nowMs = streamerNowMs();
+        {   // 6.42: the character's room (a yard above the feet) seeds the portal walk too
+            const float viewer[3] = {pl[0], pl[1], pl[2] + 1.0f};
+            rendererSetViewer(loginUi ? nullptr : viewer);
+        }
         if (!loginUi) rendererPrepare(cam, rs, fc, &spellModels, &creatures);
         perf::mark("C3D_FrameBegin (waiting for the GPU)");
         perf::lap(perf::kPrepare);

@@ -540,13 +540,19 @@ static uint32_t g_nowMs = 0;
 static bool g_fadeOn = true;
 
 // One instance: drawn this frame?
-// 6.42: which interior groups of the WMOs are seen. The tile's building groups become nodes of a portal graph once every one of
-// them is in (a model that is still loading would look like a missing room); each frame the first interior group asks, the graph
-// is walked from the camera's room (or, outside, from the outer groups) through the portals that face the camera and are in view
-// (wmo_portals.cpp). Reached interior groups are drawn up to kPortalDist yards, the others not at all. Packs without portal tables
-// (older converters) keep the old rule: an interior group near the camera is drawn.
+// 6.42: which interior groups of the WMOs are seen (wmo_portals.hpp: WoWee's rules). The tile's building groups become a portal graph
+// once every one of them is in (a model still loading would look like a missing room). Each frame the first interior group asks, the
+// walk decides whether the camera is surely inside a building (then that building's interior groups are drawn only when reached, up to
+// kPortalDist yards) or not (nothing is culled: the old rule, an interior group within its radius + 25 yards). Packs without portal
+// tables (older converters) always keep the old rule.
 static constexpr float kPortalDist = 70.0f;
 static uint32_t g_portalFrame = 0;
+static bool g_haveViewer = false;
+static float g_viewer[3] = {0, 0, 0};
+void rendererSetViewer(const float* p) {
+    g_haveViewer = p != nullptr;
+    if (p) memcpy(g_viewer, p, sizeof g_viewer);
+}
 static bool portalSphere(void* ctx, const float c[3], float r) { return ((const Frustum*)ctx)->sphere(c, r); }
 static bool portalsReady(Tile* t, const Frustum& fr) {
     if (t->pstate == 2) return false;
@@ -577,16 +583,16 @@ static bool portalsReady(Tile* t, const Frustum& fr) {
             n.radius = m->h->radius * in.scale;
             n.inst = i;
             in.pnode = (int32_t)t->pnodes.size();
-            t->pnodes.push_back(n);
+            t->pnodes.push_back(std::move(n));
         }
-        t->pindex = wmoportal::buildIndex(t->pnodes);
+        wmoportal::buildGraph(t->pnodes);
         t->pinstances = (uint32_t)t->instances.size();
         t->pstate = 1;
         t->pframe = 0;
     }
     if (t->pframe != g_portalFrame) {
         t->pframe = g_portalFrame;
-        wmoportal::reach(t->pnodes, t->pindex, fr.cam, portalSphere, (void*)&fr, kPortalDist, g_portalFrame);
+        t->pcomp = wmoportal::reach(t->pnodes, fr.cam, g_haveViewer ? g_viewer : nullptr, portalSphere, (void*)&fr, g_portalFrame);
     }
     return true;
 }
@@ -610,8 +616,9 @@ static inline void collectInstance(Tile* t, Instance& in, const Frustum& fr, con
     // when the camera is near them: from outside they are hidden behind the exterior anyway.
     // 6.42: a group with portals is drawn when the portal walk reached it; without them the old rule
     bool portalGated = false;
-    if (m->interior && m->portals && portalsReady(t, fr)) {
-        if (in.pnode < 0 || t->pnodes[in.pnode].stamp != g_portalFrame) return;
+    if (m->interior && m->portals && portalsReady(t, fr) && t->pcomp != wmoportal::kNone && in.pnode >= 0 &&
+        t->pnodes[in.pnode].comp == t->pcomp) {   // the camera is inside this building: only the rooms the walk reached
+        if (t->pnodes[in.pnode].stamp != g_portalFrame) return;
         portalGated = true;
     }
     float maxD = m->interior ? in.radius + (portalGated ? kPortalDist : 25.0f)
