@@ -3,6 +3,10 @@
 // Drawing: game_ui_widgets.cpp (frame, header, tab bar, widgets), game_ui_tabs.cpp, game_ui_windows.cpp.
 #include "game_ui.hpp"
 
+// 6.46: "/gputest" typed in the chat (main.cpp asks with gameUiTakeGpuTest)
+static bool g_gpuTestAsk = false;
+bool gameUiTakeGpuTest() { const bool r = g_gpuTestAsk; g_gpuTestAsk = false; return r; }
+
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -454,6 +458,7 @@ void GameUi::openChat(w3n::GameSession& g, const Input& in, Output& out, const s
     askText(in, dest.empty() ? std::string(tr("Type a message or /command", "Сообщение или /команда")) : dest + ":", "", false,
             [pre](w3n::GameSession& gg, uint32_t now, const std::string& text) {
                 if (text.empty()) return;
+                if (text == "/gputest") { g_gpuTestAsk = true; return; }   // 6.46: the GPU test (main.cpp), never sent
                 gg.sendTyped(text[0] == '/' ? text : pre + text, now);
             });
 }

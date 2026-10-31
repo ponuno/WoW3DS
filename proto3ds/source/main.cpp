@@ -75,6 +75,37 @@ struct Bench {
     u32 minLinearFree = 0xFFFFFFFF;
 };
 
+// 6.46: the GPU test (/gputest in the chat): the character stands still while one thing at a time is left out, kGtSettle + kGtMeasure
+// seconds each; what the GPU needs a frame (C3D_GetDrawingTime + the early kick's lead, as perf.csv f_gpu_span) and the frame, CPU,
+// draws and triangles go to gputest.txt and perf_events.txt. The difference from the baseline is what that thing costs the GPU.
+struct GpuTestPhase { const char* name; uint32_t off; int doodads, creatures, fog, forceLod, effects; };   // -1: unchanged
+static const GpuTestPhase kGpuTestPhases[] = {
+    {"baseline", 0, -1, -1, -1, -1, -1},
+    {"no texture fetches (all white)", kGtTextures, -1, -1, -1, -1, -1},
+    {"terrain: base layer only", kGtTerrainLayers, -1, -1, -1, -1, -1},
+    {"no terrain", kGtTerrain, -1, -1, -1, -1, -1},
+    {"no buildings (WMO)", kGtBuildings, -1, -1, -1, -1, -1},
+    {"no doodads", 0, 0, -1, -1, -1, -1},
+    {"no units", 0, -1, 0, -1, -1, -1},
+    {"no water / transparent / particles", kGtAlpha, -1, -1, -1, -1, 0},
+    {"no fog", 0, -1, -1, 0, -1, -1},
+    {"lightest LOD everywhere", 0, -1, -1, -1, 2, -1},
+    {"baseline again", 0, -1, -1, -1, -1, -1},
+};
+constexpr int kGpuTestCount = (int)(sizeof kGpuTestPhases / sizeof kGpuTestPhases[0]);
+constexpr float kGtSettle = 1.0f, kGtMeasure = 3.0f;
+struct GpuTest {
+    bool running = false;
+    int phase = 0;
+    u64 phaseStart = 0;
+    float cam0[3] = {0, 0, 0}, yaw0 = 0;   // where the camera was at the start (moving spoils the comparison)
+    bool moved = false;
+    bool baseDoodads = true, baseCreatures = true, baseFog = true;
+    int baseLod = -1, baseEffects = 2;
+    struct Acc { double gpu = 0, frame = 0, cpu = 0, draws = 0, tris = 0; int n = 0; bool moved = false; } acc[kGpuTestCount];
+};
+static GpuTest g_gpuTest;
+
 struct Report {
     char packPath[128] = {0};
     int tilesInPack = 0;
@@ -2047,6 +2078,79 @@ int main() {
         perf::lap(perf::kStream);
         // Stage 6.4: what is visible, decided while the GPU still draws the previous frame (before the wait below)
         perf::mark("rendererPrepare");
+        {   // 6.46: the GPU test - start / stop, this phase's switches
+            GpuTest& gt = g_gpuTest;
+            if (gameUiTakeGpuTest()) {
+                if (gt.running) {
+                    gt.running = false;
+                    perf::event("GPU test stopped by the player");
+                    if (game) game->notice("GPU test stopped", netMs);
+                } else if (online && !loginUi) {
+                    const bool keepDood = rs.doodads, keepCre = rs.creatures, keepFog = rs.fog;
+                    const int keepLod = rs.forceLod, keepFx = rs.effects;
+                    gt = GpuTest();
+                    gt.running = true;
+                    gt.phaseStart = frameStart;
+                    memcpy(gt.cam0, cam.pos, sizeof gt.cam0);
+                    gt.yaw0 = cam.yaw;
+                    gt.baseDoodads = keepDood; gt.baseCreatures = keepCre; gt.baseFog = keepFog; gt.baseLod = keepLod; gt.baseEffects = keepFx;
+                    perf::event("GPU test started: %d phases x %.0f s, top screen %s, draw distance %.0f", kGpuTestCount, kGtSettle + kGtMeasure,
+                                topModeNow == 1 ? "800x240" : "400x240", cam.drawDist);
+                    if (game) game->notice("GPU test: stand still for 45 s (results: gputest.txt)", netMs);
+                }
+            }
+            if (gt.running && (!online || loginUi)) gt.running = false;
+            // restore what the test changed, then this phase's switches
+            rs.gpuTestOff = 0;
+            if (gt.running || gt.phase > 0) {
+                rs.doodads = gt.baseDoodads; rs.creatures = gt.baseCreatures; rs.fog = gt.baseFog;
+                rs.forceLod = gt.baseLod; rs.effects = gt.baseEffects;
+                if (!gt.running) gt.phase = 0;
+            }
+            if (gt.running) {
+                const float tPh = (float)ticksToMs(frameStart - gt.phaseStart) / 1000.0f;
+                if (tPh >= kGtSettle + kGtMeasure) {
+                    const GpuTest::Acc& a = gt.acc[gt.phase];
+                    const double n = a.n ? a.n : 1;
+                    perf::event("GPU test %2d %-36s GPU %5.2f ms  frame %5.2f  CPU %5.2f  draws %5.0f  tris %6.0f%s", gt.phase,
+                                kGpuTestPhases[gt.phase].name, a.gpu / n, a.frame / n, a.cpu / n, a.draws / n, a.tris / n,
+                                a.moved ? "  (moved!)" : "");
+                    ++gt.phase;
+                    gt.phaseStart = frameStart;
+                    if (gt.phase >= kGpuTestCount) {   // done: the table
+                        gt.running = false;
+                        char path[96];
+                        snprintf(path, sizeof path, "%s/gputest.txt", kOutDir);
+                        if (FILE* f = fopen(path, "w")) {
+                            const GpuTest::Acc& b = gt.acc[0];
+                            const double bg = b.n ? b.gpu / b.n : 0;
+                            fprintf(f, "GPU test (6.46): top screen %s, draw distance %.0f, at %.1f %.1f %.1f map %lu\n",
+                                    topModeNow == 1 ? "800x240" : "400x240", cam.drawDist, gt.cam0[0], gt.cam0[1], gt.cam0[2], (unsigned long)curMap);
+                            fprintf(f, "GPU ms = what the GPU needs a frame (C3D drawing time + the early kick's lead); saved = baseline - this\n\n");
+                            fprintf(f, "%-36s %8s %8s %8s %8s %7s %8s\n", "phase", "GPU ms", "saved", "frame", "CPU", "draws", "tris");
+                            for (int k = 0; k < kGpuTestCount; ++k) {
+                                const GpuTest::Acc& a = gt.acc[k];
+                                const double n = a.n ? a.n : 1;
+                                fprintf(f, "%-36s %8.2f %8.2f %8.2f %8.2f %7.0f %8.0f%s\n", kGpuTestPhases[k].name, a.gpu / n, bg - a.gpu / n,
+                                        a.frame / n, a.cpu / n, a.draws / n, a.tris / n, a.moved ? "  (camera moved: not comparable)" : "");
+                            }
+                            fclose(f);
+                        }
+                        perf::event("GPU test finished (gputest.txt)");
+                        if (game) game->notice("GPU test finished: gputest.txt", netMs);
+                    }
+                }
+            }
+            if (gt.running) {
+                const GpuTestPhase& ph = kGpuTestPhases[gt.phase];
+                rs.gpuTestOff = ph.off;
+                if (ph.doodads >= 0) rs.doodads = ph.doodads != 0;
+                if (ph.creatures >= 0) rs.creatures = ph.creatures != 0;
+                if (ph.fog >= 0) rs.fog = ph.fog != 0;
+                if (ph.forceLod >= 0) rs.forceLod = ph.forceLod;
+                if (ph.effects >= 0) rs.effects = ph.effects;
+            }
+        }
         rs.fadeIn = padCfg.fadeIn;   // stage 6.11
         rs.staticBatch = padCfg.staticBatch;   // 6.44
         rs.nowMs = streamerNowMs();
@@ -2175,6 +2279,22 @@ int main() {
             }
         }
 
+        if (g_gpuTest.running) {   // 6.46: the GPU test - this frame into its phase (after the settling second)
+            GpuTest& gt = g_gpuTest;
+            const float tPh = (float)ticksToMs(frameStart - gt.phaseStart) / 1000.0f;
+            const float dx = cam.pos[0] - gt.cam0[0], dy = cam.pos[1] - gt.cam0[1], dz = cam.pos[2] - gt.cam0[2];
+            const bool movedNow = dx * dx + dy * dy + dz * dz > 0.25f || fabsf(cam.yaw - gt.yaw0) > 0.05f;
+            if (tPh >= kGtSettle && gt.phase < kGpuTestCount) {
+                GpuTest::Acc& a = gt.acc[gt.phase];
+                a.gpu += C3D_GetDrawingTime() + (fc.kicks ? fc.kickLeadMs : 0.0f);
+                a.frame += frameMs;
+                a.cpu += cpuMsLast;
+                a.draws += fc.drawCalls;
+                a.tris += fc.tris;
+                ++a.n;
+                a.moved |= movedNow;
+            }
+        }
         if (bench.running && ++bench.warmup > 3) {
             bench.frameMs.push_back(frameMs);
             bench.cpuMs.push_back((float)cpuMsLast);

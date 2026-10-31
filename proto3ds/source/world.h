@@ -527,6 +527,8 @@ struct FrameCounters {
     u32 fading = 0;                  // stage 6.11: instances drawn alpha-blended this frame (appearing / dissolving at the edge)
 };
 
+// 6.46: the GPU test's switches (RenderSettings::gpuTestOff): one thing at a time is left out to see what it costs the GPU
+constexpr uint32_t kGtTextures = 1, kGtTerrainLayers = 2, kGtTerrain = 4, kGtBuildings = 8, kGtAlpha = 16;
 struct RenderSettings {
     bool doodads = true;
     bool fog = true;
@@ -547,6 +549,7 @@ struct RenderSettings {
     // so the faded instances cost the transparent pass). pad.txt 'fadein'.
     bool fadeIn = true;
     uint32_t nowMs = 0;          // streamerNowMs() of this frame (main.cpp sets it)
+    uint32_t gpuTestOff = 0;     // 6.46: what the GPU test (/gputest) switches off this phase (kGt* bits)
     bool staticBatch = true;     // 6.44: small static doodads drawn merged per cell (pad.txt 'staticbatch')
 };
 

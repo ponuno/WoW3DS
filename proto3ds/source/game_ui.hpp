@@ -372,3 +372,6 @@ private:
     uint64_t inspect_ = 0;             // UI stage 9: the player Panel::Inspect shows
     static constexpr int kTop = 20, kTabY = 196, kTabH = 44, kContentH = kTabY - kTop;
 };
+
+// 6.46: true once after the player typed /gputest in the chat (the GPU test in main.cpp)
+bool gameUiTakeGpuTest();

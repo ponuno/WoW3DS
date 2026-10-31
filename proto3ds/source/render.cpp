@@ -282,9 +282,11 @@ struct Frustum {
     }
 };
 
+static uint32_t g_gtOff = 0;   // 6.46: RenderSettings::gpuTestOff of this frame (the GPU test)
 struct BindCache {
     GpuTex* unit[3] = {nullptr, nullptr, nullptr};   // (6.32: was [2] - the terrain's third texture (5.47) wrote past it)
     void bind(int u, GpuTex* t, FrameCounters& fc) {
+        if (g_gtOff & kGtTextures) t = streamerWhiteTexture();   // 6.46: the GPU test without texture fetches from memory
         if (unit[u] == t) return;
         C3D_TexBind(u, &t->tex);
         unit[u] = t;
@@ -363,9 +365,14 @@ void drawTerrain(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, cons
         envLayers = layers;
         C3D_TexEnv* env = C3D_GetTexEnv(0);
         C3D_TexEnvInit(env);
-        C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE1, GPU_TEXTURE0, GPU_PRIMARY_COLOR);
-        C3D_TexEnvOpRgb(env, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_ALPHA);
-        C3D_TexEnvFunc(env, C3D_RGB, GPU_INTERPOLATE);
+        if (layers == 1) {   // 6.46: the GPU test - the base layer alone (one texture fetch a pixel)
+            C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE0, GPU_TEXTURE0, GPU_TEXTURE0);
+            C3D_TexEnvFunc(env, C3D_RGB, GPU_REPLACE);
+        } else {
+            C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE1, GPU_TEXTURE0, GPU_PRIMARY_COLOR);
+            C3D_TexEnvOpRgb(env, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_ALPHA);
+            C3D_TexEnvFunc(env, C3D_RGB, GPU_INTERPOLATE);
+        }
         C3D_TexEnvSrc(env, C3D_Alpha, GPU_CONSTANT, GPU_CONSTANT, GPU_CONSTANT);
         C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
         C3D_TexEnvColor(env, 0xFFFFFFFF);
@@ -457,8 +464,8 @@ void drawTerrain(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, cons
     for (Tile* t : streamerReadyTiles()) {
         if (tileBeyond(t->tx, t->ty, cam.pos, fr.maxDist)) continue;   // 6.34c: its far ground mesh is drawn instead (above)
         const W3dTerrainHeader* h = t->th;
-        const uint16_t* tex2 = w3d_terrain_tex2(h, t->terr);
-        setTerrainEnv(tex2 ? 3 : 2);
+        const uint16_t* tex2 = (g_gtOff & kGtTerrainLayers) ? nullptr : w3d_terrain_tex2(h, t->terr);
+        setTerrainEnv((g_gtOff & kGtTerrainLayers) ? 1 : tex2 ? 3 : 2);
         C3D_BufInfo* buf = C3D_GetBufInfo();
         BufInfo_Init(buf);
         BufInfo_Add(buf, t->terr + h->offVertices, sizeof(W3dTerrainVertex), 3, 0x210);
@@ -494,7 +501,7 @@ void drawTerrain(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, cons
             if (rs.forceLod >= 0) lod = rs.forceLod;
             if (i < t->batchMaxLod.size() && lod > t->batchMaxLod[i]) lod = t->batchMaxLod[i];   // stage 6.13: no ground lost at holes
             bc.bind(0, t->ttex[b.tex0], fc);
-            bc.bind(1, t->ttex[b.tex1], fc);
+            if (!(g_gtOff & kGtTerrainLayers)) bc.bind(1, t->ttex[b.tex1], fc);
             if (tex2) bc.bind(2, t->ttex[tex2[i]], fc);
             C3D_DrawElements(GPU_TRIANGLES, b.indexCount[lod], C3D_UNSIGNED_SHORT, idx + b.firstIndex[lod]);
             ++fc.drawCalls;
@@ -775,6 +782,7 @@ static inline void collectInstance(Tile* t, Instance& in, const Frustum& fr, con
     if (in.radius <= 0) in.radius = m->h->radius * in.scale;
     if (in.radius <= 0) return;
     if (!rs.doodads && !m->building) return;
+    if ((g_gtOff & kGtBuildings) && m->building) return;   // 6.46: the GPU test
     if (in.sgroup >= 0 && rs.staticBatch && in.sgroup < (int32_t)t->sgroups.size()) {   // 6.44: merged with its cell's doodads?
         Tile::StaticGroup& g = t->sgroups[in.sgroup];
         if (g.frame != g_portalFrame) staticDecide(t, g, fr, rs, fc);
@@ -2006,6 +2014,7 @@ static void agePoints(const RenderSettings& rs) {
 static bool g_prepared = false;
 void rendererPrepare(const Camera& cam, const RenderSettings& rsIn, FrameCounters& fc, const std::vector<SceneModel>* effects,
                      const std::vector<CreatureInstance>* creatures) {
+    g_gtOff = rsIn.gpuTestOff;   // 6.46
     clearVisible();
     RenderSettings rs = rsIn;
     if (rs.underwater) rs.fog = true;
@@ -2050,6 +2059,7 @@ void rendererDraw(C3D_RenderTarget* target, const Camera& cam, const RenderSetti
                   const std::vector<SceneModel>* effects) {
     (void)target;
     RenderSettings rs = rsIn;
+    g_gtOff = rs.gpuTestOff;   // 6.46
     if (rs.underwater) rs.fog = true;   // the water is never clear: the fog switch only concerns the open air
     float f[3];
     cam.forward(f);
@@ -2083,7 +2093,7 @@ void rendererDraw(C3D_RenderTarget* target, const Camera& cam, const RenderSetti
     perf::mark("draw: sky / terrain");
     if (!rs.underwater) drawSky(view, fc);
     pass(FrameCounters::kSky);
-    drawTerrain(cam, view, fr, rs, fc);
+    if (!(g_gtOff & kGtTerrain)) drawTerrain(cam, view, fr, rs, fc);
     pass(FrameCounters::kTerrain);
     if (rs.gpuKick) gpuKick(fc);   // stage 6.3: the GPU draws the sky and the ground while the models are sorted out
     agePoints(rs);
@@ -2099,12 +2109,13 @@ void rendererDraw(C3D_RenderTarget* target, const Camera& cam, const RenderSetti
     if (creatures && rs.creatures) drawCreatures(cam, view, fr, rs, *creatures, fc);
     pass(FrameCounters::kCreatures);
     perf::mark("draw: water / transparent");
-    drawWater(cam, view, fr, rs, fc);
+    const bool alphaOn = !(g_gtOff & kGtAlpha);   // 6.46: the GPU test - no water, no transparent pass, no particles
+    if (alphaOn) drawWater(cam, view, fr, rs, fc);
     pass(FrameCounters::kWater);
-    drawModels(cam, view, rs, true, fc);
+    if (alphaOn) drawModels(cam, view, rs, true, fc);
     pass(FrameCounters::kAlpha);
     perf::mark("draw: particles");
-    drawFx(cam, view, rs, fc, effects);
+    if (alphaOn) drawFx(cam, view, rs, fc, effects);
     pass(FrameCounters::kFx);
     // Drop per-frame instance pointers: tiles/models may be freed before the next frame (prepared: rendererEndFrame does,
     // after the last eye).
