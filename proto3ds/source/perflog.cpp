@@ -164,7 +164,7 @@ struct Window {
     Acc phase[kPhases];
     Acc passMs[FrameCounters::kPasses], passDraws[FrameCounters::kPasses], passTris[FrameCounters::kPasses];
     Acc draws, tris, binds, batches, lod[3], water, inst, bld, markers, units, bones, pose, fxMs, fxQuads, fxParticles, fxGlows,
-        fxSources, eyes, kicks, kickLead, kickMs, mtxMs, chCull, chTest, fading, mlod0, mlod1, mlod2, farUnits, sharedPoses;
+        fxSources, eyes, kicks, kickLead, kickMs, mtxMs, chCull, chTest, fading, mlod0, mlod1, mlod2, farUnits, sharedPoses, sbGroups, sbMembers, sbDraws, sbBuilt;
     Acc stUpd, stDone, stPlayers, stUpload, stTiles, stSched, stDefer;
     uint32_t stJobsDone = 0, stUploads = 0;
     uint64_t stUploadBytes = 0;
@@ -449,6 +449,7 @@ void endFrame(const FrameCounters& fc) {
     w.mtxMs.add(fc.matrixMs); w.chCull.add(fc.chunksCulled); w.chTest.add(fc.chunksTested); w.fading.add(fc.fading);
     w.mlod0.add(fc.lodDraws[0]); w.mlod1.add(fc.lodDraws[1]); w.mlod2.add(fc.lodDraws[2]);
     w.farUnits.add(fc.farUnits); w.sharedPoses.add(fc.sharedPoses);
+    w.sbGroups.add(fc.sbGroups); w.sbMembers.add(fc.sbMembers); w.sbDraws.add(fc.sbDraws); w.sbBuilt.add(fc.sbBuilt);   // 6.44
     const StreamStats& s = streamerStats();
     w.stUpd.add(s.updateMsLastFrame); w.stDone.add(s.doneMsLastFrame); w.stPlayers.add(s.playersMsLastFrame);
     w.stUpload.add(s.uploadMsLastFrame); w.stTiles.add(s.tilesMsLastFrame); w.stSched.add(s.scheduleMsLastFrame);
@@ -625,6 +626,9 @@ void second(const Context& c) {
     r.num("r_mtx_ms", w.mtxMs.avg(), 3);   // stage 6.10: the instances' matrices, once a frame
     r.num("r_chunks_cull", w.chCull.avg(), 0); r.num("r_chunks_test", w.chTest.avg(), 0);
     r.num("r_fading", w.fading.avg(), 1);
+    // 6.44: small doodads drawn merged: groups, the doodads in them, their draw calls, groups built (a second's sum shows as avg * frames)
+    r.num("r_sb_groups", w.sbGroups.avg(), 1); r.num("r_sb_members", w.sbMembers.avg(), 0); r.num("r_sb_draws", w.sbDraws.avg(), 0);
+    r.num("r_sb_built", w.sbBuilt.avg(), 2);
     // stage 6.12: draws of models and units by mesh level (0 = full), far units and how many of them reused a pose
     r.num("r_mlod0", w.mlod0.avg(), 0); r.num("r_mlod1", w.mlod1.avg(), 0); r.num("r_mlod2", w.mlod2.avg(), 0);
     r.num("r_far_units", w.farUnits.avg(), 1); r.num("r_shared_poses", w.sharedPoses.avg(), 1);   // stage 6.11: instances drawn alpha-blended (appearing / edge of the distance)

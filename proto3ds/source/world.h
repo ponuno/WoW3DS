@@ -112,6 +112,7 @@ struct Instance {
     float lightModel[3];
     uint32_t animMs = 0;             // stage 5.35: age of an animated effect (Model::fxAnim)
     uint8_t lod = 0;                 // stage 6.12: the level drawn this frame (renderer; 0 = full)
+    int32_t sgroup = -1;             // 6.44: index in Tile::sgroups (a small static doodad merged with its neighbours), -1: drawn alone
     int32_t pnode = -1;              // 6.42: index in Tile::pnodes (a building group of a tile with portals), -1: none
     uint16_t bldg = 0;               // stage 6.11: 1 + index in Tile::bldgs of the building (WMO groups sharing one transform), 0 = none
     uint16_t owner = 0;              // 6.33: 1 + the building whose doodad (tree, lamp, bench of the WMO) it is: shown only with it
@@ -246,6 +247,32 @@ struct Tile {
     };
     std::vector<Bldg> bldgs;
     int bldgsClosed = 0;
+    // 6.44: small static doodads merged per 32-yd cell, size class and owning building (render.cpp, static_batch.hpp). The plan is made
+    // once every model of the tile is in; a group's buffers are built when it is first near enough to be drawn merged.
+    struct StaticBatch {
+        GpuTex* tex = nullptr;
+        uint8_t blend = 0, flags = 0;
+        W3dModelVertex* v = nullptr;     // linear memory (freed with the tile, deferred)
+        uint16_t* idx = nullptr;         // linear memory
+        uint32_t first[3] = {0, 0, 0}, count[3] = {0, 0, 0};   // full / lighter levels
+        float scale[3] = {1, 1, 1}, offset[3] = {0, 0, 0}, uvScale = 1;
+    };
+    struct StaticGroup {
+        std::vector<uint32_t> members;   // indices into 'instances'
+        float center[3] = {0, 0, 0}, radius = 0;   // a sphere around every member's sphere; the batches' origin
+        float minR = 0, maxR = 0;
+        uint16_t owner = 0;              // the building that must be shown (Instance::owner), 0: none
+        uint8_t state = 0;               // 0 not built, 1 built, 2 cannot be (out of memory)
+        uint32_t bornMs = 0;             // the latest member became drawable
+        uint32_t firstBatch = 0, batchCount = 0;
+        uint32_t frame = 0;              // the frame of the decision below
+        bool merged = false;             // drawn merged this frame (its members are not drawn alone)
+    };
+    std::vector<StaticGroup> sgroups;
+    std::vector<StaticBatch> sbatches;
+    uint32_t sbytes = 0;                 // linear memory of the batches
+    uint32_t sinstances = 0;             // instances.size() when planned
+    uint8_t sstate = 0;                  // 0 not planned, 1 planned
     // 6.42: the portal graph of the tile's building groups (render.cpp portalsReady): built once every group is in, walked once a frame
     std::vector<wmoportal::Node> pnodes;
     uint32_t pinstances = 0;         // instances.size() when built
@@ -493,6 +520,7 @@ struct FrameCounters {
     double kickMs = 0;               // CPU time of the kicks (cache flush + split)
     double prepareMs = 0;            // stage 6.4: rendererPrepare's poses + particles (its visibility is passMs[kCollect])
     double matrixMs = 0;             // stage 6.10: the visible instances' matrices (inside prepareMs)
+    u32 sbGroups = 0, sbMembers = 0, sbDraws = 0, sbBuilt = 0;   // 6.44: merged groups drawn / their doodads / draw calls / groups built this frame
     u32 chunksCulled = 0, chunksTested = 0;   // stage 6.10: tile chunks rejected whole / whose instances were tested
     u32 lodDraws[3] = {0, 0, 0};     // stage 6.12: model + creature draws by mesh level
     u32 sharedPoses = 0, farUnits = 0;   // stage 6.12: far units posed together / their number
@@ -519,6 +547,7 @@ struct RenderSettings {
     // so the faded instances cost the transparent pass). pad.txt 'fadein'.
     bool fadeIn = true;
     uint32_t nowMs = 0;          // streamerNowMs() of this frame (main.cpp sets it)
+    bool staticBatch = true;     // 6.44: small static doodads drawn merged per cell (pad.txt 'staticbatch')
 };
 
 // Stage 5: world objects drawn as coloured direction markers until creature models exist.

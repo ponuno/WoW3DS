@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include <algorithm>
+#include <map>
 #include <unordered_map>
 
 #include "w3d_anim.h"
@@ -23,6 +24,7 @@
 #include "fx_shbin.h"
 #include "fx.hpp"
 #include "perflog.hpp"
+#include "static_batch.hpp"
 
 namespace {
 
@@ -593,6 +595,171 @@ static bool portalsReady(Tile* t, const Frustum& fr) {
     return true;
 }
 
+// 6.44: small static doodads merged per cell (static_batch.hpp). Plan: once every model of the tile is in, the eligible instances are
+// grouped by 32-yd cell, size class and owning building (two or more members). Decision, once a frame per group (the first member that
+// is collected asks): merged when the whole group lies inside the doodads' solid distance (no member at the dissolving edge), every member
+// has finished fading in and its building is shown; then its batches are drawn and its members skipped. A group's buffers are built the
+// first time it would be merged (one group a frame, kStaticCapBytes of linear memory over all tiles); until then, and on every "no",
+// its members are drawn one by one as before.
+static constexpr uint32_t kStaticCapBytes = 8u << 20;
+struct ActiveBatch { const Tile::StaticBatch* b; const Tile::StaticGroup* g; uint8_t lod; };
+static std::vector<ActiveBatch> g_activeBatches;
+static bool g_batchesSorted = false;
+static int g_staticBuildsLeft = 0;
+static uint32_t g_staticBytes = 0;
+
+static bool staticPlan(Tile* t) {
+    if (t->sstate == 1 && t->sinstances == t->instances.size()) return true;
+    for (const Instance& in : t->instances)
+        if (in.model->state != AssetState::Ready) return false;   // (a model still loading: plan later)
+    if (t->sstate == 1) {   // (the instances changed: the old buffers go with the tile; a fresh plan)
+        for (Instance& in : t->instances) in.sgroup = -1;
+    }
+    for (Instance& in : t->instances) in.sgroup = -1;
+    t->sgroups.clear();
+    struct Key {
+        int cx, cy, b;
+        uint16_t owner;
+        bool operator<(const Key& o) const {
+            return cx != o.cx ? cx < o.cx : cy != o.cy ? cy < o.cy : b != o.b ? b < o.b : owner < o.owner;
+        }
+    };
+    std::map<Key, uint32_t> byKey;
+    std::vector<Tile::StaticGroup> groups;
+    for (uint32_t i = 0; i < t->instances.size(); ++i) {
+        const Instance& in = t->instances[i];
+        const Model* m = in.model;
+        if (!m->h || m->building || m->fx || m->meshHidden || m->fxAnim.a || m->uva || in.bldg || !(in.scale > 0)) continue;
+        const float r = m->h->radius * in.scale;
+        const int b = sbatch::bucketOf(r);
+        if (b < 0 || !sbatch::eligibleModel(m->blob, m->size)) continue;
+        const Key k{(int)floorf(in.pos[0] / sbatch::kCell), (int)floorf(in.pos[1] / sbatch::kCell), b, in.owner};
+        auto it = byKey.find(k);
+        if (it == byKey.end()) {
+            it = byKey.emplace(k, (uint32_t)groups.size()).first;
+            groups.emplace_back();
+            groups.back().owner = in.owner;
+        }
+        groups[it->second].members.push_back(i);
+    }
+    for (Tile::StaticGroup& g : groups) {
+        if (g.members.size() < 2) continue;   // (a group of one is no gain)
+        float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+        g.minR = 1e30f;
+        g.maxR = 0;
+        for (uint32_t i : g.members) {
+            const Instance& in = t->instances[i];
+            const float r = in.model->h->radius * in.scale;
+            g.minR = std::min(g.minR, r);
+            g.maxR = std::max(g.maxR, r);
+            for (int k = 0; k < 3; ++k) { lo[k] = std::min(lo[k], in.pos[k] - r); hi[k] = std::max(hi[k], in.pos[k] + r); }
+        }
+        for (int k = 0; k < 3; ++k) g.center[k] = 0.5f * (lo[k] + hi[k]);
+        g.radius = 0;
+        for (uint32_t i : g.members) {
+            const Instance& in = t->instances[i];
+            const float dx = in.pos[0] - g.center[0], dy = in.pos[1] - g.center[1], dz = in.pos[2] - g.center[2];
+            g.radius = std::max(g.radius, sqrtf(dx * dx + dy * dy + dz * dz) + in.model->h->radius * in.scale);
+        }
+        t->sgroups.push_back(std::move(g));
+    }
+    for (uint32_t gi = 0; gi < t->sgroups.size(); ++gi)
+        for (uint32_t i : t->sgroups[gi].members) t->instances[i].sgroup = (int32_t)gi;
+    t->sinstances = (uint32_t)t->instances.size();
+    t->sstate = 1;
+    return true;
+}
+
+static bool staticBuild(Tile* t, Tile::StaticGroup& g) {
+    std::vector<sbatch::MemberIn> mem;
+    std::vector<std::vector<uintptr_t>> keys(g.members.size());
+    uint32_t born = 0;
+    for (size_t k = 0; k < g.members.size(); ++k) {
+        const Instance& in = t->instances[g.members[k]];
+        const Model* m = in.model;
+        if (!m->drawable) return false;   // (its textures are not in yet: later)
+        born = laterMs(born, m->drawableMs);
+        keys[k].resize(m->h->submeshCount);
+        for (uint32_t s = 0; s < m->h->submeshCount; ++s)
+            keys[k][s] = (uintptr_t)(m->subs[s].tex == W3D_NO_TEXTURE || m->subs[s].tex >= m->tex.size() ? streamerWhiteTexture()
+                                                                                                            : m->tex[m->subs[s].tex]);
+        sbatch::MemberIn mi;
+        mi.blob = m->blob;
+        memcpy(mi.pos, in.pos, sizeof mi.pos);
+        memcpy(mi.rot, in.rot, sizeof mi.rot);
+        mi.scale = in.scale;
+        mi.texKeys = keys[k].data();
+        mem.push_back(mi);
+    }
+    std::vector<sbatch::BatchOut> out = sbatch::build(mem, g.center);
+    const uint32_t first = (uint32_t)t->sbatches.size();
+    for (sbatch::BatchOut& o : out) {
+        Tile::StaticBatch b;
+        b.tex = (GpuTex*)o.tex;
+        b.blend = o.blend;
+        b.flags = o.flags;
+        const size_t vb = o.v.size() * sizeof(W3dModelVertex), ib = o.idx.size() * sizeof(uint16_t);
+        b.v = (W3dModelVertex*)linearMemAlign(vb, 16);
+        b.idx = (uint16_t*)linearAlloc(ib);
+        if (!b.v || !b.idx) {   // out of linear memory: this group stays single (what was made of it is freed with the tile)
+            if (b.v) linearFree(b.v);
+            if (b.idx) linearFree(b.idx);
+            g.state = 2;
+            g.firstBatch = first;
+            g.batchCount = 0;
+            return false;
+        }
+        memcpy(b.v, o.v.data(), vb);
+        memcpy(b.idx, o.idx.data(), ib);
+        GSPGPU_FlushDataCache(b.v, vb);
+        GSPGPU_FlushDataCache(b.idx, ib);
+        memcpy(b.first, o.first, sizeof b.first);
+        memcpy(b.count, o.count, sizeof b.count);
+        memcpy(b.scale, o.scale, sizeof b.scale);
+        memcpy(b.offset, o.offset, sizeof b.offset);
+        b.uvScale = o.uvScale;
+        t->sbatches.push_back(b);
+        t->sbytes += (uint32_t)(vb + ib);
+        g_staticBytes += (uint32_t)(vb + ib);
+    }
+    g.firstBatch = first;
+    g.batchCount = (uint32_t)(t->sbatches.size() - first);
+    g.bornMs = born;
+    g.state = 1;
+    return true;
+}
+
+// Is the group drawn merged this frame? (its batches are queued when it is, and in view)
+static void staticDecide(Tile* t, Tile::StaticGroup& g, const Frustum& fr, const RenderSettings& rs, FrameCounters& fc) {
+    g.frame = g_portalFrame;
+    g.merged = false;
+    if (g.state == 2) return;
+    const Tile::Bldg* og = g.owner && g.owner <= t->bldgs.size() ? &t->bldgs[g.owner - 1] : nullptr;
+    if (og && !og->open) return;
+    const float dx = g.center[0] - fr.cam[0], dy = g.center[1] - fr.cam[1], dz = g.center[2] - fr.cam[2];
+    const float dist = sqrtf(dx * dx + dy * dy + dz * dz);
+    const float solid = 0.75f * (40.0f + rs.doodadRange * g.minR);   // (collectInstance: a doodad dissolves past 75% of its distance)
+    if (dist + g.radius > solid) return;
+    if (g.state == 0) {
+        if (g_staticBuildsLeft <= 0 || g_staticBytes >= kStaticCapBytes) return;
+        --g_staticBuildsLeft;
+        if (!staticBuild(t, g)) return;
+        ++fc.sbBuilt;
+    }
+    if (g_fadeOn) {   // (every member done fading in, its building too)
+        uint32_t born = laterMs(g.bornMs, t->readyMs);
+        if (og) born = laterMs(born, og->openMs);
+        if (g_nowMs - born < kFadeMs) return;
+    }
+    g.merged = true;
+    if (!fr.sphere(g.center, g.radius)) return;   // every member is out of view
+    const float dn = std::max(0.0f, dist - g.radius);
+    const uint8_t lod = rs.forceLod >= 0 ? (uint8_t)std::min(rs.forceLod, 2) : w3d_lod_for(dn * dn, g.maxR);
+    for (uint32_t k = 0; k < g.batchCount; ++k) g_activeBatches.push_back({&t->sbatches[g.firstBatch + k], &g, lod});
+    ++fc.sbGroups;
+    fc.sbMembers += (u32)g.members.size();
+}
+
 static inline void collectInstance(Tile* t, Instance& in, const Frustum& fr, const RenderSettings& rs, FrameCounters& fc) {
     Model* m = in.model;
     if (!m->drawable || !m->h) return;   // stage 5.30: each model as soon as it and its textures are in
@@ -605,6 +772,11 @@ static inline void collectInstance(Tile* t, Instance& in, const Frustum& fr, con
     if (in.radius <= 0) in.radius = m->h->radius * in.scale;
     if (in.radius <= 0) return;
     if (!rs.doodads && !m->building) return;
+    if (in.sgroup >= 0 && rs.staticBatch && in.sgroup < (int32_t)t->sgroups.size()) {   // 6.44: merged with its cell's doodads?
+        Tile::StaticGroup& g = t->sgroups[in.sgroup];
+        if (g.frame != g_portalFrame) staticDecide(t, g, fr, rs, fc);
+        if (g.merged) return;
+    }
     // Small doodads fade out long before the draw distance (bushes ~110 yd,
     // big trees reach the fog); this is what keeps draw calls in budget.
     // Buildings are kept to the draw distance.
@@ -668,6 +840,13 @@ static void chunkRadii(Tile* t, Tile::Chunk& ch) {
 
 void collectModels(const Frustum& fr, const RenderSettings& rs, FrameCounters& fc) {
     ++g_portalFrame;
+    g_activeBatches.clear();   // 6.44
+    g_batchesSorted = false;
+    g_staticBuildsLeft = 1;
+    g_staticBytes = 0;
+    for (Tile* t : streamerReadyTiles()) g_staticBytes += t->sbytes;
+    if (rs.staticBatch)
+        for (Tile* t : streamerReadyTiles()) staticPlan(t);
     for (Tile* t : streamerReadyTiles()) {
         if (t->chunks.empty()) {   // (no grid: a tile built elsewhere)
             for (Instance& in : t->instances) collectInstance(t, in, fr, rs, fc);
@@ -699,6 +878,12 @@ void collectModels(const Frustum& fr, const RenderSettings& rs, FrameCounters& f
 static std::vector<C3D_Mtx> g_instMv;
 static bool g_mvReady = false;
 static void buildMatrices(const Camera& cam, const C3D_Mtx& view) {
+    // 6.44: models in the order of their first part's texture - neighbours that share one skip the bind (BindCache)
+    std::sort(g_activeModels.begin(), g_activeModels.end(), [](const Model* a, const Model* b) {
+        const GpuTex* ta = a->h && a->h->submeshCount && a->subs[0].tex < a->tex.size() ? a->tex[a->subs[0].tex] : nullptr;
+        const GpuTex* tb = b->h && b->h->submeshCount && b->subs[0].tex < b->tex.size() ? b->tex[b->subs[0].tex] : nullptr;
+        return ta != tb ? ta < tb : a < b;
+    });
     size_t n = 0;
     for (Model* m : g_activeModels) n += m->visible.size();
     g_instMv.resize(n);
@@ -839,6 +1024,55 @@ void drawModels(const Camera& cam, const C3D_Mtx& view, const RenderSettings& rs
                 ++fc.lodDraws[in->lod < 3 ? in->lod : 2];
                 fc.tris += count / 3;
             }
+        }
+    }
+    // 6.44: the merged small doodads (opaque / cut-out parts only), sorted by texture
+    if (!blendedPass && !g_activeBatches.empty()) {
+        if (!g_batchesSorted) {
+            std::sort(g_activeBatches.begin(), g_activeBatches.end(), [](const ActiveBatch& a, const ActiveBatch& b) {
+                return a.b->tex != b.b->tex ? a.b->tex < b.b->tex : a.b->flags < b.b->flags;
+            });
+            g_batchesSorted = true;
+        }
+        if (tintNow != 0xFFFFFFFFu || tintAlphaConst) {
+            C3D_TexEnvSrc(tintEnv, C3D_Both, GPU_PREVIOUS, GPU_CONSTANT, GPU_PRIMARY_COLOR);
+            C3D_TexEnvFunc(tintEnv, C3D_Both, GPU_MODULATE);
+            C3D_TexEnvColor(tintEnv, 0xFFFFFFFFu);
+            C3D_DirtyTexEnv(tintEnv);
+            tintNow = 0xFFFFFFFFu;
+            tintAlphaConst = false;
+        }
+        if (uvMoved) { setUvIdentity(); uvMoved = false; }
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, g_modelSh.uLight, 0.30f, 0.40f, 0.866f, 0);   // (world space: the batches are not turned)
+        const Tile::StaticGroup* lastG = nullptr;
+        float lastUnlit = -1;
+        for (const ActiveBatch& ab : g_activeBatches) {
+            const Tile::StaticBatch& b = *ab.b;
+            const int lod = ab.lod < 3 ? ab.lod : 2;
+            if (!b.count[lod]) continue;
+            if (ab.g != lastG) {
+                C3D_Mtx mv;
+                camRelative(&mv, view, ab.g->center, cam.pos);
+                C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_modelSh.uMV, &mv);
+                lastG = ab.g;
+            }
+            C3D_BufInfo* buf = C3D_GetBufInfo();
+            BufInfo_Init(buf);
+            BufInfo_Add(buf, b.v, sizeof(W3dModelVertex), 3, 0x210);
+            C3D_FVUnifSet(GPU_VERTEX_SHADER, g_modelSh.uScale, b.scale[0], b.scale[1], b.scale[2], b.uvScale);
+            C3D_FVUnifSet(GPU_VERTEX_SHADER, g_modelSh.uOffset, b.offset[0], b.offset[1], b.offset[2], 0);
+            setModelBlend(b.blend, b.flags & W3D_SUBF_TWO_SIDED, rs.modelsNoCull);
+            const float unlit = (b.flags & W3D_SUBF_UNLIT) ? 1.0f : 0.0f;
+            if (unlit != lastUnlit) {
+                C3D_FVUnifSet(GPU_VERTEX_SHADER, g_modelSh.uLightParams, 0.55f, 0.6f, 0, unlit);
+                lastUnlit = unlit;
+            }
+            bc.bind(0, b.tex ? b.tex : streamerWhiteTexture(), fc);
+            C3D_DrawElements(GPU_TRIANGLES, b.count[lod], C3D_UNSIGNED_SHORT, b.idx + b.first[lod]);
+            ++fc.drawCalls;
+            ++fc.sbDraws;
+            ++fc.lodDraws[lod];
+            fc.tris += b.count[lod] / 3;
         }
     }
     C3D_AlphaTest(false, GPU_ALWAYS, 0);
@@ -1745,6 +1979,7 @@ static void collectAll(const Frustum& fr, const RenderSettings& rs, FrameCounter
 static void clearVisible() {   // per-frame instance pointers: tiles / models may be freed before the next frame
     for (Model* m : g_activeModels) { m->visible.clear(); m->fadeCount = 0; }
     g_activeModels.clear();
+    g_activeBatches.clear();   // 6.44: points into tiles that may be freed before the next frame (and the login scene draws none)
     g_mvReady = false;
 }
 

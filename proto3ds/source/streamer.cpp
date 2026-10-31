@@ -866,6 +866,11 @@ void finishTileRelease(TileExt* t) {
         g_stats.geomBytes -= t->waterSize;
         deferFree(FreeKind::Linear, t->water);
     }
+    for (Tile::StaticBatch& b : t->sbatches) {   // 6.44: the merged doodads' buffers (the GPU may still read them this frame)
+        if (b.v) deferFree(FreeKind::Linear, b.v);
+        if (b.idx) deferFree(FreeKind::Linear, b.idx);
+    }
+    t->sbatches.clear();
     if (t->plcm) free(t->plcm);
     if (t->liq) { free(t->liq); t->liq = nullptr; }
     if (t->grnd) { free(t->grnd); t->grnd = nullptr; }

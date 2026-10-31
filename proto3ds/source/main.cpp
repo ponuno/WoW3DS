@@ -2040,6 +2040,7 @@ int main() {
         // Stage 6.4: what is visible, decided while the GPU still draws the previous frame (before the wait below)
         perf::mark("rendererPrepare");
         rs.fadeIn = padCfg.fadeIn;   // stage 6.11
+        rs.staticBatch = padCfg.staticBatch;   // 6.44
         rs.nowMs = streamerNowMs();
         {   // 6.42: the character's room (a yard above the feet) seeds the portal walk too
             const float viewer[3] = {pl[0], pl[1], pl[2] + 1.0f};

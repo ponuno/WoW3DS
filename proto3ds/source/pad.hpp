@@ -56,6 +56,7 @@ struct PadConfig {
     bool gpuKick = true;             // stage 6.3: the GPU starts on the ground / opaque models before the frame is built
                                      // (with VSync off: Stormwind 44.5 -> 57 FPS). 6f/6g froze with it - the lists' last words were
                                      // not flushed (fixed in 6.8): on by default again (6.9). pad.txt key 'gpuearly'.
+    bool staticBatch = true;         // 6.44: small static doodads drawn merged (pad.txt 'staticbatch')
     bool fadeIn = true;              // stage 6.11: new objects fade in, far doodads dissolve (pad.txt 'fadein')
     bool vsync = false;              // stage 6.4: wait for a vertical blank before every frame (frames snap to 16.7 / 33.3 ms)
     bool load(const char* path);
