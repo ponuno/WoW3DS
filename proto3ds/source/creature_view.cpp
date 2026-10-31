@@ -506,6 +506,23 @@ void CreatureView::noteUnit(const CreatureSeen& c) {
     if (diag_.size() < 64) diag_.push_back(buf);
 }
 
+// 6.43c: the first time a display is drawn, what it plays: the animation, its frames and how many bones it poses against Stand (a model in its
+// bind pose - the wind riders' T-pose - shows "poses 0 of N" or "seq -1")
+void CreatureView::notePlay(const CreatureSeen& c, const uint8_t* blob, const AnimChoice& a, bool riding) {
+    if (notedPlay_.size() >= 96 || !notedPlay_.insert(c.displayId | (c.isGo ? 0x80000000u : 0u)).second) return;
+    const W3dCreatureHeader* h = w3d_creature(blob);
+    const W3dAnimSeq* sq = seqAt(blob, a.seq);
+    const int stand = w3d_find_seq(blob, W3D_ANIM_STAND);
+    char buf[240];
+    snprintf(buf, sizeof buf, "ANIM PLAY %s display %lu: anim %d (seq %d of %lu, %lu frames, %lu ms, poses %lu of %lu bones; Stand %s, poses %lu) "
+             "stand state %d, flying %d, riding %d, move flags 0x%lX",
+             c.isGo ? "object" : "unit", (unsigned long)c.displayId, sq ? (int)sq->animId : -1, a.seq, (unsigned long)h->seqCount,
+             sq ? (unsigned long)sq->frames : 0ul, sq ? (unsigned long)sq->durationMs : 0ul, (unsigned long)w3d_seq_posed_bones(blob, a.seq),
+             (unsigned long)h->boneCount, stand < 0 ? "missing" : w3d_seq_animated(blob, stand) ? "moves" : "still",
+             (unsigned long)w3d_seq_posed_bones(blob, stand), (int)c.standState, (int)c.flying, (int)riding, (unsigned long)c.moveFlags);
+    if (diag_.size() < 160) diag_.push_back(buf);
+}
+
 void CreatureView::update(const std::vector<CreatureSeen>& seen, uint32_t nowMs, std::vector<CreatureInstance>& out) {
     out.clear();
     ++frame_;
@@ -599,6 +616,7 @@ void CreatureView::update(const std::vector<CreatureSeen>& seen, uint32_t nowMs,
             out.push_back(mi);
         }
         AnimChoice a = u.anim.update(blob, c, riding, nowMs);
+        notePlay(c, blob, a, riding);
         ci.seq = a.seq;
         ci.timeMs = u.anim.timeMs();
         ci.loop = a.loop;

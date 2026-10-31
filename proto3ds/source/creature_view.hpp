@@ -7,6 +7,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <set>
 #include <vector>
 
 #include "world.h"
@@ -142,6 +143,8 @@ private:
     std::unordered_set<const uint8_t*> noted_;
     void noteModel(const uint8_t* blob, uint32_t displayId);
     void noteUnit(const CreatureSeen& c);
+    void notePlay(const CreatureSeen& c, const uint8_t* blob, const AnimChoice& a, bool riding);   // 6.43c: what a model plays (log)
+    std::set<uint32_t> notedPlay_;
     std::unordered_set<uint32_t> notedDisplays_;
     uint32_t frame_ = 0;
     int ready_ = 0;
