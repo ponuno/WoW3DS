@@ -216,6 +216,7 @@ float tunable(const char* name, float def) {
 float g_cam[3] = {0, 0, 0};
 float g_fwd[2] = {0, 0};
 bool g_haveFwd = false, g_boost = false;
+bool g_worldWanted = true;   // 6.37: streamerSetWorldWanted
 bool groundClass(uint8_t cls) { return cls == kClsTile || cls == kClsColl || cls == kClsTerrainTex; }
 float readKey(const float a[3], uint8_t cls) {
     if (cls == kClsUnit) return 0.0f;
@@ -1944,6 +1945,7 @@ void streamerSetView(float yaw) {
 }
 
 void streamerSetBoost(bool on) { g_boost = on; }
+void streamerSetWorldWanted(bool on) { g_worldWanted = on; }
 
 // The texture side of the frame: player bodies and texture uploads. Inside a frame the GX copies are queued with the
 // frame's GPU work (no wait); outside one each waits for the GPU (loading loops, where it is idle anyway).
@@ -2047,6 +2049,7 @@ void streamerUpdate(const float camPos[3], float drawDist, bool uploadsLater) {
 
     // 3b. Collision near the camera only (load within kCollLoadDist of a tile, drop beyond kCollDropDist).
     for (TileExt* t : g_tiles) {
+        if (!g_worldWanted) break;   // 6.37: login screens (the tiles are released below)
         if (t->doomed || !t->th) continue;
         float x0 = (32.0f - t->ty - 1.0f) * kTileSize, y0 = (32.0f - t->tx - 1.0f) * kTileSize;
         float dx = std::max({x0 - camPos[0], 0.0f, camPos[0] - (x0 + kTileSize)});
@@ -2086,8 +2089,9 @@ void streamerUpdate(const float camPos[3], float drawDist, bool uploadsLater) {
 
     for (TileExt* t : std::vector<TileExt*>(g_tiles)) {
         if (t->doomed) continue;
-        if (abs(t->tx - ctx) > keep || abs(t->ty - cty) > keep) releaseTile(t);
+        if (!g_worldWanted || abs(t->tx - ctx) > keep || abs(t->ty - cty) > keep) releaseTile(t);
     }
+    if (!g_worldWanted) r = -1;   // 6.37: nothing wanted on the login screens
 
     struct Want { int tx, ty; float d2; bool ahead; };
     std::vector<Want> want;
@@ -2102,7 +2106,7 @@ void streamerUpdate(const float camPos[3], float drawDist, bool uploadsLater) {
     // 6.24: read ahead - the tiles around the point 300 yards in front of the camera that lie beyond the wanted ring (still
     // within 'keep', so they are not released again): by the time the walker gets there their ground is in. Only into free
     // terrain slots (never evicting for it), after everything of the ring.
-    if (g_haveFwd && !g_stats.heapShrunk) {
+    if (g_haveFwd && !g_stats.heapShrunk && g_worldWanted) {
         const float px = camPos[0] + g_fwd[0] * 300.0f, py = camPos[1] + g_fwd[1] * 300.0f;
         const int ptx = (int)floorf(32.0f - py / kTileSize), pty = (int)floorf(32.0f - px / kTileSize);
         for (int dx = -1; dx <= 1; ++dx)

@@ -360,6 +360,9 @@ void streamerUploadTextures();
 // take most of the frame then).
 void streamerSetView(float yaw);
 void streamerSetBoost(bool on);
+// 6.37: false on the login screens - no world tiles are read (the ones loaded are released): the glue scene gets the card and
+// the VRAM to itself. ensureMap and the world switch it back on.
+void streamerSetWorldWanted(bool on);
 // Ready tiles for rendering.
 const std::vector<Tile*>& streamerReadyTiles();
 // 6.24: the far ground (w3d_farlod.h): the tiles to draw this frame - within maxDist of the camera, without detailed ground.

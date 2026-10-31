@@ -48,6 +48,8 @@ static int g_maxRingTiles = 0;   // 6.31
 static size_t g_farLoadedFar = 0, g_farLoadedWrong = 0;   // 6.34c
 static std::map<int, int> g_ownMax;   // 6.33: owned doodads per tile (most seen)
 static size_t g_ownWrong = 0;
+static int g_worldOffProblems = 0;   // 6.37
+
 int main(int argc, char** argv) {
     if (argc < 2) return 2;
     PackIndex index;
@@ -119,8 +121,32 @@ int main(int argc, char** argv) {
             cam[0] = cx; cam[1] = cy + f * std::atof(std::getenv("CAM_WALK")); cam[2] = 60.0f;
         }
         float dist = std::getenv("CAM_WALK") ? 250.0f : (f / 500) % 2 ? 800.0f : 250.0f;   // switches the 3x3 / 5x5 radius too
+        // 6.37: WORLD_OFF=a,b - the login screens between frames a and b: no world tile is read, the loaded ones go
+        static int offA = -1, offB = -1;
+        static bool offParsed = false;
+        if (!offParsed) { offParsed = true; if (const char* wo = std::getenv("WORLD_OFF")) std::sscanf(wo, "%d,%d", &offA, &offB); }
+        const bool worldOff = f >= offA && f < offB;
+        streamerSetWorldWanted(!worldOff);
         if (inFrame) { streamerUpdate(cam, dist, true); streamerUploadTextures(); }   // stage 6: the main loop's way
         else streamerUpdate(cam, dist);
+        if (offA >= 0) {
+            static uint32_t loadsAtOff = 0, requestedInOff = 0, readyAtEnd = 0, loadsAfter = 0;
+            static bool reported = false;
+            const StreamStats& ws = streamerStats();
+            if (f == offA + 60) loadsAtOff = ws.tileLoads;   // (tiles already in flight may still land in the first frames)
+            if (worldOff && f > offA + 60) {
+                if (ws.tilesReady > 0) ++requestedInOff;
+                if (f == offB - 1) readyAtEnd = (uint32_t)ws.tilesReady + (uint32_t)ws.tilesLoading;
+            }
+            if (f == offB + 400) loadsAfter = ws.tileLoads;
+            if (!reported && f == offB + 400) {
+                reported = true;
+                const bool good = requestedInOff == 0 && readyAtEnd == 0 && loadsAfter > loadsAtOff;
+                std::printf("WORLD OFF (login screens): frames with world tiles %u, tiles left at the end %u, loads after %u -> %u: %s\n",
+                            requestedInOff, readyAtEnd, loadsAtOff, loadsAfter, good ? "PASS" : "FAIL");
+                if (!good) ++g_worldOffProblems;
+            }
+        }
         {   // 6.24: the far ground - drawn only for tiles without their detailed ground, its buffers always valid
             static std::vector<FarDraw> far;
             GpuTex* atlas = nullptr;
@@ -712,6 +738,7 @@ int main(int argc, char** argv) {
             if (!good) ++problems;
         }
     }
+    problems += g_worldOffProblems;
     bool ok = problems == 0 && leakLin == 0 && leakTex == 0 && s.tileLoads > 0 && walkBad == 0 && chunkProblems == 0 && chunksSeen > 0 && bldgProblems == 0 && bldgCompleteClosed == 0;
     std::printf("STREAMER: %s\n", ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;
