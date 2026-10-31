@@ -1643,6 +1643,7 @@ int main() {
                 voices.update(*game, soundWorld.tables(), netMs, soundReqs);   // UI stage 8: NPC greetings, our error lines, emotes
                 for (const SoundReq& q : soundReqs) {
                     if (q.stop) audio::stopTag(q.tag);
+                    else if (q.event) audio::play(q.event);
                     else audio::playAt(q.sound, q.x, q.y, q.z, q.self, q.tag, q.gain, q.loopMs);
                 }
                 perf::lap(perf::kSound);

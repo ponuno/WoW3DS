@@ -126,6 +126,7 @@ bool GameSession::handleTrade(uint16_t op, const Bytes& data, uint32_t nowMs) {
                 case kBack: trade.theyAccepted = trade.weAccepted = false; break;
                 case kComplete:
                     ++tradesDone;
+                    sound("trade");
                     addLocal("Trade complete.", nowMs);
                     trade = TradeState();
                     break;

@@ -101,7 +101,19 @@ void SoundWorld::update(GameSession& g, const float pos[3], bool moving, bool on
                 stop.tag = w.src | 1;
                 out.push_back(stop);
                 const snd::SpellSounds* ss = tables_.spell(w.spell);
-                if (!ss) break;
+                // 6.39: our own spell without a sound of its own (this client's data gave none) still goes off with a built-in one
+                const bool mine = w.src == me && me != 0;
+                if (!ss || (!ss->cast && !ss->missile && !ss->impact)) {
+                    if (mine && w.spell != w3n::kSpellAttack && nowMs - castBlipMs_ > 250) {
+                        castBlipMs_ = nowMs;
+                        SoundReq r;
+                        r.event = "spellcast";
+                        r.self = true;
+                        r.what = "spellcast";
+                        out.push_back(r);
+                    }
+                    break;
+                }
                 at(g, w.src, ss->cast ? ss->cast : ss->missile, "cast", out);
                 for (int i = 0; i < w.nTargets && i < 2; ++i)
                     if (w.targets[i] && (w.targets[i] != w.src || !ss->cast)) at(g, w.targets[i], ss->impact, "spellimpact", out);
@@ -113,6 +125,14 @@ void SoundWorld::update(GameSession& g, const float pos[3], bool moving, bool on
                 stop.stop = true;
                 stop.tag = w.src | 1;
                 out.push_back(stop);
+                if (w.src == me && me != 0 && nowMs - failBlipMs_ > 400) {   // 6.39: our own cast fizzles
+                    failBlipMs_ = nowMs;
+                    SoundReq r;
+                    r.event = "spellfail";
+                    r.self = true;
+                    r.what = "spellfail";
+                    out.push_back(r);
+                }
                 break;
             }
         }

@@ -305,6 +305,7 @@ void GameSession::equipItem(const InvItem& it, uint32_t nowMs) {
     w.u8(it.bag);
     w.u8(it.slot);
     send(CMSG_AUTOEQUIP_ITEM, w.b, nowMs);
+    sound("equip");
 }
 
 void GameSession::unequipItem(const InvItem& it, uint32_t nowMs) {
@@ -457,6 +458,7 @@ bool GameSession::handleItems(uint16_t op, const Bytes& data, uint32_t nowMs) {
             r.u32(); r.u32();   // suffix factor, random property
             uint32_t count = r.u32();
             if (r.bad || who != self_) return true;
+            sound("lootitem");   // 6.39: the item lands in the bags
             std::string nm = itemName(entry);
             std::string t = std::string(created ? "You create: " : received ? "You receive item: " : "You receive loot: ") +
                             "[" + nm + "]" + (count > 1 ? "x" + std::to_string(count) : std::string()) + ".";

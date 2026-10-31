@@ -100,6 +100,7 @@ bool GameSession::sellItem(const InvItem& it, uint32_t nowMs) {
     w.u64(it.guid);
     w.u8(0);   // the whole stack
     send(CMSG_SELL_ITEM, w.b, nowMs);
+    sound("coin");
     if (pendingSells_.size() >= 8) pendingSells_.erase(pendingSells_.begin());
     pendingSells_.push_back({it.guid, it.entry, it.count, sellValue(it), nowMs ? nowMs : 1});
     return true;
@@ -142,6 +143,7 @@ void GameSession::repairAll(uint32_t nowMs) {
     w.u64(vendor.npc);
     w.u64(0);
     send(CMSG_REPAIR_ITEM, w.b, nowMs);
+    sound("coin");
     ++repairs;
     pendingRepair_ = {money(), nowMs ? nowMs : 1};
 }
@@ -326,6 +328,7 @@ bool GameSession::handleVendor(uint16_t op, const Bytes& data, uint32_t nowMs) {
                         if (count > 1) what += " x" + std::to_string(count);
                         uint32_t bundles = it.buyCount ? std::max<uint32_t>(1, count / it.buyCount) : 1;
                         addLocal("Bought " + what + " for " + moneyText(it.price * bundles) + ".", nowMs);
+                        sound("coin");
                     }
             ++bought;
             return true;

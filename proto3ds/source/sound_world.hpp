@@ -18,6 +18,7 @@ struct SoundReq {
     bool stop = false;
     uint32_t loopMs = 0;         // with a tag: repeat the clip while it is shorter than this (a cast's length) or until stopped
     float gain = 1.0f;           // volume factor (own footsteps are quiet)
+    const char* event = nullptr; // a built-in / sfx.w3ds event instead of a world sound (audio::play): our own spell with no data
     const char* what = "";       // for the tests / the debug page: "impact", "wound", "death", "aggro", "step", ...
 };
 
@@ -42,7 +43,7 @@ private:
     struct UnitState { bool dead = false; uint64_t target = 0; uint32_t aggroMs = 0; uint32_t seenMs = 0; };
     std::unordered_map<uint64_t, UnitState> units_;
     float stepDist_ = 0, lastPos_[3] = {0, 0, 0};
-    uint32_t strokeMs_ = 0, biteMs_ = 0;
+    uint32_t strokeMs_ = 0, biteMs_ = 0, castBlipMs_ = 0, failBlipMs_ = 0;
     bool havePos_ = false;
     uint32_t now_ = 0;
 };

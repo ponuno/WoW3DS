@@ -57,6 +57,7 @@ void GameSession::takeMailMoney(uint32_t mailId, uint32_t nowMs) {
     w.u64(mail.box);
     w.u32(mailId);
     send(CMSG_MAIL_TAKE_MONEY, w.b, nowMs);
+    sound("coin");
 }
 
 void GameSession::takeMailItem(uint32_t mailId, uint32_t nowMs) {

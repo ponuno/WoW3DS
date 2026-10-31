@@ -45,7 +45,10 @@ const std::vector<std::pair<std::string, std::vector<std::string>>> kDefaultEven
     {"questaccept", {"igQuestListSelect", "igQuestListOpen"}},
     {"questcomplete", {"igQuestListComplete"}},
     {"questabandon", {"igQuestLogAbandonQuest"}},
-    {"coin", {"LOOTWINDOWCOINSOUND"}},
+    {"coin", {"LOOTWINDOWCOINSOUND", "LootWindowCoinSound", "*coinsound"}},
+    // 6.39: an item landing in the bags / being put on (the names are guesses; the built-in blip fills in when this client has none)
+    {"lootitem", {"PickUpCloth_Leather01", "PickUpMetalSmall", "PickUpGems"}},
+    {"equip", {"PickUpMetalLarge", "PickUpCloth_Leather01"}},
     {"levelup", {"LevelUp", "LEVELUPSOUND"}},
     // an area explored for the first time (stage 5.45): the exact names are a guess; "*word" takes the first SoundEntries name
     // containing the word (alphabetical), so an odd spelling in this client is still found (the log says which one it took)

@@ -312,6 +312,7 @@ bool init(const char* soundDir) {
     g_soundsTxt = dir + "/sounds.txt";
     const bool pack = g_sfx.load((dir + "/sfx.w3ds").c_str(), [](size_t n) { return linearAlloc(n); }, linearFree);
     if (!pack) g_sfx.synthesize([](size_t n) { return linearAlloc(n); }, linearFree);
+    else g_sfx.synthesizeMissing([](size_t n) { return linearAlloc(n); }, linearFree);   // 6.39: no event stays silent
     DSP_FlushDataCache(nullptr, 0);
     const bool music = g_music.load(soundDir);
     for (int i = 0; i < 2; ++i) {

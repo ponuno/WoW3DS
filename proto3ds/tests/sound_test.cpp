@@ -163,6 +163,19 @@ int main(int argc, char** argv) {
     for (const char* e : {"click", "tab", "open", "close", "coin", "levelup", "questcomplete", "whisper", "targethostile",
                           "bagsopen", "npcclose", "questaccept", "invite", "targetfriend"})
         CHECK(synth.pick(e) != nullptr, "built-in %s", e);
+    for (const char* e : {"lootitem", "spellcast", "spellfail", "equip", "trade", "questupdate"})   // 6.39 (the last three by fallback)
+        CHECK(synth.pick(e) != nullptr, "built-in %s", e);
+    {   // 6.39: a loaded pack gets the built-in sound for what it lacks, and keeps its own for what it has
+        snd::SfxBank b;
+        CHECK(b.load((dir + "/sfx.w3ds").c_str()), "reload the pack");
+        const bool hadSpell = b.pick("spellcast") != nullptr;
+        const snd::Clip* own = b.pick("click");
+        const size_t added = b.synthesizeMissing();
+        CHECK(!hadSpell && added > 0, "the pack lacks spellcast: %zu built-in sounds added", added);
+        CHECK(b.pick("spellcast") && b.pick("spellfail") && b.pick("lootitem"), "the new events sound");
+        CHECK(!own || b.pick("click") == own || b.pick("click")->samples == own->samples, "the pack's own click is kept");
+        CHECK(b.synthesizeMissing() == 0, "once only");
+    }
 
     std::printf("SOUND: %d checks, %d failed -> %s\n", g_ok + g_fail, g_fail, g_fail ? "FAIL" : "PASS");
     return g_fail ? 1 : 0;

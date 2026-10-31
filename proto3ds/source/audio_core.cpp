@@ -23,7 +23,7 @@ const char* fallbackOf(const std::string& e) {
         {"questsopen", "open"}, {"questsclose", "close"}, {"npcopen", "open"}, {"npcclose", "close"},
         {"auctionopen", "npcopen"}, {"auctionclose", "npcclose"}, {"questabandon", "close"}, {"mail", "click"},
         {"questaccept", "click"}, {"tab", "click"}, {"targetfriend", "targethostile"}, {"targetneutral", "targethostile"},
-        {"invite", "whisper"},
+        {"invite", "whisper"}, {"equip", "lootitem"}, {"trade", "coin"}, {"questupdate", "click"}, {"error", "targetlost"},
     };
     for (const auto& [a, b] : k)
         if (e == a) return b;
@@ -48,7 +48,9 @@ SfxBank::~SfxBank() { release(); }
 
 void SfxBank::release() {
     if (blob_) (free_ ? free_ : ::free)(blob_);
+    if (extra_) (extraFree_ ? extraFree_ : ::free)(extra_);
     blob_ = nullptr;
+    extra_ = nullptr;
     size_ = 0;
     clips_.clear();
 }
@@ -94,6 +96,17 @@ const Clip* SfxBank::pick(const char* event) {
 
 bool SfxBank::synthesize(Alloc a, Free f) {
     release();
+    return synthInto(a, f, false, nullptr);
+}
+
+size_t SfxBank::synthesizeMissing(Alloc a, Free f) {
+    size_t n = 0;
+    if (!blob_ || extra_) return 0;
+    synthInto(a, f, true, &n);
+    return n;
+}
+
+bool SfxBank::synthInto(Alloc a, Free f, bool missingOnly, size_t* added) {
     // tone(ms, f0 -> f1 Hz, amplitude) segments per event; quiet, short, sine with a quick fade
     struct Seg { int ms; float f0, f1, amp; };
     struct Ev { const char* name; std::vector<Seg> segs; };
@@ -109,11 +122,26 @@ bool SfxBank::synthesize(Alloc a, Free f) {
         {"whisper", {{90, 1400, 1400, 0.16f}, {120, 1000, 1000, 0.14f}}},
         {"targethostile", {{35, 700, 600, 0.14f}}},
         {"targetlost", {{35, 500, 400, 0.10f}}},
+        // 6.39: an item picked up / created; our own spell going off or fizzling when the client has no sound for it
+        {"lootitem", {{35, 900, 1300, 0.16f}, {55, 1500, 1100, 0.12f}}},
+        {"spellcast", {{40, 300, 900, 0.14f}, {110, 900, 500, 0.12f}}},
+        {"spellfail", {{90, 360, 240, 0.16f}, {70, 230, 160, 0.14f}}},
     };
     const uint32_t rate = 22050;
     std::vector<std::pair<const char*, std::vector<int16_t>>> pcm;
     size_t total = 0;
     for (const Ev& ev : evs) {
+        if (missingOnly) {   // the pack's own sound, or the one the event falls back to, is better than a blip
+            bool have = false;
+            std::string e = ev.name;
+            for (int depth = 0; depth < 4 && !e.empty() && !have; ++depth) {
+                auto it = clips_.find(w3dSndHash(e.c_str()));
+                have = it != clips_.end() && !it->second.empty();
+                const char* fb = fallbackOf(e);
+                e = fb ? fb : "";
+            }
+            if (have) continue;
+        }
         std::vector<int16_t> s;
         for (const Seg& g : ev.segs) {
             const int n = g.ms * (int)rate / 1000;
@@ -128,15 +156,17 @@ bool SfxBank::synthesize(Alloc a, Free f) {
         total += s.size() * 2;
         pcm.push_back({ev.name, std::move(s)});
     }
-    blob_ = (uint8_t*)(a ? a(total) : malloc(total));
-    free_ = f;
-    if (!blob_) return false;
-    size_ = total;
+    if (pcm.empty()) return true;
+    uint8_t* mem = (uint8_t*)(a ? a(total) : malloc(total));
+    if (!mem) return false;
+    if (missingOnly) { extra_ = mem; extraFree_ = f; }
+    else { blob_ = mem; free_ = f; size_ = total; }
     size_t off = 0;
     for (auto& [name, s] : pcm) {
-        memcpy(blob_ + off, s.data(), s.size() * 2);
-        clips_[w3dSndHash(name)].push_back({(const int16_t*)(blob_ + off), (uint32_t)s.size(), rate, 1.0f});
+        memcpy(mem + off, s.data(), s.size() * 2);
+        clips_[w3dSndHash(name)].push_back({(const int16_t*)(mem + off), (uint32_t)s.size(), rate, 1.0f});
         off += s.size() * 2;
+        if (added) ++*added;
     }
     return true;
 }
