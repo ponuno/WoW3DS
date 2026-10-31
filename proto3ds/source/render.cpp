@@ -602,7 +602,9 @@ static bool portalsReady(Tile* t, const Frustum& fr) {
 // first time it would be merged (one group a frame, kStaticCapBytes of linear memory over all tiles); until then, and on every "no",
 // its members are drawn one by one as before.
 static constexpr uint32_t kStaticCapBytes = 8u << 20;
-struct ActiveBatch { const Tile::StaticBatch* b; const Tile::StaticGroup* g; uint8_t lod; };
+// (6.44b: a tile and indices, not pointers into its vectors - a group built later in the same frame grows Tile::sbatches and moved the batches
+// queued before it: the GPU then read freed memory as vertex addresses and counts and hung on the command list)
+struct ActiveBatch { Tile* t; uint32_t batch, group; uint8_t lod; };
 static std::vector<ActiveBatch> g_activeBatches;
 static bool g_batchesSorted = false;
 static int g_staticBuildsLeft = 0;
@@ -755,7 +757,8 @@ static void staticDecide(Tile* t, Tile::StaticGroup& g, const Frustum& fr, const
     if (!fr.sphere(g.center, g.radius)) return;   // every member is out of view
     const float dn = std::max(0.0f, dist - g.radius);
     const uint8_t lod = rs.forceLod >= 0 ? (uint8_t)std::min(rs.forceLod, 2) : w3d_lod_for(dn * dn, g.maxR);
-    for (uint32_t k = 0; k < g.batchCount; ++k) g_activeBatches.push_back({&t->sbatches[g.firstBatch + k], &g, lod});
+    const uint32_t gi = (uint32_t)(&g - t->sgroups.data());
+    for (uint32_t k = 0; k < g.batchCount; ++k) g_activeBatches.push_back({t, g.firstBatch + k, gi, lod});
     ++fc.sbGroups;
     fc.sbMembers += (u32)g.members.size();
 }
@@ -1030,7 +1033,9 @@ void drawModels(const Camera& cam, const C3D_Mtx& view, const RenderSettings& rs
     if (!blendedPass && !g_activeBatches.empty()) {
         if (!g_batchesSorted) {
             std::sort(g_activeBatches.begin(), g_activeBatches.end(), [](const ActiveBatch& a, const ActiveBatch& b) {
-                return a.b->tex != b.b->tex ? a.b->tex < b.b->tex : a.b->flags < b.b->flags;
+                const Tile::StaticBatch& x = a.t->sbatches[a.batch];
+                const Tile::StaticBatch& y = b.t->sbatches[b.batch];
+                return x.tex != y.tex ? x.tex < y.tex : x.flags < y.flags;
             });
             g_batchesSorted = true;
         }
@@ -1047,14 +1052,16 @@ void drawModels(const Camera& cam, const C3D_Mtx& view, const RenderSettings& rs
         const Tile::StaticGroup* lastG = nullptr;
         float lastUnlit = -1;
         for (const ActiveBatch& ab : g_activeBatches) {
-            const Tile::StaticBatch& b = *ab.b;
+            if (ab.batch >= ab.t->sbatches.size() || ab.group >= ab.t->sgroups.size()) continue;   // (never: a guard)
+            const Tile::StaticBatch& b = ab.t->sbatches[ab.batch];
+            const Tile::StaticGroup* g = &ab.t->sgroups[ab.group];
             const int lod = ab.lod < 3 ? ab.lod : 2;
-            if (!b.count[lod]) continue;
-            if (ab.g != lastG) {
+            if (!b.count[lod] || !b.v || !b.idx) continue;
+            if (g != lastG) {
                 C3D_Mtx mv;
-                camRelative(&mv, view, ab.g->center, cam.pos);
+                camRelative(&mv, view, g->center, cam.pos);
                 C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_modelSh.uMV, &mv);
-                lastG = ab.g;
+                lastG = g;
             }
             C3D_BufInfo* buf = C3D_GetBufInfo();
             BufInfo_Init(buf);
