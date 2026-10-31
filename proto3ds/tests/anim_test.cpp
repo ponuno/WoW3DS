@@ -446,9 +446,54 @@ static void gameObjects() {
     }
 }
 
+
+// 6.43: a model of 8 bones whose Stand poses all of them but whose kneeling sequences have no keys at all (the converter found none):
+// a wind rider at the flight master (stand state 8) must stand, not show its bind pose (the T-pose).
+static void brokenSequences() {
+    const std::vector<uint16_t> ids = {W3D_ANIM_STAND, W3D_ANIM_KNEEL_START, W3D_ANIM_KNEEL_LOOP, 75, W3D_ANIM_SIT_GROUND, W3D_ANIM_WALK};
+    const uint32_t nb = 8;
+    std::vector<uint8_t> b(sizeof(W3dCreatureHeader) + nb * sizeof(W3dBone) + ids.size() * sizeof(W3dAnimSeq) + ids.size() * nb * 12 + 16, 0);
+    W3dCreatureHeader* h = (W3dCreatureHeader*)b.data();
+    h->boneCount = nb;
+    h->seqCount = (uint32_t)ids.size();
+    h->offBones = sizeof(W3dCreatureHeader);
+    h->offSeqs = h->offBones + nb * sizeof(W3dBone);
+    h->transScale = 1;
+    h->seatBone = -1;
+    const uint32_t offChan = h->offSeqs + (uint32_t)(ids.size() * sizeof(W3dAnimSeq));
+    W3dBone* bone = (W3dBone*)(b.data() + h->offBones);
+    for (uint32_t i = 0; i < nb; ++i) bone[i].parent = -1;
+    W3dAnimSeq* s = (W3dAnimSeq*)(b.data() + h->offSeqs);
+    uint32_t* ch = (uint32_t*)(b.data() + offChan);
+    for (size_t i = 0; i < ids.size(); ++i) {
+        s[i].animId = ids[i];
+        s[i].frames = 1;
+        s[i].durationMs = 1000;
+        s[i].offChannels = offChan + (uint32_t)(i * nb * 12);
+        // Stand, sitting and walking pose every bone (a constant key at offset 0); the three kneeling ones none
+        const bool keyed = ids[i] == W3D_ANIM_STAND || ids[i] == W3D_ANIM_SIT_GROUND || ids[i] == W3D_ANIM_WALK;
+        for (uint32_t k = 0; k < nb * 3; ++k) ch[i * nb * 3 + k] = keyed && k % 3 == 0 ? 0u : W3D_CHAN_NONE;
+    }
+    const uint8_t* m = b.data();
+    CHECK(w3d_seq_posed_bones(m, 0) == nb && w3d_seq_posed_bones(m, 2) == 0, "posed bones counted");
+    CHECK(w3d_seq_broken(m, 2) && w3d_seq_broken(m, 3) && !w3d_seq_broken(m, 0) && !w3d_seq_broken(m, 4), "the keyless sequences are broken, Stand / sit are not");
+    Clock k;
+    k.blob = m;
+    CreatureSeen c{};
+    c.standState = 8;
+    CHECK(k.id(c) == W3D_ANIM_STAND && k.id(c, 1100) == W3D_ANIM_STAND, "stand state 8 with keyless kneeling: Stand, not the bind pose");
+    c.standState = 1;
+    k.id(c);
+    CHECK(k.id(c, 1100) == W3D_ANIM_SIT_GROUND, "a keyed sitting sequence still plays");
+    c.standState = 0;
+    c.loopAnim = 75;
+    CHECK(k.id(c, 1100) == W3D_ANIM_STAND, "a keyless looping emote: Stand");
+}
+
 int main(int argc, char** argv) {
     gameObjects();
     stateMachine();
+    brokenSequences();
     sessionSide(argc > 1 ? argv[1] : "/tmp/w3d_stage5/fight.w3dl");
     std::printf("ANIM: %d checks, %d failed -> %s\n", g_ok + g_fail, g_fail, g_fail ? "FAIL" : "PASS");
     return g_fail ? 1 : 0;

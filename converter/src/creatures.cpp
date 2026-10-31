@@ -469,7 +469,7 @@ bool convertCreatures(const Options& o, const DataDir& data, PackWriter& pack, C
         ModelInfo& mi = models[key];
         std::vector<uint8_t> bytes;
         if (!data.read(m2, bytes)) { mi.info.error = "missing"; ++st.creatureModelsFailed; return mi; }
-        wowee::pipeline::M2Model m = wowee::pipeline::M2Loader::load(bytes);
+        wowee::pipeline::M2Model m = loadM2(bytes);
         if (m.batches.empty() || m.indices.empty()) {
             std::vector<uint8_t> skin;
             if (data.read(wowee::pipeline::skinPathForM2(m2), skin)) wowee::pipeline::M2Loader::loadSkin(skin, m);

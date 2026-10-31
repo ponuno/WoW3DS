@@ -490,6 +490,11 @@ int  printPackInfo(const std::string& path);   // validator, returns 0 if pack i
 
 // Stage 6.13: particle emitters of an M2 (model.cpp; also used for creature / game object models: a brazier's fire) and the
 // fx section + footer behind a blob (the same for MODL and CMDL blobs).
+// 6.43 (m2_fix.cpp): M2Loader::load, then the bone tracks of a 1.12 / 2.x file rebuilt with inclusive key ranges (WoWee dropped
+// single-key sequences: T-poses). Use it for every M2 whose bones are baked. g_m2TracksFixed counts the bone tracks it changed.
+wowee::pipeline::M2Model loadM2(const std::vector<uint8_t>& bytes);
+size_t fixVanillaBoneTracks(const std::vector<uint8_t>& bytes, wowee::pipeline::M2Model& m);
+extern std::atomic<size_t> g_m2TracksFixed;
 size_t m2Emitters(const wowee::pipeline::M2Model& mdl, PackWriter& pack, const DataDir& data, const Options& o, ConvStats& st,
                   bool fire, size_t maxN, std::vector<W3dFxEmitter>& emitters, std::vector<uint32_t>& fxTex,
                   std::vector<uint32_t>* bones);

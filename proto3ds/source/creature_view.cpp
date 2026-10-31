@@ -8,12 +8,17 @@
 
 namespace {
 
+// The first of the ids the model has - 6.43: a sequence that would show the bind pose (w3d_seq_broken: no keys for it) counts as missing
 int findSeq(const uint8_t* blob, std::initializer_list<uint16_t> ids) {
     for (uint16_t id : ids) {
         int s = w3d_find_seq(blob, id);
-        if (s >= 0) return s;
+        if (s >= 0 && !w3d_seq_broken(blob, s)) return s;
     }
     return -1;
+}
+int findSeqOne(const uint8_t* blob, uint16_t id) {   // (an emote / emote state by its id: the same test)
+    const int s = w3d_find_seq(blob, id);
+    return s >= 0 && !w3d_seq_broken(blob, s) ? s : -1;
 }
 
 const W3dAnimSeq* seqAt(const uint8_t* blob, int s) {
@@ -110,7 +115,7 @@ int idleSeq(const uint8_t* blob, const CreatureSeen& c) {
     }
     if (s >= 0) return s;
     if (c.loopAnim) {
-        s = w3d_find_seq(blob, c.loopAnim);
+        s = findSeqOne(blob, c.loopAnim);
         if (s >= 0) return s;
     }
     if (c.looting) {
@@ -301,7 +306,7 @@ AnimChoice UnitAnimator::update(const uint8_t* blob, const CreatureSeen& c, bool
             if (s >= 0) startOneShot(blob, s, kPrioReact, nowMs);
         }
         if (c.emoteMs && c.emoteMs != lastEmote_ && c.emoteAnim && !moving) {
-            int s = w3d_find_seq(blob, c.emoteAnim);
+            int s = findSeqOne(blob, c.emoteAnim);
             if (s >= 0) startOneShot(blob, s, kPrioEmote, nowMs);
         }
     }
@@ -473,7 +478,17 @@ void CreatureView::noteModel(const uint8_t* blob, uint32_t displayId) {
         snprintf(buf, sizeof buf, "ANIM MODEL display %lu: Stand is a still pose (%lu frames, %lu ms; %lu sequences, %lu bones) - it will not move",
                  disp, sq ? (unsigned long)sq->frames : 0ul, sq ? (unsigned long)sq->durationMs : 0ul, seqs, bones);
     } else {
-        return;
+        // 6.43: sequences that would show the bind pose (skipped by findSeq: the unit plays Stand instead)
+        int o = snprintf(buf, sizeof buf, "ANIM MODEL display %lu: sequences without keys (bind pose, Stand played instead):", disp);
+        int found = 0;
+        const W3dAnimSeq* sq = (const W3dAnimSeq*)(blob + h->offSeqs);
+        for (uint32_t i = 0; i < h->seqCount && o < (int)sizeof buf - 24; ++i)
+            if (w3d_seq_broken(blob, (int)i)) {
+                o += snprintf(buf + o, sizeof buf - o, " %u (%lu of %lu bones)", (unsigned)sq[i].animId,
+                              (unsigned long)w3d_seq_posed_bones(blob, (int)i), (unsigned long)w3d_seq_posed_bones(blob, stand));
+                ++found;
+            }
+        if (!found) return;
     }
     if (diag_.size() < 64) diag_.push_back(buf);
 }

@@ -296,7 +296,7 @@ int explainSpells(const DataDir& data, const std::vector<uint32_t>& ids) {
         const std::string m2 = wowee::pipeline::modelPathToM2(fxn.str((uint32_t)r, 2));
         std::vector<uint8_t> bytes;
         if (!data.read(m2, bytes)) { std::printf("        %s: not in the data\n", m2.c_str()); return; }
-        wowee::pipeline::M2Model mdl = wowee::pipeline::M2Loader::load(bytes);
+        wowee::pipeline::M2Model mdl = loadM2(bytes);
         uint32_t ver = 0;
         if (bytes.size() >= 8) std::memcpy(&ver, bytes.data() + 4, 4);
         std::printf("        %s: version %u, %zu vertices, %zu batches, %zu bones, %zu sequences, %zu particle emitters, %zu ribbons\n",

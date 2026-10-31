@@ -428,6 +428,9 @@ int main(int argc, char** argv) {
                     "             %zu group instances, %zu WMO tris, %zu doodads inside buildings\n",
                     st.wmoPlacements, st.wmoOk, st.wmoFailed, st.wmoGroups, st.wmoGroupsFailed, st.wmoGroupsSkipped,
                     st.wmoPlacedGroups, st.wmoTris, st.wmoDoodads);
+    if (g_m2TracksFixed)
+        std::printf("  M2 key ranges (6.43): %zu bone tracks of 1.12 models read again (held poses / closing keys WoWee dropped)\n",
+                    (size_t)g_m2TracksFixed);
     if (st.wmoPortals)
         std::printf("  portals (6.42): %zu portal sides in %zu groups\n", st.wmoPortals, st.wmoPortalGroups);
     if (st.collSource || st.m2CollSource)

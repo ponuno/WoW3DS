@@ -35,7 +35,7 @@ file(GLOB MESHOPT_SRC ${meshoptimizer_SOURCE_DIR}/src/*.cpp)
 # Converter core as a static library: the tool and the tests link it.
 add_library(w3dcore STATIC
   src/pack.cpp src/mpq.cpp src/texture.cpp src/model.cpp src/terrain.cpp src/synthetic.cpp src/wmo.cpp
-  src/creature_model.cpp src/creatures.cpp src/items.cpp src/spells.cpp src/spelltext.cpp src/progress.cpp src/ui.cpp src/ui_font.cpp src/texts.cpp src/sound.cpp src/dungeon.cpp src/liquid.cpp src/all.cpp src/crashguard.cpp src/glue.cpp src/spellfx.cpp src/farlod.cpp src/farobj.cpp
+  src/creature_model.cpp src/creatures.cpp src/items.cpp src/spells.cpp src/spelltext.cpp src/progress.cpp src/ui.cpp src/ui_font.cpp src/texts.cpp src/sound.cpp src/dungeon.cpp src/liquid.cpp src/all.cpp src/crashguard.cpp src/glue.cpp src/spellfx.cpp src/farlod.cpp src/farobj.cpp src/m2_fix.cpp
   ${MESHOPT_SRC}
   ${rgetc1_SOURCE_DIR}/rg_etc1.cpp
   ${wowee_SOURCE_DIR}/src/pipeline/adt_loader.cpp
@@ -77,6 +77,8 @@ if(W3D_TESTS AND NOT MINGW)
   target_link_libraries(uv_range_test PRIVATE w3dcore)
   add_executable(uv_anim_test tests/uv_anim_test.cpp)
   target_link_libraries(uv_anim_test PRIVATE w3dcore)
+  add_executable(m2_ranges_test tests/m2_ranges_test.cpp)   # 6.43: vanilla key ranges read inclusive (gen_m2_ranges.py)
+  target_link_libraries(m2_ranges_test PRIVATE w3dcore)
   add_executable(wmo_hole_test tests/wmo_hole_test.cpp)
   target_link_libraries(wmo_hole_test PRIVATE w3dcore)
   add_executable(skin_simplify_test tests/skin_simplify_test.cpp)

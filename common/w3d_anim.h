@@ -42,6 +42,27 @@ static inline int w3d_seq_animated(const uint8_t* blob, int seq) {
     return 0;
 }
 
+// 6.43: how many bones the sequence poses at all (any channel other than W3D_CHAN_NONE). A sequence the converter got no keys for
+// (the M2's track ranges missed it) poses none or almost none: played, the model stands in its bind pose - the T-pose of the wind
+// riders kneeling at Orgrimmar's flight master (stand state 8 -> KneelLoop).
+static inline uint32_t w3d_seq_posed_bones(const uint8_t* blob, int seq) {
+    const W3dCreatureHeader* h = w3d_creature(blob);
+    if (seq < 0 || (uint32_t)seq >= h->seqCount) return 0;
+    const W3dAnimSeq* sq = (const W3dAnimSeq*)(blob + h->offSeqs) + seq;
+    const uint32_t* ch = (const uint32_t*)(blob + sq->offChannels);
+    uint32_t n = 0;
+    for (uint32_t b = 0; b < h->boneCount; ++b)
+        n += ch[b * 3] != W3D_CHAN_NONE || ch[b * 3 + 1] != W3D_CHAN_NONE || ch[b * 3 + 2] != W3D_CHAN_NONE;
+    return n;
+}
+// A sequence that poses fewer than half the bones Stand poses is taken for a broken one (bind pose); Stand itself always counts.
+static inline int w3d_seq_broken(const uint8_t* blob, int seq) {
+    const int stand = w3d_find_seq(blob, W3D_ANIM_STAND);
+    if (seq < 0 || seq == stand || stand < 0) return 0;
+    const uint32_t ref = w3d_seq_posed_bones(blob, stand);
+    return ref >= 4 && w3d_seq_posed_bones(blob, seq) * 2 < ref;
+}
+
 static inline void w3d_quat_to_mat(float x, float y, float z, float w, float r[9]) {
     float xx = x * x, yy = y * y, zz = z * z, xy = x * y, xz = x * z, yz = y * z, wx = w * x, wy = w * y, wz = w * z;
     r[0] = 1 - 2 * (yy + zz); r[1] = 2 * (xy - wz);     r[2] = 2 * (xz + wy);

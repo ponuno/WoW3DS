@@ -45,7 +45,7 @@ bool convertGlueScenes(const Options& oIn, const DataDir& data, PackWriter& pack
                 done[path] = g;
                 continue;
             }
-            wowee::pipeline::M2Model mdl = wowee::pipeline::M2Loader::load(bytes);
+            wowee::pipeline::M2Model mdl = loadM2(bytes);
             g.modelId = addModelFromGame(pack, data, path, o, st);
             if (!g.modelId) {
                 std::fprintf(stderr, "  glue scene %s: the model did not convert\n", path.c_str());

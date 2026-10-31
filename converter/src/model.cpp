@@ -697,7 +697,7 @@ static uint32_t addModelFromGameImpl(PackWriter& pack, const DataDir& data, cons
         ++st.modelsFailed;
         return 0;
     }
-    wowee::pipeline::M2Model mdl = wowee::pipeline::M2Loader::load(bytes);
+    wowee::pipeline::M2Model mdl = loadM2(bytes);
     // 5.35f: most spell effects are particles only - no vertex at all (Fire_Precast_Hand, MoltenBlast_Impact_Chest,
     // LesserHeal_Base ...): they were refused as broken models, so Fireball and Heal showed nothing. With effects on, such a
     // model becomes one degenerate triangle carrying its emitters.
@@ -992,7 +992,7 @@ uint32_t addItemModel(PackWriter& pack, const DataDir& data, const std::string& 
         ++st.itemModelsFailed;
         return 0;
     }
-    M2Model mdl = wowee::pipeline::M2Loader::load(bytes);
+    M2Model mdl = loadM2(bytes);
     if (mdl.batches.empty() || mdl.indices.empty()) {
         std::vector<uint8_t> skin;
         if (data.read(wowee::pipeline::skinPathForM2(m2Path), skin)) wowee::pipeline::M2Loader::loadSkin(skin, mdl);
