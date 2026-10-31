@@ -400,7 +400,7 @@ int printPackInfo(const std::string& path) {
     for (auto& [t, n] : countBy)
         std::printf("  %s x%-4zu %8.1f KB\n", typeName(t), n, bytesBy[t] / 1024.0);
 
-    size_t texGpu = 0, missingTex = 0, totalPlacements = 0, fxModels = 0, fxEmitters = 0, fxGlows = 0, fxAnimated = 0, uvModels = 0, lodModels = 0, lodCreatures = 0;
+    size_t texGpu = 0, missingTex = 0, totalPlacements = 0, fxModels = 0, fxEmitters = 0, fxGlows = 0, fxAnimated = 0, uvModels = 0, portalModels = 0, portalCount = 0, portalLost = 0, lodModels = 0, lodCreatures = 0;
     std::map<uint8_t, size_t> fmtCount;
     for (uint32_t i = 0; i < h.entryCount; ++i) {
         const uint8_t* p = b.data() + e[i].offset;
@@ -491,6 +491,18 @@ int printPackInfo(const std::string& path) {
                 for (uint32_t k = 0; k < m.submeshCount; ++k)
                     if (us[k] != W3D_UVA_NONE && us[k] >= ut->animCount) return fail("submesh UV animation index");
                 ++uvModels;
+            }
+            if (m.offTexIds >= W3D_MODEL_HDR_PORTAL_END && m.offPortals) {   // 6.42: WMO portals
+                const W3dPortalTable* pt = w3d_model_portals(p, e[i].size);
+                if (!pt) return fail("model portal table");
+                const W3dPortal* pp = w3d_portals_of(pt);
+                for (uint32_t k = 0; k < pt->count; ++k) {
+                    const float nl = pp[k].plane[0] * pp[k].plane[0] + pp[k].plane[1] * pp[k].plane[1] + pp[k].plane[2] * pp[k].plane[2];
+                    if (!(nl > 0.9f && nl < 1.1f) || !(pp[k].radius >= 0) || !pp[k].toModel) return fail("portal plane / sphere / target");
+                    if (!byKey.count({W3D_ENTRY_MODEL, pp[k].toModel})) ++portalLost;   // (a group left out: --wmo-exterior-only, or a failed one)
+                }
+                ++portalModels;
+                portalCount += pt->count;
             }
             if (const W3dFxHeader* fx = w3d_model_fx(p, e[i].size)) {   // stage 5.32: effects behind the footer
                 ++fxModels;
@@ -687,6 +699,7 @@ int printPackInfo(const std::string& path) {
     }
     std::printf("  placements: %zu\n", totalPlacements);
     std::printf("  moving textures (6.41): %zu models\n", uvModels);
+    std::printf("  WMO portals (6.42): %zu groups hold %zu portals (%zu lead to a group that is not in the pack)\n", portalModels, portalCount, portalLost);
     std::printf("  LODs (6.12): %zu models, %zu creature models with lighter versions\n", lodModels, lodCreatures);
     if (fxModels) std::printf("  effects: %zu models, %zu particle emitters, %zu glow sprites, %zu with bone animation\n", fxModels, fxEmitters, fxGlows, fxAnimated);
     std::printf("  texture GPU memory: %.1f KB (", texGpu / 1024.0);

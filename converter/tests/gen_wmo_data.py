@@ -36,7 +36,7 @@ offs[0] = len(hdr) + 64 + 64 + 1024; sizes[0] = len(pix)
 write("Textures/Test/Wall.blp", hdr + struct.pack("<16I", *offs) + struct.pack("<16I", *sizes) + pal + pix)
 
 # ------------------------------------------------------------ WMO writer
-def box_group(lo, hi, flags, mat, reverse=False, extra=(), quads=None):
+def box_group(lo, hi, flags, mat, reverse=False, extra=(), quads=None, portals=(0, 0)):
     """Axis-aligned box (12 tris), one batch with material 'mat'. reverse = clockwise winding.
     quads: render these (a, b, c, d, normal) quads instead of the box (lo/hi stay the group bounds)."""
     (x0, y0, z0), (x1, y1, z1) = lo, hi
@@ -65,12 +65,13 @@ def box_group(lo, hi, flags, mat, reverse=False, extra=(), quads=None):
     sub += chunk("MONR", b"".join(struct.pack("<fff", *n) for n in N))
     sub += chunk("MOTV", b"".join(struct.pack("<ff", *t) for t in T))
     sub += chunk("MOBA", struct.pack("<6hIHHHBB", 0, 0, 0, 0, 0, 0, 0, render_tris * 3, 0, len(V) - 1, 0, mat))
-    mogp = struct.pack("<III", 0, 0, flags) + struct.pack("<6f", *lo, *hi) + struct.pack("<HHHHHH", 0, 0, 0, 0, 1, 0)
+    mogp = struct.pack("<III", 0, 0, flags) + struct.pack("<6f", *lo, *hi) + struct.pack("<HHHHHH", portals[0], portals[1], 0, 0, 1, 0)
     mogp += bytes(4) + struct.pack("<III", 0, 0, 0) + bytes(4)
     assert len(mogp) == 68, len(mogp)
     return chunk("MVER", struct.pack("<I", 17)) + chunk("MOGP", mogp + sub)
 
-def wmo_root(groups, texname, doodads, sets):
+def wmo_root(groups, texname, doodads, sets, portals=None):
+    """portals: (vertices, [(first vertex, count, (nx, ny, nz), d)], [(portal, group, side)]) -> MOPV / MOPT / MOPR"""
     motx = texname.encode() + b"\0"
     while len(motx) % 4: motx += b"\0"
     momt = struct.pack("<16I", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)   # opaque, texture offset 0
@@ -83,9 +84,15 @@ def wmo_root(groups, texname, doodads, sets):
     mods = b"".join(n.encode().ljust(20, b"\0") + struct.pack("<III", s, c, 0) for n, s, c in sets)
     mogi = b"".join(struct.pack("<I6fi", fl, *lo, *hi, -1) for lo, hi, fl in groups)
     lo = [min(g[0][i] for g in groups) for i in range(3)]; hi = [max(g[1][i] for g in groups) for i in range(3)]
-    mohd = struct.pack("<IIIIIIIII6fHH", 1, len(groups), 0, 0, len(name_off), len(doodads), len(sets), 0, 0, *lo, *hi, 0, 0)
+    pchunks = b""
+    if portals:
+        pv, pt, pr = portals
+        pchunks = (chunk("MOPV", b"".join(struct.pack("<fff", *v) for v in pv)) +
+                   chunk("MOPT", b"".join(struct.pack("<HHfffi", f, c, *n, 0)[:16] + struct.pack("<f", d) for f, c, n, d in pt)) +
+                   chunk("MOPR", b"".join(struct.pack("<HHhH", p, g, sd, 0) for p, g, sd in pr)))
+    mohd = struct.pack("<IIIIIIIII6fHH", 1, len(groups), len(portals[1]) if portals else 0, 0, len(name_off), len(doodads), len(sets), 0, 0, *lo, *hi, 0, 0)
     return (chunk("MVER", struct.pack("<I", 17)) + chunk("MOHD", mohd) + chunk("MOTX", motx) + chunk("MOMT", momt) +
-            chunk("MOGN", b"\0\0") + chunk("MOGI", mogi) + chunk("MODN", names) + chunk("MODD", modd) + chunk("MODS", mods))
+            chunk("MOGN", b"\0\0") + chunk("MOGI", mogi) + pchunks + chunk("MODN", names) + chunk("MODD", modd) + chunk("MODS", mods))
 
 def quat_axis(ax, deg):
     s = math.sin(math.radians(deg) / 2); c = math.cos(math.radians(deg) / 2)
@@ -96,9 +103,12 @@ house_doodads = [("World\\Test\\Lamp.mdx", (4.0, 2.0, 0.5), quat_axis((0, 0, 1),
                  ("World\\Test\\Barrel.mdx", (-3.0, 1.0, 0.0), quat_axis((0.6, 0, 0.8), 25), 1.5),
                  ("World\\Test\\Lamp.mdx", (0.0, -5.0, 2.0), quat_axis((1, 0, 0), 90), 0.8)]
 house_sets = [("Set_$DefaultGlobal", 0, 2), ("Set_Extra", 2, 1)]
-write("World/wmo/Test/House.wmo", wmo_root(house_groups, "Textures\\Test\\Wall.blp", house_doodads, house_sets))
+# 6.42: one portal, the house's door (a quad in the plane y = -4, x -1..1, z 0.2..3) between the outer shell (group 0) and the room
+# (group 1); MOPR lists group 0's reference first, then group 1's (their MOGP portalStart / portalCount)
+house_portals = ([(-1, -4, 0.2), (1, -4, 0.2), (1, -4, 3), (-1, -4, 3)], [(0, 4, (0, -1, 0), -4.0)], [(0, 1, 1), (0, 0, -1)])
+write("World/wmo/Test/House.wmo", wmo_root(house_groups, "Textures\\Test\\Wall.blp", house_doodads, house_sets, house_portals))
 for i, (lo, hi, fl) in enumerate(house_groups):
-    write(f"World/wmo/Test/House_{i:03d}.wmo", box_group(lo, hi, fl, 0))
+    write(f"World/wmo/Test/House_{i:03d}.wmo", box_group(lo, hi, fl, 0, portals=(i, 1)))
 tower_groups = [((-3, -3, 0), (3, 3, 20), 0x8)]
 # Stairs: a platform (box 8..16 x -3..3, top at z 4.5) reached by an invisible collision ramp
 # (F_COLLISION only, not rendered) from z 0 at x 0 to z 4.5 at x 8, plus a carpet on the

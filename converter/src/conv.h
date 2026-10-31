@@ -51,7 +51,8 @@ struct Options {
     // WMO buildings (stage 5.0)
     bool noWmo = false;         // skip buildings entirely
     bool noWmoDoodads = false;  // buildings without their furniture/lamps
-    bool wmoExteriorOnly = false;   // drop interior-only groups (no portals yet, they are drawn anyway)
+    bool noPortals = false;          // 6.42: no WMO portals (every interior group is drawn near it, as before)
+    bool wmoExteriorOnly = false;   // drop interior-only groups (without them there is nothing behind the doors)
     int wmoTex = 128;           // max WMO texture size
     float drawMaxError = 0.15f;  // 6.19b: yards a simplified building / doodad may move from its collision; --draw-error
     int wmoGroupTris = 3000;    // triangle budget per WMO group (0 = keep all)
@@ -232,6 +233,7 @@ struct ModelSource {               // engine-neutral mesh before packing
     struct Sub { uint32_t texId; uint8_t blend, flags; std::vector<uint32_t> idx; uint16_t tag = 0, uvAnim = 0xFFFF; };   // tag: stage 5.35; uvAnim: 6.41, an index into uvTracks - both kept apart in the merge
     struct UvTrack { uint32_t periodMs = 0; std::vector<W3dUvKey> keys; };   // 6.41: one baked texture transform (see w3d_format.h)
     std::vector<UvTrack> uvTracks;
+    std::vector<W3dPortal> portals;   // 6.42: the portals of a WMO group (w3d_format.h), written behind the UV table
     std::vector<V> verts;
     std::vector<Sub> subs;
     std::vector<uint32_t> texIds;   // TEX entry ids referenced by Sub::texId (index)
@@ -259,6 +261,7 @@ bool readFileFast(const std::string& path, std::vector<uint8_t>& out);
 struct ConvStats {
     size_t collOrphanTiles = 0;   // collision tiles dropped because the map has no terrain tile there
     size_t tiles = 0, waterTris = 0, wmoSkipped = 0;
+    size_t wmoPortals = 0, wmoPortalGroups = 0;   // 6.42: portals written (each counted in both groups) / groups that hold any
     size_t wmoOk = 0, wmoFailed = 0, wmoGroups = 0, wmoGroupsFailed = 0, wmoGroupsSkipped = 0, wmoTris = 0;
     size_t wmoPlacements = 0, wmoPlacedGroups = 0, wmoDoodads = 0, duplicatesSkipped = 0;
     size_t m2SubsFlipped = 0, wmoSubsFlipped = 0, uvAnims = 0;   // uvAnims: 6.41, texture transforms baked

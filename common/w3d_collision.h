@@ -108,6 +108,27 @@ static inline float w3d_walk_height(const uint8_t* coll, float x, float y, float
     return best;
 }
 
+// 6.42: the ceiling over a rising walker: the lowest collision face above the point that lies higher than zFrom (feet + a little, so
+// the face under the feet and a ramp's own slope never count). The converter keeps faces of both orientations (|normal.z| decides
+// floor or wall), so a building's ceiling, a bridge's deck and an arch are in the data like its floors. Returns 0 = nothing above.
+static inline int w3d_ceiling_above(const uint8_t* coll, float x, float y, float zFrom, float* ceil) {
+    if (!coll) return 0;
+    float below = 0, above = 0;
+    if (!(w3d_coll_query(coll, x, y, zFrom, &below, &above) & 2)) return 0;
+    *ceil = above;
+    return 1;
+}
+
+// A rising step: feet at z go up by dz with the head 'head' above them. Returns the new height, stopped under the ceiling
+// (*hit = 1 then) when the head would pass through it; under a ceiling lower than the head the walker does not rise at all.
+static inline float w3d_rise_under_ceiling(float z, float dz, float head, int haveCeil, float ceil, int* hit) {
+    if (hit) *hit = 0;
+    const float nz = z + dz;
+    if (dz <= 0 || !haveCeil || nz + head <= ceil) return nz;
+    if (hit) *hit = 1;
+    return ceil - head > z ? ceil - head : z;
+}
+
 // 6.21: the terrain in an ADT hole. The hole is where a building opens into the ground (a tunnel mouth, a cellar, Ironforge's
 // gate); the original client has no ground there at all. Our ground there is a membrane filled in over the opening, and
 // standing on it held the character in the air in front of the doorway, then the hillside it continues into stopped it

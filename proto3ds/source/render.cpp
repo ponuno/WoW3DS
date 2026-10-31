@@ -540,7 +540,58 @@ static uint32_t g_nowMs = 0;
 static bool g_fadeOn = true;
 
 // One instance: drawn this frame?
-static inline void collectInstance(const Tile* t, Instance& in, const Frustum& fr, const RenderSettings& rs, FrameCounters& fc) {
+// 6.42: which interior groups of the WMOs are seen. The tile's building groups become nodes of a portal graph once every one of
+// them is in (a model that is still loading would look like a missing room); each frame the first interior group asks, the graph
+// is walked from the camera's room (or, outside, from the outer groups) through the portals that face the camera and are in view
+// (wmo_portals.cpp). Reached interior groups are drawn up to kPortalDist yards, the others not at all. Packs without portal tables
+// (older converters) keep the old rule: an interior group near the camera is drawn.
+static constexpr float kPortalDist = 70.0f;
+static uint32_t g_portalFrame = 0;
+static bool portalSphere(void* ctx, const float c[3], float r) { return ((const Frustum*)ctx)->sphere(c, r); }
+static bool portalsReady(Tile* t, const Frustum& fr) {
+    if (t->pstate == 2) return false;
+    if (t->pstate == 1 && t->pinstances != t->instances.size()) t->pstate = 0;   // (the tile's instances changed: again)
+    if (t->pstate == 0) {
+        bool any = false;
+        for (const Instance& in : t->instances) {
+            const Model* m = in.model;
+            if (!m->building) continue;
+            if (m->state != AssetState::Ready) return false;   // a group still loading: the graph waits
+            if (m->h && m->portals) any = true;
+        }
+        if (!any) { t->pstate = 2; return false; }
+        t->pnodes.clear();
+        for (uint32_t i = 0; i < t->instances.size(); ++i) {
+            Instance& in = t->instances[i];
+            in.pnode = -1;
+            const Model* m = in.model;
+            if (!m->building || !m->h) continue;
+            wmoportal::Node n;
+            n.modelId = m->id;
+            if (m->portals) { n.portals = w3d_portals_of(m->portals); n.nPortals = m->portals->count; n.hasTable = true; }
+            n.interior = m->interior;
+            memcpy(n.pos, in.pos, sizeof n.pos);
+            memcpy(n.rot, in.rot, sizeof n.rot);
+            memcpy(n.bmin, m->h->bmin, sizeof n.bmin);
+            memcpy(n.bmax, m->h->bmax, sizeof n.bmax);
+            n.radius = m->h->radius * in.scale;
+            n.inst = i;
+            in.pnode = (int32_t)t->pnodes.size();
+            t->pnodes.push_back(n);
+        }
+        t->pindex = wmoportal::buildIndex(t->pnodes);
+        t->pinstances = (uint32_t)t->instances.size();
+        t->pstate = 1;
+        t->pframe = 0;
+    }
+    if (t->pframe != g_portalFrame) {
+        t->pframe = g_portalFrame;
+        wmoportal::reach(t->pnodes, t->pindex, fr.cam, portalSphere, (void*)&fr, kPortalDist, g_portalFrame);
+    }
+    return true;
+}
+
+static inline void collectInstance(Tile* t, Instance& in, const Frustum& fr, const RenderSettings& rs, FrameCounters& fc) {
     Model* m = in.model;
     if (!m->drawable || !m->h) return;   // stage 5.30: each model as soon as it and its textures are in
     if (m->meshHidden) return;           // 6.17: an emitter volume (its particles come from the tile's instances, not from here)
@@ -557,7 +608,13 @@ static inline void collectInstance(const Tile* t, Instance& in, const Frustum& f
     // Buildings are kept to the draw distance.
     // Interior-only groups (rooms, Stormwind's halls and cellars; no portals yet) are drawn only
     // when the camera is near them: from outside they are hidden behind the exterior anyway.
-    float maxD = m->interior ? in.radius + 25.0f
+    // 6.42: a group with portals is drawn when the portal walk reached it; without them the old rule
+    bool portalGated = false;
+    if (m->interior && m->portals && portalsReady(t, fr)) {
+        if (in.pnode < 0 || t->pnodes[in.pnode].stamp != g_portalFrame) return;
+        portalGated = true;
+    }
+    float maxD = m->interior ? in.radius + (portalGated ? kPortalDist : 25.0f)
                : m->building ? fr.maxDist + in.radius : 40.0f + rs.doodadRange * in.radius;
     float dx = in.pos[0] - fr.cam[0], dy = in.pos[1] - fr.cam[1], dz = in.pos[2] - fr.cam[2];
     const float d2 = dx * dx + dy * dy + dz * dz;
@@ -607,6 +664,7 @@ static void chunkRadii(Tile* t, Tile::Chunk& ch) {
 }
 
 void collectModels(const Frustum& fr, const RenderSettings& rs, FrameCounters& fc) {
+    ++g_portalFrame;
     for (Tile* t : streamerReadyTiles()) {
         if (t->chunks.empty()) {   // (no grid: a tile built elsewhere)
             for (Instance& in : t->instances) collectInstance(t, in, fr, rs, fc);
@@ -620,7 +678,7 @@ void collectModels(const Frustum& fr, const RenderSettings& rs, FrameCounters& f
                 if (!ch.hasB && !ch.hasI && !doods) { ++fc.chunksCulled; continue; }
                 float maxD = 0, r = 0;
                 if (ch.hasB) { maxD = fr.maxDist + ch.maxRb; r = ch.maxRb; }
-                if (ch.hasI) { maxD = std::max(maxD, ch.maxRi + 25.0f); r = std::max(r, ch.maxRi); }
+                if (ch.hasI) { maxD = std::max(maxD, ch.maxRi + kPortalDist + 5.0f); r = std::max(r, ch.maxRi); }
                 if (doods) { maxD = std::max(maxD, 40.0f + rs.doodadRange * ch.maxRd); r = std::max(r, ch.maxRd); }
                 const float dx = ch.center[0] - fr.cam[0], dy = ch.center[1] - fr.cam[1], dz = ch.center[2] - fr.cam[2];
                 const float lim = maxD + ch.half;

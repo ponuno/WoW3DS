@@ -326,7 +326,20 @@ std::vector<uint8_t> buildModelBlob(ModelSource& m, int maxTris, size_t* trisOut
         }
     }
 
+    // ---- 4c. 6.42: portals of a WMO group
+    size_t offPortals = 0;
+    if (!m.portals.empty() && m.portals.size() <= W3D_PORTAL_MAX) {
+        b.align(4);
+        offPortals = b.data.size();
+        W3dPortalTable pt{};
+        pt.count = (uint32_t)m.portals.size();
+        b.put(pt);
+        for (const W3dPortal& p : m.portals) b.put(p);
+        b.align(4);
+    }
+
     auto* hp = b.at<W3dModelHeader>(0);
+    hp->offPortals = (uint32_t)offPortals;
     hp->offUvAnim = (uint32_t)offUva;
     hp->offTexIds = (uint32_t)offTex;
     hp->offSubmeshes = (uint32_t)offSub;

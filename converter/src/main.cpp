@@ -40,6 +40,7 @@ static void usage() {
         "  --no-walls            COLL with floors only (walking passes through walls)\n"
         "  --no-doodad-coll      no collision of doodads (fences, tree trunks, model bridges)\n"
         "  --no-fx               no particle emitters and lamp glows on doodads (stage 5.32)\n"
+        "  --no-portals          WMO interiors without portals (as before 6.42: every interior group near the camera is drawn)\n"
         "  --no-uv-anim          doodad textures stand still (no M2 texture transforms: lava, falls, portals; 6.41)\n"
         "  --no-spell-fx         no spell effects with the creatures (stage 5.33)\n"
         "  --explain-spell L     print the Spell -> SpellVisual -> Kit -> EffectName chain of these spell ids (comma list)\n"
@@ -149,6 +150,7 @@ int main(int argc, char** argv) {
         else if (a == "--no-doodad-coll") o.noDoodadColl = true;
         else if (a == "--no-fx") o.noFx = true;
         else if (a == "--no-uv-anim") o.noUvAnim = true;
+        else if (a == "--no-portals") o.noPortals = true;
         else if (a == "--no-spell-fx") o.spellFx = false;
         else if (a == "--doodad-coll-tris") o.doodadCollTris = std::atoi(next());
         else if (a == "--no-exact-ground") o.exactGround = false;
@@ -426,6 +428,8 @@ int main(int argc, char** argv) {
                     "             %zu group instances, %zu WMO tris, %zu doodads inside buildings\n",
                     st.wmoPlacements, st.wmoOk, st.wmoFailed, st.wmoGroups, st.wmoGroupsFailed, st.wmoGroupsSkipped,
                     st.wmoPlacedGroups, st.wmoTris, st.wmoDoodads);
+    if (st.wmoPortals)
+        std::printf("  portals (6.42): %zu portal sides in %zu groups\n", st.wmoPortals, st.wmoPortalGroups);
     if (st.collSource || st.m2CollSource)
         std::printf("  floors: %zu collision triangles in buildings, %zu walkable, %zu walls; doodads: %zu models with\n"
                     "          collision (%zu simplified), %zu placements, %zu triangles (%zu walkable, %zu walls); %zu pieces after clipping\n"

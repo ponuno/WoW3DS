@@ -22,6 +22,9 @@ grep -q "1 of them invisible walls" "$OUT/conv.log"   # 6.14: no drawn batch, st
 python3 "$T/check_wmo_dump.py" "$OUT/dump.txt" "$OUT/expect.json"
 python3 "$T/check_pack_models.py" "$OUT/wmo.w3dp"
 "$B/w3dconv" --info "$OUT/wmo.w3dp" | grep -E "floors|^OK"
+"$B/w3dconv" --info "$OUT/wmo.w3dp" | grep -q "2 groups hold 2 portals"   # 6.42: the house's door, in both of its groups
+g++ -std=c++20 -O1 -g -fsanitize=address,undefined -I"$T/../../common" "$T/portal_pack_test.cpp" -o "$OUT/portal_pack_test"
+"$OUT/portal_pack_test" "$OUT/wmo.w3dp"
 g++ -std=c++20 -O1 -g -fsanitize=address,undefined -I"$T/../../common" "$T/coll_test.cpp" -o "$OUT/coll_test"
 "$OUT/coll_test" "$OUT/wmo.w3dp" "$OUT/expect.json" "$OUT/walks.txt" | grep -E "FAIL|FLOORS|wall case|random|WALLS"
 python3 "$T/check_walls.py" "$OUT/expect.json" "$OUT/walks.txt"

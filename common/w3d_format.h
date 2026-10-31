@@ -162,7 +162,7 @@ enum W3dBlend { W3D_BLEND_OPAQUE = 0, W3D_BLEND_ALPHAKEY = 1, W3D_BLEND_ALPHA = 
 #define W3D_SUBF_TWO_SIDED 0x01u
 #define W3D_SUBF_UNLIT     0x02u
 #define W3D_SUBF_BUILDING  0x04u   // WMO group: drawn with doodads off, no doodad fade
-#define W3D_SUBF_INTERIOR  0x08u   // WMO interior-only group: drawn only near it (no portals yet)
+#define W3D_SUBF_INTERIOR  0x08u   // WMO interior-only group: drawn only when the portal walk reaches it (6.42; packs without portal tables: near the camera)
 #define W3D_NO_TEXTURE     0xFFFFu
 
 typedef struct {
@@ -187,6 +187,8 @@ typedef struct {
     uint32_t offLods;
     // 6.41: moving textures (M2 texture transforms: lava, waterfalls, portals, runes): a W3dUvAnimTable, or 0; absent in older packs
     uint32_t offUvAnim;
+    // 6.42: the portals of a WMO group (W3dPortalTable), or 0; absent in older packs
+    uint32_t offPortals;
 } W3dModelHeader;
 
 // Stage 6.12: level k (1..W3D_MODEL_LODS) of a submesh: firstIndex[k-1] / indexCount[k-1]; a count of 0 = no lighter version
@@ -201,7 +203,8 @@ typedef struct {
 // uvScale, 8 more without the LOD table.
 #define W3D_MODEL_HDR_UV_END  ((uint32_t)(offsetof(W3dModelHeader, uvScale) + sizeof(float)))
 #define W3D_MODEL_HDR_LOD_END ((uint32_t)offsetof(W3dModelHeader, offUvAnim))
-#define W3D_MODEL_HDR_UVA_END ((uint32_t)sizeof(W3dModelHeader))
+#define W3D_MODEL_HDR_UVA_END ((uint32_t)offsetof(W3dModelHeader, offPortals))
+#define W3D_MODEL_HDR_PORTAL_END ((uint32_t)sizeof(W3dModelHeader))
 static inline float w3d_model_uv_scale(const W3dModelHeader* h) {
     return (h->offTexIds >= W3D_MODEL_HDR_UV_END && h->uvScale > 0) ? h->uvScale : W3D_MODEL_UV_SCALE;
 }
@@ -222,6 +225,38 @@ static inline const W3dSubLod* w3d_model_lods(const uint8_t* blob, uint32_t size
         return 0;
     return w3d_lods_check(blob, size, h->lodCount, h->offLods, h->submeshCount, h->indexCount);
 }
+
+// ---------------------------------------------------------------- WMO portals (6.42)
+// The doors / windows between the groups (rooms) of a WMO, which decide which interior groups are drawn: from the group the camera is
+// in, through every portal that faces it and is in view, to the group behind it (and on from there). Every portal is stored in both
+// groups it joins, in the model space of the group that holds it (the WMO frame minus the group's centre; a placement turns and
+// moves every group of a WMO alike, so the same turn and the centre difference 'delta' carry it to the other group).
+#define W3D_PORTAL_NOFACE 1u       // the plane's side could not be told: no facing test
+typedef struct {
+    uint32_t toModel;              // model id of the group on the other side
+    float    delta[3];             // that group's centre minus this one's (model space)
+    float    plane[4];             // normal n (out of this group, into the other) and d: n . p = d
+    float    center[3], radius;    // bounding sphere of the portal's polygon
+    uint32_t flags;                // W3D_PORTAL_*
+} W3dPortal;                       // 56 bytes
+typedef struct {
+    uint32_t count;
+    uint32_t pad;                  // W3dPortal[count] follow
+} W3dPortalTable;
+#define W3D_PORTAL_MAX 64
+
+// The portal table of a model blob checked against its size, or null (old pack / none / broken).
+static inline const W3dPortalTable* w3d_model_portals(const uint8_t* blob, uint32_t size) {
+    const W3dModelHeader* h = (const W3dModelHeader*)blob;
+    if (!blob || size < sizeof(W3dModelHeader) || h->offTexIds < W3D_MODEL_HDR_PORTAL_END || !h->offPortals || (h->offPortals & 3) ||
+        (uint64_t)h->offPortals + sizeof(W3dPortalTable) > size)
+        return 0;
+    const W3dPortalTable* t = (const W3dPortalTable*)(blob + h->offPortals);
+    if (t->count > W3D_PORTAL_MAX || (uint64_t)h->offPortals + sizeof(W3dPortalTable) + (uint64_t)t->count * sizeof(W3dPortal) > size)
+        return 0;
+    return t;
+}
+static inline const W3dPortal* w3d_portals_of(const W3dPortalTable* t) { return (const W3dPortal*)(t + 1); }
 
 // ---------------------------------------------------------------- moving textures (6.41)
 // An M2 texture transform (UV translation / rotation / scale tracks) baked to one looping table per transform:

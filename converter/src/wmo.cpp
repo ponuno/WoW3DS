@@ -2,8 +2,9 @@
 //
 // Stage 5.0 scope: every group becomes its own static model (MODL), with
 // vertices relative to the group's centre so the 3DS gets a tight bounding
-// sphere per group (culling and draw distance work per room/section). No
-// portals yet: all groups of a building are drawn when visible. The WMO's
+// sphere per group (culling and draw distance work per room/section). Portals
+// (6.42) go into each group's model: the client draws an interior group only when
+// the walk through the portals from the camera's room reaches it. The WMO's
 // doodads (doodad set 0 + the placement's set) become ordinary doodad
 // placements. Placement maths follows WoWee terrain_manager.cpp:
 //   wmoMatrix = T(pos) * Rz * Ry * Rx (placementEuler), doodad = wmoMatrix * T * R(quat) * S.
@@ -63,6 +64,52 @@ void rootHeader(const std::vector<uint8_t>& b, uint32_t* flags, uint32_t* id) {
         if (len > b.size() - p - 8) return;
         p += 8 + len;
     }
+}
+
+// 6.42: the root file's portals: MOPV (vertices, 12 bytes), MOPT (portal: first vertex u16, count u16, plane normal + distance,
+// 20 bytes), MOPR (reference: portal u16, group u16 on the other side, side i16, filler u16; 8 bytes). Group g's references are
+// MOPR[portalStart .. +portalCount] (its MOGP header).
+struct RootPortals {
+    struct P { uint16_t first, count; glm::vec3 n; float d; };
+    struct Ref { uint16_t portal, group; int16_t side; };
+    std::vector<glm::vec3> verts;
+    std::vector<P> portals;
+    std::vector<Ref> refs;
+};
+RootPortals rootPortals(const std::vector<uint8_t>& b) {
+    RootPortals r;
+    for (size_t p = 0; p + 8 <= b.size();) {
+        uint32_t len;
+        std::memcpy(&len, &b[p + 4], 4);
+        if (len > b.size() - p - 8) break;
+        const uint8_t* d = &b[p + 8];
+        if (!std::memcmp(&b[p], "VPOM", 4)) {
+            for (uint32_t i = 0; i + 12 <= len; i += 12) {
+                glm::vec3 v;
+                std::memcpy(&v, d + i, 12);
+                r.verts.push_back(v);
+            }
+        } else if (!std::memcmp(&b[p], "TPOM", 4)) {
+            for (uint32_t i = 0; i + 20 <= len; i += 20) {
+                RootPortals::P q;
+                std::memcpy(&q.first, d + i, 2);
+                std::memcpy(&q.count, d + i + 2, 2);
+                std::memcpy(&q.n, d + i + 4, 12);
+                std::memcpy(&q.d, d + i + 16, 4);
+                r.portals.push_back(q);
+            }
+        } else if (!std::memcmp(&b[p], "RPOM", 4)) {
+            for (uint32_t i = 0; i + 8 <= len; i += 8) {
+                RootPortals::Ref q;
+                std::memcpy(&q.portal, d + i, 2);
+                std::memcpy(&q.group, d + i + 2, 2);
+                std::memcpy(&q.side, d + i + 4, 2);
+                r.refs.push_back(q);
+            }
+        }
+        p += 8 + len;
+    }
+    return r;
 }
 
 std::map<std::string, WmoAsset> g_wmoCache;    // normalized path -> converted asset
@@ -225,6 +272,75 @@ static const WmoAsset& loadWmoImpl(PackWriter& pack, const DataDir& data, const 
         }
     }
 
+    // 6.42: the portals between the groups. A group's centre is the middle of the vertices its render batches use (below); the
+    // neighbour's is needed to tell which side of a portal it lies on and to carry the portal's polygon over to the group's frame.
+    const RootPortals rp = o.noPortals ? RootPortals{} : rootPortals(bytes);
+    auto centerOfGroup = [&](const wowee::pipeline::WMOGroup& g, glm::vec3* out) {
+        glm::vec3 lo(1e30f), hi(-1e30f);
+        for (const auto& b : g.batches) {
+            if (b.materialId == 0xFF) continue;
+            for (uint32_t k = b.startIndex; k < b.startIndex + b.indexCount && k < g.indices.size(); ++k) {
+                uint16_t vi = g.indices[k];
+                if (vi >= g.vertices.size()) continue;
+                lo = glm::min(lo, g.vertices[vi].position);
+                hi = glm::max(hi, g.vertices[vi].position);
+            }
+        }
+        if (lo.x > hi.x) return false;
+        *out = 0.5f * (lo + hi);
+        return true;
+    };
+    auto portalsOfGroup = [&](uint32_t gi, const glm::vec3& center) {
+        std::vector<W3dPortal> out;
+        const auto& g = w.groups[gi];
+        for (uint32_t k = g.portalStart; k < (uint32_t)g.portalStart + g.portalCount && k < rp.refs.size() && out.size() < W3D_PORTAL_MAX; ++k) {
+            const RootPortals::Ref& ref = rp.refs[k];
+            if (ref.portal >= rp.portals.size() || ref.group >= w.groups.size() || ref.group == gi) continue;
+            const RootPortals::P& pt = rp.portals[ref.portal];
+            if (pt.count < 3 || (size_t)pt.first + pt.count > rp.verts.size()) continue;
+            const auto& og = w.groups[ref.group];
+            if (og.vertices.empty() || og.indices.empty()) continue;
+            glm::vec3 oc;
+            if (!centerOfGroup(og, &oc)) continue;
+            // the polygon's plane (Newell) and bounding sphere
+            glm::vec3 n(0.0f), mid(0.0f);
+            for (uint32_t i = 0; i < pt.count; ++i) {
+                const glm::vec3& a = rp.verts[pt.first + i];
+                const glm::vec3& b2 = rp.verts[pt.first + (i + 1) % pt.count];
+                n.x += (a.y - b2.y) * (a.z + b2.z);
+                n.y += (a.z - b2.z) * (a.x + b2.x);
+                n.z += (a.x - b2.x) * (a.y + b2.y);
+                mid += a;
+            }
+            mid /= (float)pt.count;
+            float nl = glm::length(n);
+            if (!(nl > 1e-6f)) { n = pt.n; nl = glm::length(n); }
+            if (!(nl > 1e-6f)) continue;
+            n /= nl;
+            float rad = 0;
+            for (uint32_t i = 0; i < pt.count; ++i) rad = std::max(rad, glm::length(rp.verts[pt.first + i] - mid));
+            // out of this group, into the other: this group's centre is on the negative side, the other's on the positive
+            const float d = glm::dot(n, mid);
+            const float sThis = glm::dot(n, center) - d, sOther = glm::dot(n, oc) - d;
+            uint32_t flags = 0;
+            if (sThis > 0 && sOther < 0) { n = -n; }
+            else if (!(sThis < 0 && sOther > 0)) flags |= W3D_PORTAL_NOFACE;   // both centres on one side: the plane says nothing
+            W3dPortal wp{};
+            char idKey[600];
+            std::snprintf(idKey, sizeof idKey, "%s#%u", key.c_str(), (unsigned)ref.group);
+            wp.toModel = pack.keyId(W3D_ENTRY_MODEL, idKey);
+            const glm::vec3 dl = oc - center, cl = mid - center;
+            wp.delta[0] = dl.x; wp.delta[1] = dl.y; wp.delta[2] = dl.z;
+            wp.plane[0] = n.x; wp.plane[1] = n.y; wp.plane[2] = n.z;
+            wp.plane[3] = glm::dot(n, mid - center);
+            wp.center[0] = cl.x; wp.center[1] = cl.y; wp.center[2] = cl.z;
+            wp.radius = rad;
+            wp.flags = flags;
+            out.push_back(wp);
+        }
+        return out;
+    };
+
     size_t groupsOk = 0;
     for (uint32_t gi = 0; gi < w.groups.size(); ++gi) {
         const auto& g = w.groups[gi];
@@ -293,6 +409,7 @@ static const WmoAsset& loadWmoImpl(PackWriter& pack, const DataDir& data, const 
         if (src.subs.empty()) continue;
         size_t tris = 0;
         int flipped = 0;
+        if (!rp.refs.empty()) { src.portals = portalsOfGroup(gi, center); st.wmoPortals += src.portals.size(); if (!src.portals.empty()) ++st.wmoPortalGroups; }
         auto blob = buildModelBlob(src, o.wmoGroupTris, &tris, &flipped, o.drawMaxError);
         st.wmoSubsFlipped += flipped;
         if (src.dropped && o.verbose)

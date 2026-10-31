@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "w3d_format.h"
+#include "wmo_portals.hpp"
 #include "w3d_terrain_lod.h"
 #include "w3d_character.h"
 #include "w3d_fx.h"
@@ -94,6 +95,7 @@ struct Model {
     // per-frame visibility bucket (filled by the renderer)
     std::vector<const struct Instance*> visible;
     uint32_t mvBase = 0;             // stage 6.10: where its visible instances' matrices start (renderer, per frame)
+    const W3dPortalTable* portals = nullptr;   // 6.42: the portals of a WMO group (its doors to the neighbouring groups), null: none in this pack
     const W3dUvAnimTable* uva = nullptr;   // 6.41: moving textures of its submeshes (M2 texture transforms), null: none
     const W3dSubLod* lods = nullptr; // stage 6.12: lighter versions of the submeshes (null: none in this pack)
     uint32_t drawableMs = 0;         // stage 6.11: when it became drawable (kFadeMs of fading in start there), streamerNowMs() clock
@@ -110,6 +112,7 @@ struct Instance {
     float lightModel[3];
     uint32_t animMs = 0;             // stage 5.35: age of an animated effect (Model::fxAnim)
     uint8_t lod = 0;                 // stage 6.12: the level drawn this frame (renderer; 0 = full)
+    int32_t pnode = -1;              // 6.42: index in Tile::pnodes (a building group of a tile with portals), -1: none
     uint16_t bldg = 0;               // stage 6.11: 1 + index in Tile::bldgs of the building (WMO groups sharing one transform), 0 = none
     uint16_t owner = 0;              // 6.33: 1 + the building whose doodad (tree, lamp, bench of the WMO) it is: shown only with it
     float fade = 1.0f;               // stage 6.11: opacity this frame (the renderer sets it while the instance appears / at the edge)
@@ -243,6 +246,12 @@ struct Tile {
     };
     std::vector<Bldg> bldgs;
     int bldgsClosed = 0;
+    // 6.42: the portal graph of the tile's building groups (render.cpp portalsReady): built once every group is in, walked once a frame
+    std::vector<wmoportal::Node> pnodes;
+    std::vector<uint32_t> pindex;    // the nodes sorted by model
+    uint32_t pinstances = 0;         // instances.size() when built
+    uint32_t pframe = 0;             // the frame the walk was made in
+    uint8_t pstate = 0;              // 0: not built, 1: built, 2: no group of the tile has portals
     uint32_t readyMs = 0;            // when the ground became drawable (streamerNowMs): objects fade in from there
     // Stage 5.30: a tile is drawn as soon as its terrain and the terrain's textures are in (state Ready); its water when the
     // water's textures are, every model when the model is (Model::drawable). complete = everything of it is in.
@@ -412,6 +421,11 @@ bool streamerFloorHeight(float wx, float wy, float zFeet, float* out, bool* onFl
 // Returns true if a wall changed the target.
 static constexpr float kWalkerRadius = 0.35f;
 bool streamerCollideMove(float fromX, float fromY, float zFeet, float* toX, float* toY);
+// 6.42: the walker's head is kHeadHeight over the feet; streamerCeilingAbove() gives the lowest collision face over (wx, wy) higher
+// than zFrom (feet + kCeilingFrom: what is lower belongs to the floor under the feet), so a jump stops under a low roof.
+static constexpr float kHeadHeight = 2.0f;
+static constexpr float kCeilingFrom = 0.5f;
+bool streamerCeilingAbove(float wx, float wy, float zFrom, float* ceil);
 // 6.18c: the slope limit of the terrain (50 degrees, w3d_slope_move): a move uphill onto steeper ground keeps only its part along
 // the contour. Needs the GRND of the tile (older packs: no limit). Returns true if the target changed.
 bool streamerSlopeMove(float fromX, float fromY, float zFeet, float* toX, float* toY);

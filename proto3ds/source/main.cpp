@@ -20,6 +20,7 @@
 #include "portrait.hpp"
 #include "spell_view.hpp"
 #include "world.h"
+#include "w3d_collision.h"
 #include "glue_data.hpp"
 #include "login.hpp"
 #include "creature_view.hpp"
@@ -1533,7 +1534,13 @@ int main() {
                     plVz = 0;   // stage 5.28: the data under us is not loaded (yet): hang here instead of dropping through the world
                 } else if (airborne) {
                     plVz -= 19.291105f * dt;   // the client's gravity
-                    pl[2] += plVz * dt;
+                    {   // 6.42: a jump stops under a ceiling (a low roof, a bridge's deck): the head does not pass through it
+                        float ceilZ = 0;
+                        const bool haveCeil = plVz > 0 && !ride.guid && streamerCeilingAbove(pl[0], pl[1], pl[2] + kCeilingFrom, &ceilZ);
+                        int hitCeil = 0;
+                        pl[2] = w3d_rise_under_ceiling(pl[2], plVz * dt, kHeadHeight, haveCeil, ceilZ, &hitCeil);
+                        if (hitCeil) plVz = 0;   // (the next frame falls)
+                    }
                     if (plVz < 0 && !ride.guid && game->mover.airborne()) {   // 6.19b: falling: FALLINGFAR for the server's fall damage
                         game->mover.update(dir, pl[0], pl[1], pl[2], charYaw, netMs);
                         game->mover.descend(netMs);

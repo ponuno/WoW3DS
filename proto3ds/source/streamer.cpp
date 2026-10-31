@@ -1129,6 +1129,7 @@ void onJobDone(Job* j) {
             m->interior = m->h->submeshCount && (m->subs[0].flags & W3D_SUBF_INTERIOR);
             m->lods = w3d_model_lods(m->blob, m->size);   // stage 6.12
             m->uva = w3d_model_uvanim(m->blob, m->size);  // 6.41
+            m->portals = w3d_model_portals(m->blob, m->size);   // 6.42
             const uint32_t* ids = (const uint32_t*)(m->blob + m->h->offTexIds);
             {   // its textures are read where the model is needed; a building's before a doodad's
                 AnchorScope as(m->anchor, m->cls == kClsUnit ? kClsUnit : m->building ? kClsBuilding : kClsDoodad);
@@ -2484,6 +2485,11 @@ bool streamerCollideMove(float fromX, float fromY, float zFeet, float* toX, floa
         }
     if (!n) return false;
     return w3d_collide_move(colls, n, fromX, fromY, zFeet, toX, toY, r) != 0;
+}
+
+bool streamerCeilingAbove(float wx, float wy, float zFrom, float* ceil) {
+    Tile* t = tileAt(wx, wy);
+    return t && t->coll && w3d_ceiling_above(t->coll, wx, wy, zFrom, ceil) != 0;
 }
 
 bool streamerLiquidAt(float wx, float wy, float zRef, LiquidHere* out) {
