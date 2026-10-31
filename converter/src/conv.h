@@ -242,6 +242,8 @@ struct ModelSource {               // engine-neutral mesh before packing
 };
 // Flips idx (triangle list over m.verts) to be CCW seen from the vertex normals; true if flipped.
 bool orientByNormals(const ModelSource& m, std::vector<uint32_t>& idx);
+// 6.45: a doodad's vertices in its Stand pose (first frame) instead of the bind pose; false: no skeleton / no difference (model.cpp)
+bool poseDoodad(const wowee::pipeline::M2Model& m, ModelSource& src);
 // Also normalises winding: CCW seen from the vertex normals' side (flippedOut = submeshes flipped).
 // maxErrYd > 0 (6.19b): the simplified surface stays within that many yards of the original (floors the walker stands on
 // are the exact ones: a ground drawn a yard above them buried the feet); 0 = 2% of the mesh size only.
@@ -261,6 +263,7 @@ bool readFileFast(const std::string& path, std::vector<uint8_t>& out);
 struct ConvStats {
     size_t collOrphanTiles = 0;   // collision tiles dropped because the map has no terrain tile there
     size_t tiles = 0, waterTris = 0, wmoSkipped = 0;
+    size_t doodadsPosed = 0;   // 6.45: doodads standing in their Stand pose (not the bind pose)
     size_t wmoPortals = 0, wmoPortalGroups = 0;   // 6.42: portals written (each counted in both groups) / groups that hold any
     size_t wmoOk = 0, wmoFailed = 0, wmoGroups = 0, wmoGroupsFailed = 0, wmoGroupsSkipped = 0, wmoTris = 0;
     size_t wmoPlacements = 0, wmoPlacedGroups = 0, wmoDoodads = 0, duplicatesSkipped = 0;

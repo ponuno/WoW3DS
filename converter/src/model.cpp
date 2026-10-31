@@ -7,6 +7,8 @@
 #include "pipeline/m2_loader.hpp"
 #include "rendering/m2_track_sampler.hpp"
 #include "meshoptimizer.h"
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include "w3d_fx.h"
 
 #include <algorithm>
@@ -587,6 +589,58 @@ static void fxFadeAt(const wowee::pipeline::M2Model& m, const FxFade& f, int seq
 // Stage 5.35: the animation of an effect model, baked per bone (see common/w3d_fx.h, W3dFxAnim). used = the M2 bones
 // that something hangs on (index = the tag the parts got; -1 = a part that stays). subTag: per submesh of the blob,
 // bone tag | fade index << 8 (fades[0] = none). Empty: nothing moves and nothing fades.
+// 6.45: the vertices in the pose of the model's Stand (first variation, first frame) - skinned by up to four bones as the game does.
+// Returns false (nothing changed) when the model has no skeleton / no sequence, or the pose differs from the bind pose by under a centimetre.
+bool poseDoodad(const wowee::pipeline::M2Model& m, ModelSource& src) {
+    if (m.bones.empty() || m.sequences.empty() || src.verts.size() != m.vertices.size()) return false;
+    int seq = -1;
+    for (size_t i = 0; i < m.sequences.size(); ++i)
+        if (m.sequences[i].id == 0 && (seq < 0 || m.sequences[i].variationIndex < m.sequences[seq].variationIndex)) seq = (int)i;
+    if (seq < 0) seq = 0;
+    using namespace wowee::rendering::m2_track;
+    std::vector<glm::mat4> M(m.bones.size());
+    for (size_t i = 0; i < m.bones.size(); ++i) {
+        const auto& b = m.bones[i];
+        glm::vec3 tr = sampleVec3(b.translation, seq, 0.0f, 0.0f, m.globalSequenceDurations, glm::vec3(0.0f));
+        glm::quat q = sampleQuat(b.rotation, seq, 0.0f, 0.0f, m.globalSequenceDurations);
+        glm::vec3 sc = sampleVec3(b.scale, seq, 0.0f, 0.0f, m.globalSequenceDurations, glm::vec3(1.0f));
+        if (sc.x < 0.001f) sc.x = 1; if (sc.y < 0.001f) sc.y = 1; if (sc.z < 0.001f) sc.z = 1;
+        glm::mat4 l = glm::translate(glm::mat4(1.0f), b.pivot);
+        l = glm::translate(l, tr);
+        l *= glm::mat4_cast(q);
+        l = glm::scale(l, sc);
+        l = glm::translate(l, -b.pivot);
+        M[i] = (b.parentBone >= 0 && (size_t)b.parentBone < i) ? M[b.parentBone] * l : l;
+    }
+    std::vector<ModelSource::V> out = src.verts;
+    float moved = 0;
+    for (size_t i = 0; i < m.vertices.size(); ++i) {
+        const auto& v = m.vertices[i];
+        glm::vec4 p(0.0f);
+        glm::vec3 n(0.0f);
+        int wsum = 0;
+        for (int k = 0; k < 4; ++k) {
+            const int w = v.boneWeights[k];
+            if (!w || v.boneIndices[k] >= M.size()) continue;
+            const glm::mat4& B = M[v.boneIndices[k]];
+            p += (float)w * (B * glm::vec4(v.position, 1.0f));
+            n += (float)w * glm::vec3(B * glm::vec4(v.normal, 0.0f));
+            wsum += w;
+        }
+        if (!wsum) continue;   // (no weights: stays where it is)
+        p /= (float)wsum;
+        const float nl = glm::length(n);
+        if (nl > 1e-6f) n /= nl; else n = v.normal;
+        auto& d = out[i];
+        moved = std::max(moved, glm::length(glm::vec3(p) - v.position));
+        d.p[0] = p.x; d.p[1] = p.y; d.p[2] = p.z;
+        d.n[0] = n.x; d.n[1] = n.y; d.n[2] = n.z;
+    }
+    if (!(moved > 0.01f) || !std::isfinite(moved)) return false;
+    src.verts.swap(out);
+    return true;
+}
+
 static std::vector<uint8_t> bakeFxAnim(const wowee::pipeline::M2Model& m, const std::vector<int>& used,
                                        const std::vector<uint16_t>& subTag, const std::vector<uint8_t>& emBone,
                                        const std::vector<uint8_t>& glBone, const std::vector<FxFade>& fades) {
@@ -738,6 +792,13 @@ static uint32_t addModelFromGameImpl(PackWriter& pack, const DataDir& data, cons
         d.p[0] = v.position.x; d.p[1] = v.position.y; d.p[2] = v.position.z;
         d.n[0] = v.normal.x;   d.n[1] = v.normal.y;   d.n[2] = v.normal.z;
         d.uv[0] = v.texCoords[0].x; d.uv[1] = v.texCoords[0].y;
+    }
+    // 6.45: a world doodad with a skeleton stands in the pose of its Stand's first frame, not in its bind pose. The gryphons on the roosts
+    // of Stormwind's flight master and the wind riders of Orgrimmar's are parts of such doodads (GryphonRoost01, WyvernRoost01): in the
+    // bind pose their wings were spread - the "T-pose". (Spell models keep their bones: they are animated at run time, 5.35.)
+    if (!o.fxSpell && !particlesOnly && !collisionOnly && poseDoodad(mdl, src)) {
+        ++st.doodadsPosed;
+        if (o.verbose) std::printf("    posed: %s stands in its Stand pose (bones %zu)\n", m2Path.c_str(), mdl.bones.size());
     }
 
     std::map<uint32_t, uint32_t> texSlot;  // TEX entry id -> slot

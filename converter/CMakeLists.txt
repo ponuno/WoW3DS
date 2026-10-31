@@ -77,6 +77,8 @@ if(W3D_TESTS AND NOT MINGW)
   target_link_libraries(uv_range_test PRIVATE w3dcore)
   add_executable(uv_anim_test tests/uv_anim_test.cpp)
   target_link_libraries(uv_anim_test PRIVATE w3dcore)
+  add_executable(pose_doodad_test tests/pose_doodad_test.cpp)   # 6.45: doodads in their Stand pose
+  target_link_libraries(pose_doodad_test PRIVATE w3dcore)
   add_executable(m2_ranges_test tests/m2_ranges_test.cpp)   # 6.43: vanilla key ranges read inclusive (gen_m2_ranges.py)
   target_link_libraries(m2_ranges_test PRIVATE w3dcore)
   add_executable(wmo_hole_test tests/wmo_hole_test.cpp)

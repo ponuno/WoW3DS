@@ -233,6 +233,7 @@ int convertAll(const Options& oIn, const DataDir& data, const AllOptions& ao, Ui
                 pool.count(W3D_ENTRY_TEXTURE), pool.count(W3D_ENTRY_MODEL), pool.count(W3D_ENTRY_CREATURE),
                 pool.count(W3D_ENTRY_DISPLAY), pool.storedBytes() / 1048576.0, pool.keyCollisions());
     std::printf("  draw error (6.19b): %zu models kept more triangles than their budget to stay on their collision\n", g_errorBoundModels);
+    std::printf("  posed doodads (6.45): %zu models with a skeleton stand in their Stand pose (roosts' gryphons / wind riders)\n", st.doodadsPosed);
     std::printf("  M2 key ranges (6.43): %zu bone tracks of 1.12 models read again (held poses / closing keys WoWee dropped)\n",
                 (size_t)g_m2TracksFixed);
     std::printf("  model LODs (6.12): %zu submeshes, level 1 for %zu (%zu of %zu tris), level 2 for %zu (%zu tris), %zu levels refused (a part would vanish)\n", (size_t)g_lodStats.subs,
