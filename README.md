@@ -258,8 +258,22 @@ Copy the output to the SD card as `sdmc:/3ds/w3dproto/` (`test.w3dp` or `map0.w3
 through the Homebrew Launcher.
 
 
+## Quest areas data (`questdb.bin`)
+
+`tools/questdb/questdb.bin` tells the client where the objectives of quests are (areas on the map for followed quests, 4100 vanilla
+quests). It is optional: copy it to `sdmc:/3ds/w3dproto/questdb.bin`; without it quests are followed in the tracker only.
+
+The file is **derived from the Classic data of [Questie](https://github.com/Questie/Questie)** (database
+[Questie/QuestieDB](https://github.com/Questie/QuestieDB), `data/Classic/*.lua`), which is licensed under **GPL-3.0**. Therefore
+`questdb.bin` is distributed under **GPL-3.0** as well, with credit to the Questie authors and contributors, and the script that
+makes it is included: `tools/questdb/questie_import.py` (`python3 questie_import.py <QuestieDB>/data/Classic questdb.bin`). The GPL-3.0
+covers this data file and the script only; the rest of the project is not changed by it as long as the file stays a separate file
+on the SD card. Details: [`tools/questdb/README.txt`](tools/questdb/README.txt).
+
 ## Legal
 
 This is an unofficial fan project, not affiliated with or endorsed by Blizzard Entertainment. "World of Warcraft" is a
 trademark of Blizzard Entertainment. Do not share converted packs: they contain data derived from the game. The
 converter uses [WoWee](https://github.com/Kelsidavis/WoWee) (MIT) for file-format parsing. Also game logic from the same project
+
+Quest area data: derived from [Questie](https://github.com/Questie/Questie) (GPL-3.0), see *Quest areas data* above.
