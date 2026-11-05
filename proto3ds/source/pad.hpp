@@ -35,7 +35,7 @@ struct PadConfig {
     bool toggleModifiers = false;     // Forever "HUD Modifier, Press to Toggle": tap ZL/ZR instead of holding
     bool invertY = false;
     float camSpeed = 1.8f;            // radians per second at full C-Stick
-    bool questTracker = false;        // stage 5.14: quest objectives on the top screen (UI stage 2: off, the Map tab has them)
+    bool questTracker = true;         // stage 5.14: the followed quests' objectives on the top screen (6.63: on)
     // UI stages 3/6 (the Settings tab)
     int lang = 0;                     // interface language: 0 English (default), 1 Russian
     int drawDist = 1;                 // index into the draw distances (main.cpp kDrawDists)
@@ -46,6 +46,7 @@ struct PadConfig {
     bool showStats = false;          // 5.35e: FPS and ping, small, at the bottom centre of the top screen
     int effects = 2;                  // stage 5.32: particles and lamp glows: 0 off, 1 low, 2 high
     bool bigText = false;             // chat and lists on the touch screen in the bigger font
+    bool chatBubbles = true;          // 6.67: say / yell / party lines in a bubble over the speaker
     bool dimHud = true;               // the top HUD fades out of combat
     bool autoTabs = true;             // combat -> the Combat tab, after it -> the Map tab (unless a tab is pinned)
     int musicVol = 5, sfxVol = 8, ambVol = 5;   // sound volumes 0..10 (Settings, Graphics & sound page)
@@ -56,7 +57,21 @@ struct PadConfig {
     bool gpuKick = true;             // stage 6.3: the GPU starts on the ground / opaque models before the frame is built
                                      // (with VSync off: Stormwind 44.5 -> 57 FPS). 6f/6g froze with it - the lists' last words were
                                      // not flushed (fixed in 6.8): on by default again (6.9). pad.txt key 'gpuearly'.
+    bool staticBatch = true;         // 6.44: small static doodads drawn merged (pad.txt 'staticbatch')
+    int dbgBldg = 0;                 // 6.57e: a test - 1 no interior WMO groups at all (but the rooms the camera is in), 2 no outdoor ones,
+                                     // 3 no interior groups with portals, 4 none without (pad.txt 'dbgbldg'; not saved)
+    float skyHour = -1.0f;           // 6.60: a test - the sky at this hour (0..24) instead of the server's (pad.txt 'skyhour'; not saved)
+    int hlod = 160;                  // 6.57: the horizon's switch distance (yd): blocks farther are drawn as one mesh (pad.txt 'hlod', 0 off)
+    bool interiorFar = true;         // 6.56d: interior WMO groups with portals from outside to the draw distance (pad.txt 'interiors';
+                                     // the 6.56 key 'interiorfar' is ignored: it also drew the unreachable ones - inside-only scenery)
+    bool pvs = true;                 // 6.54: the precomputed visibility (map<ID>.pvs) skips what cannot be seen (pad.txt 'pvs')
+    float doodadRange = 45.0f;       // 6.51: a doodad is drawn up to 40 yd + doodadRange * its radius (pad.txt 'doodadrange', 10..120)
+    float ghostFog = 0.55f;          // 6.80: the spirit world's sight as a share of the zone's fog distance (pad.txt 'ghostfog', 0.25..1)
+    float doodadWide = 1.0f;         // 6.51: times that in the 800x240 mode (pad.txt 'doodadwide', 0.3..1.5)
+    float lodPixels = 2.0f;          // 6.47: a building's lighter level once its error spans fewer pixels (pad.txt 'lodpx')
     bool fadeIn = true;              // stage 6.11: new objects fade in, far doodads dissolve (pad.txt 'fadein')
+    bool autoDetail = true;          // 6.72: the draw distance comes down by itself in heavy scenes (autodetail.hpp)
+    int pace = 2;                    // 6.71: the frame pacer - 0 off (then 'vsync' as before), 1 a steady 30 FPS, 2 auto 60 / 30
     bool vsync = false;              // stage 6.4: wait for a vertical blank before every frame (frames snap to 16.7 / 33.3 ms)
     bool load(const char* path);
     bool save(const char* path) const;

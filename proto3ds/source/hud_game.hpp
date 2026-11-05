@@ -42,12 +42,16 @@ struct HudInput {
     float camYaw = 0, camPitch = 0;       // the 3D camera (radians, yaw 0 = +x)
     const char* selfName = "";
     bool showSelfPlate = false;           // third person: the character's own name over its head
+    bool selfVisible = false;             // 6.89: the character is on screen (third person / free camera); else first person
     const HudPadView* pad = nullptr;      // Forever scheme: bars at the bottom right, aim ring, interact prompt
+    const std::vector<uint32_t>* followed = nullptr;   // 6.63: the followed quests (up to five), in the order they were followed
     bool questTracker = false;            // stage 5.14: objectives of the quest log (UI stage 2: right, under the buffs)
+    bool chatBubbles = true;              // 6.67: say / yell / party lines in a bubble over the speaker
     bool dim = true;                      // UI stage 2: frames fade out of combat
     bool showStats = false;               // 5.35e: FPS and ping at the bottom centre
     float fps = 0;
     uint32_t pingMs = 0;                  // the last pong (0 = none yet)
+    int drawDistYd = 0, detailPct = 100;  // 6.72: the automatic draw distance while it trims (0: not trimming)
     int fading = -1;                      // stage 6.12: objects / units drawn fading last frame (shown with the FPS; -1 = hide)
     ui::Image portrait[2];                // UI stage 8: the rendered portraits, ours and the target's (!ok(): a fallback)
     bool charSheet = false;               // UI stage 14: the Equipment tab is open: the character window instead of the HUD

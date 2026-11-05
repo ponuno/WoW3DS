@@ -160,10 +160,49 @@ void sortUnique(std::vector<uint8_t>& v) {
 }
 }  // namespace
 
-const RaceInfo* races(int* count) { *count = (int)(sizeof kRaces / sizeof kRaces[0]); return kRaces; }
+bool g_turtle = false;
+std::vector<RaceInfo>& turtleRaces() {
+    static std::vector<RaceInfo> v;
+    if (v.empty()) {
+        // Alliance first (the creation screen reads the order): the four of vanilla, High Elf, then the Horde and Goblin.
+        std::vector<RaceInfo> a, h;
+        for (const RaceInfo& r : kRaces) {
+            RaceInfo x = r;
+            if (x.id == 2) x.classMask |= C(8);               // Orc Mage
+            if (x.id == 3) x.classMask |= C(8);               // Dwarf Mage
+            if (x.id == 5) x.classMask |= C(3);               // Undead Hunter
+            if (x.id == 7) x.classMask |= C(3);               // Gnome Hunter
+            (x.faction == Faction::Alliance ? a : h).push_back(x);
+        }
+        a.push_back({10, "HIGHELF", "High Elf", "Высший эльф", Faction::Alliance,
+                     (uint16_t)(C(1) | C(2) | C(3) | C(4) | C(5) | C(8)), {2.15f, 2.05f},
+                     "The quel'dorei high elves of Alah'Thalas, exiles of the fallen Quel'Thalas, have joined the Alliance to "
+                     "win back their homeland.",
+                     "Высшие эльфы Ала'Талас, изгнанники павшего Кель'Таласа, присоединились к Альянсу, чтобы вернуть свою родину.",
+                     "Magic Resistance: +10 to all schools\nArcane Affinity: bonus to Arcane magic\nHigh Elf Lore: bonus to Spell hit",
+                     "Сопротивление магии: +10 ко всем школам\nСродство с тайной магией\nЗнания высших эльфов"});
+        h.push_back({9, "GOBLIN", "Goblin", "Гоблин", Faction::Horde,
+                     (uint16_t)(C(1) | C(3) | C(4) | C(5) | C(7) | C(8) | C(9)), {1.10f, 1.05f},
+                     "Goblins of the Bilgewater Cartel are clever, greedy tinkerers who have joined the Horde.",
+                     "Гоблины картеля Трюмных Вод — хитрые, жадные изобретатели, вступившие в Орду.",
+                     "Rocket Jump: leap forward\nBetter Living Through Chemistry: bonus to Alchemy\nBest Deals Anywhere: vendor discounts",
+                     "Ракетный прыжок\nХимия: бонус к алхимии\nЛучшие цены: скидки у торговцев"});
+        v = a;
+        v.insert(v.end(), h.begin(), h.end());
+    }
+    return v;
+}
+void setTurtle(bool on) { g_turtle = on; }
+const RaceInfo* races(int* count) {
+    if (g_turtle) { *count = (int)turtleRaces().size(); return turtleRaces().data(); }
+    *count = (int)(sizeof kRaces / sizeof kRaces[0]);
+    return kRaces;
+}
 const ClassInfo* classes(int* count) { *count = (int)(sizeof kClasses / sizeof kClasses[0]); return kClasses; }
 const RaceInfo* race(uint8_t id) {
-    for (const RaceInfo& r : kRaces) if (r.id == id) return &r;
+    int n = 0;
+    const RaceInfo* rs = races(&n);
+    for (int i = 0; i < n; ++i) if (rs[i].id == id) return &rs[i];
     return nullptr;
 }
 const ClassInfo* cls(uint8_t id) {

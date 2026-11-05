@@ -5,7 +5,7 @@
 set -e
 T=$(cd "$(dirname "$0")" && pwd)
 OUT=${OUT:-/tmp/w3d_perf}; mkdir -p "$OUT/asan" "$OUT/tsan"
-SRC="$T/perf_test.cpp $T/../source/perflog.cpp $T/../source/fx.cpp $T/../source/streamer.cpp $T/stub/ctru_stub.cpp"
+SRC="$T/perf_test.cpp $T/../source/perflog.cpp $T/../source/fx.cpp $T/../source/streamer.cpp $T/../source/hlod.cpp $T/../source/objcoll.cpp $T/stub/ctru_stub.cpp"
 FL="-std=gnu++20 -g -O1 -DW3D_PC_TEST -Wall -Wno-deprecated-declarations -I$T/stub -I$T/../source -I$T/../../common"
 g++ $FL -fsanitize=address,undefined $SRC -o "$OUT/perf_asan" -lpthread
 g++ $FL -fsanitize=thread $SRC -o "$OUT/perf_tsan" -lpthread

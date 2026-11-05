@@ -175,7 +175,8 @@ typedef struct {
     uint32_t effectCount, visualCount, spellCount;
     uint32_t offEffects, offVisuals, offSpells;   // from the start of the entry
     uint16_t levelUp, loot;       // effect indices of the level-up flash and the loot sparkle (W3D_SFX_NONE: none)
-} W3dSpellFxHeader;               // 32 bytes
+    uint16_t arrow, bullet;       // 6.95: the flying arrow / bullet models of the ranged weapons (older packs: 32-byte header)
+} W3dSpellFxHeader;               // 36 bytes
 typedef struct {
     uint32_t model;               // MODL id
     float scale;                  // SpellVisualEffectName scale (1 when absent)

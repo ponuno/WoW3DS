@@ -86,6 +86,79 @@ bool exportSkills(const DataDir& data, const std::string& path, bool verbose) {
     return true;
 }
 
+// recipes.txt (6.38, the profession window): "R skill spell minRank trivialLow trivialHigh kind item count tools reagents" per
+// SkillLineAbility.dbc row of a profession / secondary skill whose spell creates an item (effect 24) or enchants one (effect 53).
+// 1.12 SkillLineAbility: ID 0, SkillLine 1, Spell 2, RaceMask 3, ClassMask 4, ExcludeRace 5, ExcludeClass 6, MinSkillLineRank 7,
+// SupercededBySpell 8, AcquireMethod 9, TrivialSkillLineRankHigh 10 (grey), TrivialSkillLineRankLow 11 (green).
+// Spell.dbc relative to the name column (120 in 1.12): Totem[2] -80, Reagent[8] -78, ReagentCount[8] -70, Effect[3] -59,
+// EffectDieSides -56, EffectBaseDice -53, EffectBasePoints -44, EffectItemType -17. kind: 0 creates an item, 1 enchants an item.
+// tools / reagents: "entry:count,entry:count" (tools count 1), "-" when none.
+// 6.90: a 12th column "class:subclassMask:inventoryTypeMask" - what the spell may be cast on (EquippedItemClass -62, -1 = any;
+// EquippedItemSubClassMask -61; EquippedItemInventoryTypeMask -60): an enchant offers only the items it fits (a weapon, boots ...).
+bool exportRecipes(const DataDir& data, const std::string& path, bool verbose) {
+    DbcTable spell, sla, line;
+    if (!spell.load(data, "Spell.dbc") || !sla.load(data, "SkillLineAbility.dbc") || sla.fields < 12) {
+        std::fprintf(stderr, "recipes: Spell.dbc / SkillLineAbility.dbc not found (no recipes.txt)\n");
+        return false;
+    }
+    const int nameCol = spellNameColumn(spell);
+    if (nameCol < 80) {
+        std::fprintf(stderr, "recipes: the Spell.dbc name column was not found (no recipes.txt)\n");
+        return false;
+    }
+    std::unordered_map<uint32_t, int32_t> category;   // skill line -> category (9 secondary, 11 professions)
+    if (line.load(data, "SkillLine.dbc"))
+        for (uint32_t r = 0; r < line.records; ++r) category[line.u32(r, 0)] = (int32_t)line.u32(r, 1);
+    std::unordered_map<uint32_t, uint32_t> rowOf;
+    for (uint32_t r = 0; r < spell.records; ++r) rowOf[spell.u32(r, 0)] = r;
+    const uint32_t N = (uint32_t)nameCol;
+    std::string out = "# wow3ds recipes: R skill spell minRank low high kind item count tools reagents class:subMask:invMask\n";
+    size_t n = 0;
+    auto list = [&](uint32_t row, uint32_t itemCol, uint32_t countCol, int cnt, bool counts) {
+        std::string s;
+        for (int k = 0; k < cnt; ++k) {
+            uint32_t e = spell.u32(row, itemCol + (uint32_t)k);
+            if (!e) continue;
+            uint32_t c = counts ? spell.u32(row, countCol + (uint32_t)k) : 1;
+            s += (s.empty() ? "" : ",") + std::to_string(e) + ":" + std::to_string(c ? c : 1);
+        }
+        return s.empty() ? std::string("-") : s;
+    };
+    for (uint32_t r = 0; r < sla.records; ++r) {
+        const uint32_t skill = sla.u32(r, 1), id = sla.u32(r, 2);
+        auto cat = category.find(skill);
+        if (cat != category.end() && cat->second != 9 && cat->second != 11) continue;
+        auto it = rowOf.find(id);
+        if (it == rowOf.end()) continue;
+        const uint32_t row = it->second;
+        int kind = -1;
+        uint32_t item = 0, count = 1;
+        for (uint32_t k = 0; k < 3; ++k) {
+            const uint32_t eff = spell.u32(row, N - 59 + k);
+            if (eff == 24 && kind < 0) {
+                kind = 0;
+                item = spell.u32(row, N - 17 + k);
+                const int32_t base = (int32_t)spell.u32(row, N - 44 + k);
+                count = (uint32_t)std::max<int32_t>(1, base + 1);
+            } else if (eff == 53 && kind < 0) {
+                kind = 1;
+            }
+        }
+        if (kind < 0 || (kind == 0 && !item)) continue;
+        char head[128];
+        std::snprintf(head, sizeof head, "R\t%u\t%u\t%u\t%u\t%u\t%d\t%u\t%u\t", skill, id, sla.u32(r, 7), sla.u32(r, 11), sla.u32(r, 10), kind,
+                      item, count);
+        char req[64];
+        std::snprintf(req, sizeof req, "\t%d:%u:%u", (int32_t)spell.u32(row, N - 62), spell.u32(row, N - 61), spell.u32(row, N - 60));
+        out += std::string(head) + list(row, N - 80, 0, 2, false) + "\t" + list(row, N - 78, N - 70, 8, true) + req + "\n";
+        ++n;
+    }
+    if (!writeText(path, out)) return false;
+    std::printf("  recipes: %zu written to %s\n", n, path.c_str());
+    (void)verbose;
+    return true;
+}
+
 bool exportTaxi(const DataDir& data, const std::string& path, bool verbose) {
     DbcTable nodes, paths;
     if (!nodes.load(data, "TaxiNodes.dbc") || nodes.fields < 6) {
@@ -372,6 +445,76 @@ bool exportEmotes(const DataDir& data, const std::string& path, bool verbose) {
     }
     if (!writeText(path, out)) return false;
     std::printf("  emotes: %zu written to %s\n", n, path.c_str());
+    (void)verbose;
+    return true;
+}
+
+// sky.txt (6.60): the colours of the sky and the fog over the day, for the 3DS client. Light.dbc volumes (1.12: ID 0, map 1, x 2, z 3,
+// y 4 in 36ths of a yard on the tile grid's axes, falloff start 5, end 6, LightParams of clear weather 7) and, per LightParams, the
+// LightIntBand curves of the sky and fog channels (ID = (params - 1) * 18 + channel + 1; count 1; half-minute times 2..17; BGRA 18..33).
+// Channels: 2 sky top, 3 sky middle, 4 sky band 1, 5 sky band 2, 7 fog (WoWee's LightParamsProfile). Lines:
+//   L map x y inner outer params     x, y in world yards (the tile grid's, as the liquids use them); outer 0 = the map's global light
+//   C params channel n t:rrggbb ...  n keys, t in half minutes of the day (0..2879)
+//   B params skybox                  6.61: the LightSkybox id of a parameter set (SKYB entry in the pool; absent: no sky model)
+bool exportSky(const DataDir& data, const std::string& path, bool verbose) {
+    DbcTable light, ib;
+    if (!light.load(data, "Light.dbc") || light.fields < 8 || !ib.load(data, "LightIntBand.dbc") || ib.fields < 34) {
+        std::fprintf(stderr, "sky: Light.dbc / LightIntBand.dbc not found (no sky.txt: the 3DS draws one fixed sky)\n");
+        return false;
+    }
+    const float zp = 32.0f * 533.33333f;
+    std::unordered_map<uint32_t, uint32_t> row;
+    for (uint32_t r = 0; r < ib.records; ++r) row[ib.u32(r, 0)] = r;
+    std::string out = "# wow3ds sky: L map x y inner outer params | C params channel n t:rrggbb ... (t in half minutes)\n";
+    std::set<uint32_t> used;
+    size_t nl = 0;
+    char buf[160];
+    for (uint32_t r = 0; r < light.records; ++r) {
+        const uint32_t params = light.u32(r, 7);
+        if (!params) continue;
+        float x = zp - light.f32(r, 4) / 36.0f, y = zp - light.f32(r, 2) / 36.0f;
+        float inner = light.f32(r, 5) / 36.0f, outer = light.f32(r, 6) / 36.0f;
+        if (light.f32(r, 2) == 0 && light.f32(r, 4) == 0 && outer <= 0) { x = y = 0; inner = outer = 0; }   // the map's global light
+        std::snprintf(buf, sizeof buf, "L\t%u\t%.1f\t%.1f\t%.1f\t%.1f\t%u\n", light.u32(r, 1), x, y, inner, outer, params);
+        out += buf;
+        used.insert(params);
+        ++nl;
+    }
+    // 6.61: the sky model of each parameter set (LightParams column 2 -> LightSkybox.dbc id; the models are in the pool, SKYB)
+    size_t nb = 0;
+    {
+        DbcTable lp, sbx;
+        if (lp.load(data, "LightParams.dbc") && lp.fields >= 3 && sbx.load(data, "LightSkybox.dbc")) {
+            std::set<uint32_t> haveBox;
+            for (uint32_t r = 0; r < sbx.records; ++r) if (!sbx.str(r, 1).empty()) haveBox.insert(sbx.u32(r, 0));
+            for (uint32_t r = 0; r < lp.records; ++r) {
+                const uint32_t params = lp.u32(r, 0), box = lp.u32(r, 2);
+                if (!used.count(params) || !box || !haveBox.count(box)) continue;
+                std::snprintf(buf, sizeof buf, "B\t%u\t%u\n", params, box);
+                out += buf;
+                ++nb;
+            }
+        }
+    }
+    size_t nc = 0;
+    for (uint32_t params : used)
+        for (uint32_t ch : {2u, 3u, 4u, 5u, 7u}) {
+            auto it = row.find((params - 1) * 18 + ch + 1);
+            if (it == row.end()) continue;
+            const uint32_t n = std::min<uint32_t>(ib.u32(it->second, 1), 16);
+            if (!n) continue;
+            out += "C\t" + std::to_string(params) + "\t" + std::to_string(ch) + "\t" + std::to_string(n);
+            for (uint32_t k = 0; k < n; ++k) {
+                const uint32_t v = ib.u32(it->second, 18 + k);
+                std::snprintf(buf, sizeof buf, "\t%u:%02x%02x%02x", ib.u32(it->second, 2 + k), (v >> 16) & 255, (v >> 8) & 255, v & 255);
+                out += buf;
+            }
+            out += "\n";
+            ++nc;
+        }
+    if (!nl) return false;
+    if (!writeText(path, out)) return false;
+    std::printf("  sky: %zu light volumes, %zu colour curves of %zu parameter sets written to %s (%zu with a sky model)\n", nl, nc, used.size(), path.c_str(), nb);
     (void)verbose;
     return true;
 }

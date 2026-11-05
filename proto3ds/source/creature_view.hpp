@@ -4,7 +4,10 @@
 #pragma once
 #include <stdint.h>
 
+#include <string>
 #include <unordered_map>
+#include <unordered_set>
+#include <set>
 #include <vector>
 
 #include "world.h"
@@ -39,12 +42,17 @@ struct CreatureSeen {
     bool swingOff = false;       // with the off hand
     uint32_t hitMs = 0;          // struck in melee ...
     uint8_t hitReact = 0;        // ... 1 wound, 2 critical, 3 dodge, 4 parry, 5 block
-    uint8_t casting = 0;         // 0 no, 1 cast directed, 2 cast omni, 3 channel directed, 4 channel omni
+    uint8_t casting = 0;         // 0 no, 1 cast directed, 2 cast omni, 3 channel directed, 4 channel omni, 5 at a game object (kneels)
     uint32_t castGoMs = 0;       // a spell went off ...
     bool castGoDirected = false;
+    bool castGoObject = false;   // ... at a game object (opening, gathering): the unit gets up from its knees, no spell release
     CastLook castGoLook = CastLook::Spell;
+    // 6.87: shooting - a ranged attack went off a moment ago (Auto Shot repeats every 2-3 s) or one is being aimed (Aimed
+    // Shot): the unit holds the bow / gun / throwing weapon in its ready stance instead of its melee one. Spell = none.
+    CastLook rangedStance = CastLook::Spell;
     uint32_t mountDisplay = 0;   // UNIT_FIELD_MOUNTDISPLAYID: riding (the mount is drawn under the unit)
     bool flying = false;         // on a taxi flight (UNIT_FLAG_TAXI_FLIGHT): the mount flies
+    bool ghost = false;          // 6.62: a ghost player / a spirit healer: translucent and blue
     float farFade = 1.0f;        // stage 6.12: < 1 at the far edge of the distance units are drawn to (main.cpp)
     // Worn items (stage 5.19): ItemDisplayInfo id and inventory type per W3dEquipSlot (0 = empty / not known yet).
     // Players: PLAYER_VISIBLE_ITEM + the item query (hidden helmet / cloak left out); creatures: the three
@@ -71,11 +79,15 @@ public:
     // blob = the unit's model; riding = drawn on a mount (rider pose). Returns the sequence to draw now.
     AnimChoice update(const uint8_t* blob, const CreatureSeen& c, bool riding, uint32_t nowMs);
     float timeMs() const { return timeMs_; }
+    // 6.93: players' weapons are in the hand (true) or sheathed. Follows UNIT_FLAG_IN_COMBAT, but changes at the middle of the
+    // Sheathe / HipSheathe reach when one plays (the hand arrives at the weapon), at once otherwise.
+    bool weaponsDrawn() const { return drawn_; }
     void reset() { *this = UnitAnimator(); }
     // A game object: the sequence for its state (Closed / Opened, or the end of Close / Open), the transition while one plays.
     AnimChoice updateGo(const uint8_t* blob, const CreatureSeen& c, uint32_t nowMs);
 private:
-    void startOneShot(const uint8_t* blob, int seq, uint8_t prio, uint32_t nowMs);
+    void startOneShot(const uint8_t* blob, int seq, uint8_t prio, uint32_t nowMs, uint32_t skipMs = 0);
+    uint32_t pendSwing_ = 0, pendHit_ = 0, pendCast_ = 0, pendEmote_ = 0, oneSkip_ = 0, seenAt_[4] = {0, 0, 0, 0};   // 6.64: events waiting to play
     int oneSeq_ = -1;            // one-shot playing (-1 none)
     uint8_t onePrio_ = 0;
     uint32_t oneStart_ = 0, oneDur_ = 0;
@@ -84,7 +96,9 @@ private:
     float timeMs_ = 0;
     uint32_t lastMs_ = 0;
     bool started_ = false, wasDead_ = false, firstSeenDead_ = false, wasAirborne_ = false;
-    uint8_t lastStand_ = 0xFF;
+    uint8_t lastStand_ = 0xFF, lastCasting_ = 0;
+    bool drawInit_ = false, drawn_ = false, want_ = false;   // 6.93
+    uint32_t drawSwapAt_ = 0;                                  // when drawn_ follows want_ (0 = now / nothing pending)
     uint32_t lastSwing_ = 0, lastHit_ = 0, lastEmote_ = 0, lastCastGo_ = 0;
 };
 
@@ -109,6 +123,11 @@ public:
     // Bind-pose bounds of the model a unit is drawn with, already multiplied by the display scale (not the object scale).
     bool bounds(uint64_t guid, float bmin[3], float bmax[3]) const;
     void clear();
+    // 6.36: models drawn for the first time that cannot animate (no sequences, no Stand, or a Stand that is a still pose):
+    // one line each, for perf_events.txt (the caller drains them)
+    // 6.44c: one line on what a drawn unit plays (perf log "unit near"): animation, frames, bones it poses against Stand; false: not drawn
+    bool describeUnit(uint64_t guid, char* buf, size_t n) const;
+    std::vector<std::string> takeDiag() { std::vector<std::string> d; d.swap(diag_); return d; }
     int tracked() const { return (int)units_.size(); }
     int ready() const { return ready_; }
     // Where a mount's rider sits (world space) at this pose; false without a seat.
@@ -130,8 +149,17 @@ private:
         uint32_t frame = 0;
         bool drawn = false;
         UnitAnimator anim, mountAnim;
+        AnimChoice last;                     // 6.44c: what it played last frame (describeUnit)
+        const uint8_t* lastBlob = nullptr;
     };
     std::unordered_map<uint64_t, Unit> units_;
+    std::vector<std::string> diag_;
+    std::unordered_set<const uint8_t*> noted_;
+    void noteModel(const uint8_t* blob, uint32_t displayId);
+    void noteUnit(const CreatureSeen& c);
+    void notePlay(const CreatureSeen& c, const uint8_t* blob, const AnimChoice& a, bool riding);   // 6.43c: what a model plays (log)
+    std::set<uint32_t> notedPlay_;
+    std::unordered_set<uint32_t> notedDisplays_;
     uint32_t frame_ = 0;
     int ready_ = 0;
 };

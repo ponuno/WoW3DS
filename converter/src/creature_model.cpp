@@ -21,12 +21,17 @@ const std::vector<uint16_t>& creatureAnimIds() {
         0, 1, 4, 5, 16, 17, 18, 19, 41, 42,
         // combat around them: dead pose, wounds, ready stances, backwards, strafing, stun, dodge / parry / block
         6, 9, 10, 25, 26, 27, 28, 13, 11, 12, 14, 30, 20, 21, 22, 23, 24, 36,
+        // 6.87: shooting - ready / attack with a bow, a gun, a throwing weapon. They were at the end of the list and race
+        // models (7-35 animations over their budget) lost them: hunters fired with no animation
+        29, 46, 47, 48, 49, 107, 108,
+        // 6.93: 89 Sheathe (the reach for a weapon on the back) and 90 HipSheathe: one animation both ways, as in the original client
+        89, 90,
         // spells, jumping, swimming directions, off-hand, riding, looting
         31, 32, 51, 52, 53, 54, 124, 125, 37, 38, 39, 40, 43, 44, 45, 87, 91, 135, 50,
         // NPC life: sitting, sleeping, chairs, kneeling, talking and working
         96, 97, 98, 99, 100, 101, 102, 103, 104, 114, 115, 116, 60, 64, 65, 66, 67, 68, 34, 35, 62, 63, 61, 122, 123, 136, 138,
         // the rest of the emotes and special attacks
-        69, 70, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 113, 55, 57, 58, 59, 95, 29, 46, 47, 48, 49, 107, 108,
+        69, 70, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 113, 55, 57, 58, 59, 95,
         119, 120, 126, 130, 127, 7, 8, 117, 118, 85, 133, 134,
         // game objects (stage 5.41): doors, gates, chests, levers: 148 Open, 149 Opened, 146 Close, 147 Closed, 145 Spawn
         // (150 Destroy and up are for destructible objects of later versions: not kept)
@@ -232,16 +237,20 @@ std::vector<uint8_t> buildCreatureBlob(const wowee::pipeline::M2Model& m, int ma
         h.bmin[c] = bmin[c]; h.bmax[c] = bmax[c];
     }
     float radius = std::sqrt(r2);
-    for (const auto& s : subs) {
+    // 7.0: pieces first (each needs at most W3D_PALETTE_BONES bones), then packed into as few palettes as hold them: the pieces of
+    // a character model (body, hands, boots, ears, hair styles, beards...) each had a palette of its own, and the renderer uploaded
+    // one per piece drawn - ~10 uploads of up to 24 bone matrices for every elf of a Turtle WoW camp (perf log: 270 a frame for 25
+    // units). Pieces sharing a palette that follow each other are drawn with one upload (the renderer skips an unchanged palette);
+    // the submeshes are ordered by palette below.
+    struct Piece { size_t sub, t0, t1; std::set<uint16_t> bones; int pal = -1; };
+    std::vector<Piece> pieces;
+    for (size_t si = 0; si < subs.size(); ++si) {
+        const auto& s = subs[si];
         size_t t = 0;
         while (t + 2 < s.idx.size()) {
-            W3dBonePalette pal{};
-            std::map<uint16_t, uint8_t> local;   // global bone -> local index
-            std::map<uint32_t, uint16_t> vmap;   // source vertex -> output vertex (this piece)
-            W3dSkinSubmesh sm{};
-            sm.texSlot = s.texSlot; sm.blend = s.blend; sm.flags = s.flags; sm.geoset = s.geoset;
-            sm.palette = (uint16_t)palettes.size();
-            sm.firstIndex = (uint32_t)outIdx.size();
+            Piece pc;
+            pc.sub = si;
+            pc.t0 = t;
             for (; t + 2 < s.idx.size(); t += 3) {
                 std::set<uint16_t> need;
                 for (int k = 0; k < 3; ++k) {
@@ -250,46 +259,93 @@ std::vector<uint8_t> buildCreatureBlob(const wowee::pipeline::M2Model& m, int ma
                     if (f.w[1]) need.insert(f.bone[1]);
                 }
                 size_t fresh = 0;
-                for (uint16_t b : need) fresh += local.count(b) == 0;
-                if (local.size() + fresh > W3D_PALETTE_BONES) break;            // next piece
-                if (outVerts.size() + 3 > 65535) { info.error = "too many vertices"; return {}; }
-                for (uint16_t b : need)
-                    if (!local.count(b)) { local[b] = (uint8_t)pal.count; pal.bones[pal.count++] = b; }
-                for (int k = 0; k < 3; ++k) {
-                    uint32_t si = s.idx[t + k];
-                    auto it = vmap.find(si);
-                    if (it == vmap.end()) {
-                        const auto& v = m.vertices[si];
-                        const Influence& f = infl[si];
-                        W3dSkinVertex o{};
-                        o.x = q16((v.position.x - h.posOffset[0]) / h.posScale[0]);
-                        o.y = q16((v.position.y - h.posOffset[1]) / h.posScale[1]);
-                        o.z = q16((v.position.z - h.posOffset[2]) / h.posScale[2]);
-                        float nl = std::sqrt(v.normal.x * v.normal.x + v.normal.y * v.normal.y + v.normal.z * v.normal.z);
-                        if (nl < 1e-6f) nl = 1;
-                        o.nx = (int8_t)std::lround(v.normal.x / nl * 127);
-                        o.ny = (int8_t)std::lround(v.normal.y / nl * 127);
-                        o.nz = (int8_t)std::lround(v.normal.z / nl * 127);
-                        o.u = q16(v.texCoords[0].x / W3D_MODEL_UV_SCALE);
-                        o.v = q16((1.0f - v.texCoords[0].y) / W3D_MODEL_UV_SCALE);
-                        o.bone[0] = (uint8_t)(local[f.bone[0]] * 3);
-                        o.bone[1] = (uint8_t)(local[f.w[1] ? f.bone[1] : f.bone[0]] * 3);
-                        o.weight[0] = f.w[0];
-                        o.weight[1] = f.w[1];
-                        it = vmap.emplace(si, (uint16_t)outVerts.size()).first;
-                        outVerts.push_back(o);
-                        outPos.insert(outPos.end(), {v.position.x, v.position.y, v.position.z});
-                        outUv.insert(outUv.end(), {v.texCoords[0].x, v.texCoords[0].y});
-                        outBone.push_back(f.bone[0]);
-                    }
-                    outIdx.push_back(it->second);
+                for (uint16_t b : need) fresh += pc.bones.count(b) == 0;
+                if (pc.bones.size() + fresh > W3D_PALETTE_BONES) break;            // next piece
+                pc.bones.insert(need.begin(), need.end());
+            }
+            pc.t1 = t;
+            if (pc.t1 == pc.t0) { info.error = "triangle needs more bones than a palette holds"; return {}; }
+            pieces.push_back(std::move(pc));
+        }
+    }
+    {   // best fit: the biggest pieces first, each into the palette it adds the fewest bones to (the most shared on a tie)
+        std::vector<size_t> order(pieces.size());
+        for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+        std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return pieces[a].bones.size() > pieces[b].bones.size(); });
+        std::vector<std::set<uint16_t>> sets;
+        for (size_t oi : order) {
+            Piece& pc = pieces[oi];
+            int best = -1;
+            size_t bestAdd = 0, bestShare = 0;
+            for (size_t k = 0; k < sets.size(); ++k) {
+                size_t add = 0;
+                for (uint16_t b : pc.bones) add += sets[k].count(b) == 0;
+                if (sets[k].size() + add > W3D_PALETTE_BONES) continue;
+                const size_t share = pc.bones.size() - add;
+                if (best < 0 || add < bestAdd || (add == bestAdd && share > bestShare)) { best = (int)k; bestAdd = add; bestShare = share; }
+            }
+            if (best < 0) { best = (int)sets.size(); sets.emplace_back(); }
+            sets[(size_t)best].insert(pc.bones.begin(), pc.bones.end());
+            pc.pal = best;
+        }
+        for (const auto& st : sets) {
+            W3dBonePalette pal{};
+            for (uint16_t b : st) pal.bones[pal.count++] = b;
+            palettes.push_back(pal);
+        }
+    }
+    {   // the vertices: one copy per palette (pieces of one palette share them), bone indices local to it
+        std::vector<std::map<uint16_t, uint8_t>> local(palettes.size());
+        for (size_t k = 0; k < palettes.size(); ++k)
+            for (uint16_t i = 0; i < palettes[k].count; ++i) local[k][palettes[k].bones[i]] = (uint8_t)i;
+        std::vector<std::map<uint32_t, uint16_t>> vmap(palettes.size());   // source vertex -> output vertex, per palette
+        for (const Piece& pc : pieces) {
+            const auto& s = subs[pc.sub];
+            W3dSkinSubmesh sm{};
+            sm.texSlot = s.texSlot; sm.blend = s.blend; sm.flags = s.flags; sm.geoset = s.geoset;
+            sm.palette = (uint16_t)pc.pal;
+            sm.firstIndex = (uint32_t)outIdx.size();
+            auto& lp = local[(size_t)pc.pal];
+            for (size_t t = pc.t0; t < pc.t1; ++t) {
+                const uint32_t si = s.idx[t];
+                auto it = vmap[(size_t)pc.pal].find(si);
+                if (it == vmap[(size_t)pc.pal].end()) {
+                    if (outVerts.size() + 1 > 65535) { info.error = "too many vertices"; return {}; }
+                    const auto& v = m.vertices[si];
+                    const Influence& f = infl[si];
+                    W3dSkinVertex o{};
+                    o.x = q16((v.position.x - h.posOffset[0]) / h.posScale[0]);
+                    o.y = q16((v.position.y - h.posOffset[1]) / h.posScale[1]);
+                    o.z = q16((v.position.z - h.posOffset[2]) / h.posScale[2]);
+                    float nl = std::sqrt(v.normal.x * v.normal.x + v.normal.y * v.normal.y + v.normal.z * v.normal.z);
+                    if (nl < 1e-6f) nl = 1;
+                    o.nx = (int8_t)std::lround(v.normal.x / nl * 127);
+                    o.ny = (int8_t)std::lround(v.normal.y / nl * 127);
+                    o.nz = (int8_t)std::lround(v.normal.z / nl * 127);
+                    o.u = q16(v.texCoords[0].x / W3D_MODEL_UV_SCALE);
+                    o.v = q16((1.0f - v.texCoords[0].y) / W3D_MODEL_UV_SCALE);
+                    o.bone[0] = (uint8_t)(lp[f.bone[0]] * 3);
+                    o.bone[1] = (uint8_t)(lp[f.w[1] ? f.bone[1] : f.bone[0]] * 3);
+                    o.weight[0] = f.w[0];
+                    o.weight[1] = f.w[1];
+                    it = vmap[(size_t)pc.pal].emplace(si, (uint16_t)outVerts.size()).first;
+                    outVerts.push_back(o);
+                    outPos.insert(outPos.end(), {v.position.x, v.position.y, v.position.z});
+                    outUv.insert(outUv.end(), {v.texCoords[0].x, v.texCoords[0].y});
+                    outBone.push_back(f.bone[0]);
                 }
+                outIdx.push_back(it->second);
             }
             sm.indexCount = (uint32_t)outIdx.size() - sm.firstIndex;
-            if (sm.indexCount == 0) { info.error = "triangle needs more bones than a palette holds"; return {}; }
-            palettes.push_back(pal);
             outSubs.push_back(sm);
         }
+        // drawn in this order: the opaque / cut-out parts first, then the blended ones; within each, palette by palette
+        // (the M2's own order otherwise)
+        auto blended = [](const W3dSkinSubmesh& x) { return x.blend == W3D_BLEND_ALPHA || x.blend == W3D_BLEND_ADD; };
+        std::stable_sort(outSubs.begin(), outSubs.end(), [&](const W3dSkinSubmesh& a, const W3dSkinSubmesh& b) {
+            if (blended(a) != blended(b)) return !blended(a);
+            return a.palette < b.palette;
+        });
     }
 
     // ---- 3b. stage 6.12: lighter versions of each piece for the distance (same vertices and palette). Joints stay: a vertex
@@ -329,6 +385,82 @@ std::vector<uint8_t> buildCreatureBlob(const wowee::pipeline::M2Model& m, int ma
             o.parent = (sb.parentBone >= 0 && (size_t)sb.parentBone < b) ? sb.parentBone : -1;
             o.flags = (uint16_t)sb.flags;
             o.pivot[0] = sb.pivot.x; o.pivot[1] = sb.pivot.y; o.pivot[2] = sb.pivot.z;
+        }
+    }
+    // ---- 4b. 7.0: the far skeleton. At the farthest level (LOD 2) every piece is drawn with ONE palette: the W3D_PALETTE_BONES
+    // bones that carry the most of the mesh (with their ancestors), every other bone following its nearest kept ancestor (a
+    // finger its hand, a jaw its head - nothing anyone sees at 45 yards). The LOD-2 triangles get their own vertex copies with
+    // the bones remapped; header.farPalette names the palette (index + 1). One upload per unit at that distance instead of 3-10.
+    if (boneCount > W3D_PALETTE_BONES && !outSubs.empty()) {
+        std::vector<double> sub(boneCount, 0.0);
+        for (uint16_t b : outBone) if (b < boneCount) sub[b] += 1.0;
+        for (size_t b = boneCount; b-- > 0;)
+            if (bones[b].parent >= 0) sub[(size_t)bones[b].parent] += sub[b];
+        std::vector<size_t> ord;
+        for (size_t b = 0; b < boneCount; ++b) if (sub[b] > 0) ord.push_back(b);
+        std::stable_sort(ord.begin(), ord.end(), [&](size_t a, size_t c) { return sub[a] > sub[c]; });   // (a parent before its child)
+        std::vector<int> keep(boneCount, -1);
+        W3dBonePalette far{};
+        // every root that carries mesh first (a bone without a kept ancestor would follow nothing); too many roots: no far skeleton
+        size_t roots = 0;
+        for (size_t b : ord) if (bones[b].parent < 0) ++roots;
+        if (roots <= W3D_PALETTE_BONES)
+            for (size_t b : ord)
+                if (bones[b].parent < 0) { keep[b] = far.count; far.bones[far.count++] = (uint16_t)b; }
+        for (size_t b : ord) {
+            if (roots > W3D_PALETTE_BONES) break;
+            if (keep[b] >= 0) continue;
+            if (far.count >= W3D_PALETTE_BONES) break;
+            const int p = bones[b].parent;
+            if (p >= 0 && keep[(size_t)p] < 0 && sub[(size_t)p] > 0) continue;   // its parent did not make it: neither does it
+            keep[b] = far.count;
+            far.bones[far.count++] = (uint16_t)b;
+        }
+        std::vector<int> mapTo(boneCount, -1);   // bone -> far palette slot
+        for (size_t b = 0; b < boneCount; ++b) {
+            if (keep[b] >= 0) mapTo[b] = keep[b];
+            else if (bones[b].parent >= 0) mapTo[b] = mapTo[(size_t)bones[b].parent];
+        }
+        for (int& x : mapTo) if (x < 0) x = 0;   // (bones that carry no mesh: never referenced)
+        if (far.count > 0 && roots <= W3D_PALETTE_BONES) {
+            const uint16_t farIdx = (uint16_t)palettes.size();
+            std::map<uint16_t, uint16_t> fmap;   // output vertex -> its far copy
+            bool ok = true;
+            std::vector<W3dSubLod> newLods = lods;
+            std::vector<uint16_t> extra;
+            for (size_t i = 0; i < outSubs.size() && ok; ++i) {
+                // the lightest level there is (LOD 2, else LOD 1, else the full piece)
+                const W3dSkinSubmesh& sm = outSubs[i];
+                uint32_t first = sm.firstIndex, count = sm.indexCount;
+                for (int k = W3D_MODEL_LODS; k >= 1; --k)
+                    if (lods[i].indexCount[k - 1]) { first = lods[i].firstIndex[k - 1]; count = lods[i].indexCount[k - 1]; break; }
+                const W3dBonePalette& pp = palettes[sm.palette];
+                newLods[i].firstIndex[W3D_MODEL_LODS - 1] = (uint32_t)(outIdx.size() + extra.size());
+                newLods[i].indexCount[W3D_MODEL_LODS - 1] = count;
+                for (uint32_t k = 0; k < count; ++k) {
+                    const uint16_t vi = outIdx[first + k];
+                    auto it = fmap.find(vi);
+                    if (it == fmap.end()) {
+                        if (outVerts.size() + 1 > 65535) { ok = false; break; }
+                        W3dSkinVertex o = outVerts[vi];
+                        for (int j = 0; j < 2; ++j) {
+                            const uint16_t g = pp.bones[o.bone[j] / 3 < pp.count ? o.bone[j] / 3 : 0];
+                            o.bone[j] = (uint8_t)(mapTo[g < boneCount ? g : 0] * 3);
+                        }
+                        if (o.bone[0] == o.bone[1]) { o.weight[0] = 255; o.weight[1] = 0; }
+                        it = fmap.emplace(vi, (uint16_t)outVerts.size()).first;
+                        outVerts.push_back(o);
+                    }
+                    extra.push_back(it->second);
+                }
+            }
+            if (ok) {
+                outIdx.insert(outIdx.end(), extra.begin(), extra.end());
+                lods = newLods;
+                palettes.push_back(far);
+                h.farPalette = (uint16_t)(farIdx + 1);
+                ++info.farSkeletons;
+            }
         }
     }
     // Sequences: the animations the 3DS plays (creatureAnimIds, in priority order), first variation of each id.

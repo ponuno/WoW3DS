@@ -93,7 +93,7 @@ def dbc(fields, rows):
     return b"WDBC" + struct.pack("<IIII", len(rows), fields, fields * 4, len(strings)) + recs + strings
 
 write("DBFilesClient/CreatureModelData.dbc", dbc(6, [
-    [11, 0, "Creature\\Testwolf\\Testwolf.mdx", 1, 1.0, 0],
+    [11, 0, "Creature\\Testwolf\\Testwolf.mdx", 1, 1.5, 0],   # 6.60: the model asks for 1.5 of its own
     [49, 0, "Character\\Human\\Male\\HumanMale.mdx", 1, 1.0, 0],
     [77, 0, "Creature\\Missing\\Missing.mdx", 1, 1.0, 0]]))
 write("DBFilesClient/CreatureDisplayInfo.dbc", dbc(11, [
@@ -195,8 +195,8 @@ def wowee_geosets(scalp, f, robe=0, boots=0, cape=0):
 keep = wowee_geosets(5, (102, 201, 301), robe=1, boots=1)
 exp = {
     "displays": {
-        "1001": {"model": fnv("creature/testwolf/testwolf.m2"), "scale": 1.2, "skin1": fnv("Creature\\Testwolf\\TestwolfSkinGrey.blp")},
-        "1002": {"model": fnv("creature/testwolf/testwolf.m2"), "scale": 1.0, "skin1": fnv("Creature\\Testwolf\\TestwolfSkinBlack.blp")},
+        "1001": {"model": fnv("creature/testwolf/testwolf.m2"), "scale": 1.8, "skin1": fnv("Creature\\Testwolf\\TestwolfSkinGrey.blp")},
+        "1002": {"model": fnv("creature/testwolf/testwolf.m2"), "scale": 1.5, "skin1": fnv("Creature\\Testwolf\\TestwolfSkinBlack.blp")},
         "1003": {"model": fnv("character/human/male/humanmale.m2"), "scale": 1.0,
                  "body": fnv("Textures\\BakedNpcTextures\\HumanGuard.blp"), "hair": fnv("Character\\Human\\Hair04_07.blp"),
                  "geosets": keep}},

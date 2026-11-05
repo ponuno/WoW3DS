@@ -6,6 +6,7 @@
 
 #include <algorithm>
 
+#include "glue_data.hpp"
 #include "ui_style.hpp"
 #include "world.h"
 
@@ -25,6 +26,7 @@ void LoginFlow::init() {
             if (k == "server") server_ = v;
             else if (k == "account") account_ = v;
             else if (k == "protocol") protocol_ = atoi(v.c_str()) == 8 ? 8 : 3;
+            else if (k == "client") turtle_ = v == "turtle";   // 6.58
             else if (k == "log") logOn_ = atoi(v.c_str()) != 0;
             else if (k == "realm") lastRealm_ = v;
             else if (k == "character") lastChar_ = v;
@@ -41,8 +43,8 @@ void LoginFlow::saveConfig() {
     FILE* f = fopen(kCfgPath, "w");
     if (!f) return;
     // The password is never stored.
-    fprintf(f, "server=%s\naccount=%s\nprotocol=%d\nlog=%d\nrealm=%s\ncharacter=%s\n", server_.c_str(), account_.c_str(),
-            protocol_, logOn_ ? 1 : 0, lastRealm_.c_str(), lastChar_.c_str());
+    fprintf(f, "server=%s\naccount=%s\nprotocol=%d\nclient=%s\nlog=%d\nrealm=%s\ncharacter=%s\n", server_.c_str(), account_.c_str(),
+            protocol_, turtle_ ? "turtle" : "vanilla", logOn_ ? 1 : 0, lastRealm_.c_str(), lastChar_.c_str());
     fclose(f);
 }
 
@@ -99,7 +101,7 @@ void LoginFlow::act(GlueAction a) {
             }
             wait_ = tr("Connecting...", "Соединение...");
             waitFixed_ = false;
-            pending_ = Pending::Auth;   // next frame: the dialog is on the screen before the blocking connect
+            pending_ = Pending::Auth;   // next frame (the dialog is on the screen): the connect starts; polled from then on (6.55)
             break;
         case GlueAction::Offline:
             phase_ = Phase::Offline;
@@ -108,7 +110,10 @@ void LoginFlow::act(GlueAction a) {
             quit_ = true;
             break;
         case GlueAction::ToggleProtocol:
-            protocol_ = protocol_ == 3 ? 8 : 3;
+            // 6.58: 1.12 protocol 3 -> 1.12 protocol 8 -> Turtle 1.18 (Turtle WoW clones: OctoWoW ...) -> back
+            if (turtle_) { turtle_ = false; protocol_ = 3; }
+            else if (protocol_ == 3) protocol_ = 8;
+            else { turtle_ = true; protocol_ = 3; }
             saveConfig();
             break;
         case GlueAction::ToggleLog:
@@ -230,7 +235,7 @@ void LoginFlow::enterWorld() {
 // ----------------------------------------------------------------- the network
 void LoginFlow::network() {
     using ui::tr;
-    w3n::ClientVersion ver;
+    w3n::ClientVersion ver = turtle_ ? w3n::ClientVersion::turtle() : w3n::ClientVersion();
     ver.authProtocol = (uint8_t)protocol_;
     if (pending_ == Pending::Auth) {   // the "Connecting..." dialog was drawn last frame
         pending_ = Pending::None;
@@ -238,8 +243,7 @@ void LoginFlow::network() {
         std::fill(password_.begin(), password_.end(), '\0');
         password_.clear();
         if (!ok) { message(auth_.error()); phase_ = Phase::Menu; return; }
-        phase_ = Phase::Authenticating;
-        wait_ = tr("Authenticating...", "Проверка учётной записи...");
+        phase_ = Phase::Authenticating;   // (6.55: "Connecting..." stays up until the server answers; Cancel works meanwhile)
     } else if (pending_ == Pending::World) {
         pending_ = Pending::None;
         const w3n::Realm& r = auth_.realms()[(size_t)ui_.realm];
@@ -255,7 +259,9 @@ void LoginFlow::network() {
         case Phase::Authenticating:
             auth_.update();
             if (auth_.state() == w3n::AuthClient::State::Failed) { message(auth_.error()); phase_ = Phase::Menu; }
-            else if (auth_.state() == w3n::AuthClient::State::Done) {
+            else if (auth_.state() == w3n::AuthClient::State::Connecting) {}
+            else if (auth_.state() != w3n::AuthClient::State::Done) wait_ = tr("Authenticating...", "Проверка учётной записи...");
+            else {
                 wait_.clear();
                 phase_ = Phase::RealmSelect;
                 ui_.realm = 0;
@@ -284,7 +290,7 @@ void LoginFlow::network() {
                 phase_ = Phase::CharSelect;
                 ui_.character = 0;
                 selectByName(lastChar_);
-            } else {
+            } else if (world_.state() != w3n::WorldClient::State::Connecting) {   // (6.55: "Connecting to ..." until then)
                 wait_ = tr("Retrieving character list...", "Получение списка персонажей...");
             }
             break;
@@ -354,6 +360,7 @@ void LoginFlow::network() {
                 if (!game_.talents.loaded()) game_.talents.load("sdmc:/3ds/w3dproto/talents.txt");   // UI stage 4
                 if (!game_.spellDesc.loaded()) game_.spellDesc.load("sdmc:/3ds/w3dproto/spelldesc.bin");   // 6.20
                 if (!game_.skills.loaded()) game_.skills.load("sdmc:/3ds/w3dproto/skills.txt");      // 6.19: names of the skills page
+                if (!game_.recipes.loaded()) game_.recipes.load("sdmc:/3ds/w3dproto/recipes.txt");   // 6.38: the profession window
                 if (!game_.taxiTable.loaded()) game_.taxiTable.load("sdmc:/3ds/w3dproto/taxi.txt");  // UI stage 6
                 if (!game_.locks.loaded()) game_.locks.load("sdmc:/3ds/w3dproto/locks.txt");         // herbs, ore, chests
                 if (!game_.areaTriggers.loaded()) game_.areaTriggers.load("sdmc:/3ds/w3dproto/areatriggers.txt");   // dungeon doors, the tram
@@ -419,6 +426,8 @@ void LoginFlow::fillModel() {
     model_.account = account_;
     model_.havePassword = !password_.empty();
     model_.protocol = protocol_;
+    model_.turtle = turtle_;
+    glue::setTurtle(turtle_);
     model_.packetLog = logOn_;
     model_.wait = wait_;
     model_.waitFixed = waitFixed_;

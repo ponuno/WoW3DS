@@ -14,6 +14,7 @@
 // and the CPU adds a camera-relative translation, because PICA200 floats are
 // 24-bit (16-bit mantissa) and absolute world coords (~17000 yd) would jitter.
 #pragma once
+#include <math.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -44,7 +45,13 @@ enum W3dEntryType {
     W3D_ENTRY_SPELLFX   = W3D_FOURCC('S', 'V', 'F', 'X'),   // stage 5.33: spell visuals -> effect models (w3d_fx.h, id 0)
     W3D_ENTRY_FARLOD    = W3D_FOURCC('F', 'A', 'R', 'L'),   // stage 6.24: the map's far ground (w3d_farlod.h, id 0)
     W3D_ENTRY_FAROBJ    = W3D_FOURCC('F', 'A', 'R', 'O'),   // stage 6.29: the map's far buildings (w3d_farobj.h, id 0)
+    W3D_ENTRY_OBJWMO    = W3D_FOURCC('O', 'W', 'M', 'O'),   // 6.59: a game object whose model is a WMO (W3dObjWmoHeader, id 0x80000000 | display)
+    W3D_ENTRY_SKYBOX    = W3D_FOURCC('S', 'K', 'Y', 'B'),   // 6.61: a sky model of LightSkybox.dbc (W3dSkybox, id = LightSkybox id)
 };
+typedef struct {
+    uint32_t modelId;      // MODL entry (a static model in the M2's own space, a dome around the origin)
+    uint32_t reserved;
+} W3dSkybox;
 
 // ---------------------------------------------------------------- pack sets (stage 5.27)
 // One conversion of everything (w3dconv --all) writes a shared asset pool and a small pack per map:
@@ -161,7 +168,7 @@ enum W3dBlend { W3D_BLEND_OPAQUE = 0, W3D_BLEND_ALPHAKEY = 1, W3D_BLEND_ALPHA = 
 #define W3D_SUBF_TWO_SIDED 0x01u
 #define W3D_SUBF_UNLIT     0x02u
 #define W3D_SUBF_BUILDING  0x04u   // WMO group: drawn with doodads off, no doodad fade
-#define W3D_SUBF_INTERIOR  0x08u   // WMO interior-only group: drawn only near it (no portals yet)
+#define W3D_SUBF_INTERIOR  0x08u   // WMO interior-only group: drawn only when the portal walk reaches it (6.42; packs without portal tables: near the camera)
 #define W3D_NO_TEXTURE     0xFFFFu
 
 typedef struct {
@@ -172,6 +179,7 @@ typedef struct {
     uint32_t indexCount;
 } W3dSubmesh;                     // 12 bytes
 
+#define W3D_MODEL_LODS_MAX 2   /* = W3D_MODEL_LODS (defined below with the LOD table) */
 typedef struct {
     float    posScale[3];
     float    posOffset[3];
@@ -184,11 +192,19 @@ typedef struct {
     // after the full ones in the index buffer); absent in older packs
     uint32_t lodCount;            // W3D_MODEL_LODS, or 0
     uint32_t offLods;
+    // 6.41: moving textures (M2 texture transforms: lava, waterfalls, portals, runes): a W3dUvAnimTable, or 0; absent in older packs
+    uint32_t offUvAnim;
+    // 6.42: the portals of a WMO group (W3dPortalTable), or 0; absent in older packs
+    uint32_t offPortals;
+    // 6.47: how far (yards, model space) the LOD levels' surface may lie from the full mesh - a WMO group's levels are made by an
+    // absolute error and the client switches by that error's size on the screen; 0 = levels by share (the radius rule, w3d_lod_for).
+    // Absent in older packs.
+    float    lodErr[W3D_MODEL_LODS_MAX];
 } W3dModelHeader;
 
 // Stage 6.12: level k (1..W3D_MODEL_LODS) of a submesh: firstIndex[k-1] / indexCount[k-1]; a count of 0 = no lighter version
 // at that level (use the level below). Same layout for models (W3dSubmesh) and creatures (W3dSkinSubmesh).
-#define W3D_MODEL_LODS 2
+#define W3D_MODEL_LODS W3D_MODEL_LODS_MAX
 typedef struct {
     uint32_t firstIndex[W3D_MODEL_LODS];
     uint32_t indexCount[W3D_MODEL_LODS];
@@ -197,7 +213,10 @@ typedef struct {
 // Older blobs end their header earlier (the texture ids start right after the header the converter knew): 4 bytes without
 // uvScale, 8 more without the LOD table.
 #define W3D_MODEL_HDR_UV_END  ((uint32_t)(offsetof(W3dModelHeader, uvScale) + sizeof(float)))
-#define W3D_MODEL_HDR_LOD_END ((uint32_t)sizeof(W3dModelHeader))
+#define W3D_MODEL_HDR_LOD_END ((uint32_t)offsetof(W3dModelHeader, offUvAnim))
+#define W3D_MODEL_HDR_UVA_END ((uint32_t)offsetof(W3dModelHeader, offPortals))
+#define W3D_MODEL_HDR_PORTAL_END ((uint32_t)offsetof(W3dModelHeader, lodErr))
+#define W3D_MODEL_HDR_LODERR_END ((uint32_t)sizeof(W3dModelHeader))
 static inline float w3d_model_uv_scale(const W3dModelHeader* h) {
     return (h->offTexIds >= W3D_MODEL_HDR_UV_END && h->uvScale > 0) ? h->uvScale : W3D_MODEL_UV_SCALE;
 }
@@ -212,11 +231,113 @@ static inline const W3dSubLod* w3d_lods_check(const uint8_t* blob, uint32_t size
             if ((uint64_t)l[i].firstIndex[k] + l[i].indexCount[k] > indexCount || l[i].indexCount[k] % 3) return 0;
     return l;
 }
+// 6.47: the absolute error of LOD level k (1..W3D_MODEL_LODS) in yards, or 0 (older pack / a level made by share)
+static inline float w3d_model_lod_err(const W3dModelHeader* h, int k) {
+    if (k < 1 || k > W3D_MODEL_LODS || h->offTexIds < W3D_MODEL_HDR_LODERR_END || h->offSubmeshes < W3D_MODEL_HDR_LODERR_END) return 0;
+    const float e = h->lodErr[k - 1];
+    return e > 0 && e < 1000.0f ? e : 0;
+}
 static inline const W3dSubLod* w3d_model_lods(const uint8_t* blob, uint32_t size) {
     const W3dModelHeader* h = (const W3dModelHeader*)blob;
     if (size < sizeof(W3dModelHeader) || h->offTexIds < W3D_MODEL_HDR_LOD_END || h->offSubmeshes < W3D_MODEL_HDR_LOD_END)
         return 0;
     return w3d_lods_check(blob, size, h->lodCount, h->offLods, h->submeshCount, h->indexCount);
+}
+
+// ---------------------------------------------------------------- WMO portals (6.42)
+// The doors / windows between the groups (rooms) of a WMO, which decide which interior groups are drawn: from the group the camera is
+// in, through every portal that faces it and is in view, to the group behind it (and on from there). Every portal is stored in both
+// groups it joins, in the model space of the group that holds it (the WMO frame minus the group's centre; a placement turns and
+// moves every group of a WMO alike, so the same turn and the centre difference 'delta' carry it to the other group).
+#define W3D_PORTAL_NOFACE 1u       // the plane's side could not be told: no facing test
+typedef struct {
+    uint32_t toModel;              // model id of the group on the other side
+    float    delta[3];             // that group's centre minus this one's (model space)
+    float    plane[4];             // normal n (out of this group, into the other) and d: n . p = d
+    float    center[3], radius;    // bounding sphere of the portal's polygon
+    uint32_t flags;                // W3D_PORTAL_*
+} W3dPortal;                       // 56 bytes
+typedef struct {
+    uint32_t count;
+    uint32_t pad;                  // W3dPortal[count] follow
+} W3dPortalTable;
+#define W3D_PORTAL_MAX 64
+
+// The portal table of a model blob checked against its size, or null (old pack / none / broken).
+static inline const W3dPortalTable* w3d_model_portals(const uint8_t* blob, uint32_t size) {
+    const W3dModelHeader* h = (const W3dModelHeader*)blob;
+    if (!blob || size < sizeof(W3dModelHeader) || h->offTexIds < W3D_MODEL_HDR_PORTAL_END || !h->offPortals || (h->offPortals & 3) ||
+        (uint64_t)h->offPortals + sizeof(W3dPortalTable) > size)
+        return 0;
+    const W3dPortalTable* t = (const W3dPortalTable*)(blob + h->offPortals);
+    if (t->count > W3D_PORTAL_MAX || (uint64_t)h->offPortals + sizeof(W3dPortalTable) + (uint64_t)t->count * sizeof(W3dPortal) > size)
+        return 0;
+    return t;
+}
+static inline const W3dPortal* w3d_portals_of(const W3dPortalTable* t) { return (const W3dPortal*)(t + 1); }
+
+// ---------------------------------------------------------------- moving textures (6.41)
+// An M2 texture transform (UV translation / rotation / scale tracks) baked to one looping table per transform:
+// W3D_UVA_MAX_KEYS samples at most over periodMs, each {du, dv, rot, su, sv} in the M2's own UV space (v not flipped): the
+// texture coordinate becomes R(rot) * S(su, sv) * (uv - 0.5) + 0.5 + (du, dv). The submesh's index (W3dUvAnimTable::offSub,
+// uint16_t[submeshCount]) picks the table (0xFFFF = a still texture). The last key is the value at the end of the period, so
+// a scroll that wraps by one texture is smooth between the last key and the first.
+#define W3D_UVA_MAX_KEYS 33
+#define W3D_UVA_NONE 0xFFFFu
+typedef struct { float du, dv, rot, su, sv; } W3dUvKey;          // 20 bytes
+typedef struct {
+    uint32_t periodMs;
+    uint16_t keyCount, pad;
+    uint32_t offKeys;             // blob offset of W3dUvKey[keyCount] (4-aligned)
+} W3dUvAnim;                      // 12 bytes
+typedef struct {
+    uint32_t animCount, offAnims; // W3dUvAnim[animCount]
+    uint32_t offSub;              // uint16_t[submeshCount]
+    uint32_t pad;
+} W3dUvAnimTable;                 // 16 bytes
+
+// The table of a model blob checked against its size, or null (old pack / none / broken).
+static inline const W3dUvAnimTable* w3d_model_uvanim(const uint8_t* blob, uint32_t size) {
+    const W3dModelHeader* h = (const W3dModelHeader*)blob;
+    if (!blob || size < sizeof(W3dModelHeader) || h->offTexIds < W3D_MODEL_HDR_UVA_END || !h->offUvAnim || (h->offUvAnim & 3) ||
+        (uint64_t)h->offUvAnim + sizeof(W3dUvAnimTable) > size)
+        return 0;
+    const W3dUvAnimTable* t = (const W3dUvAnimTable*)(blob + h->offUvAnim);
+    if (!t->animCount || t->animCount > 64 || (t->offAnims & 3) || (t->offSub & 1)) return 0;
+    if ((uint64_t)t->offAnims + (uint64_t)t->animCount * sizeof(W3dUvAnim) > size) return 0;
+    if ((uint64_t)t->offSub + (uint64_t)h->submeshCount * 2u > size) return 0;
+    const W3dUvAnim* a = (const W3dUvAnim*)(blob + t->offAnims);
+    for (uint32_t i = 0; i < t->animCount; ++i)
+        if (!a[i].periodMs || a[i].keyCount < 2 || a[i].keyCount > W3D_UVA_MAX_KEYS || (a[i].offKeys & 3) ||
+            (uint64_t)a[i].offKeys + (uint64_t)a[i].keyCount * sizeof(W3dUvKey) > size)
+            return 0;
+    return t;
+}
+// The animation of submesh s (null: it stands still).
+static inline const W3dUvAnim* w3d_uv_of(const uint8_t* blob, const W3dUvAnimTable* t, uint32_t s) {
+    const uint16_t i = ((const uint16_t*)(blob + t->offSub))[s];
+    return i < t->animCount ? (const W3dUvAnim*)(blob + t->offAnims) + i : 0;
+}
+// The shader's two rows {m00, m01, b, 0} / {m10, m11, b, 0} for the vertex's (u, v) as stored (v flipped: t = 1 - v) at timeMs:
+// uv' = M * uv + b. Derivation: with F(x) = (x.u, 1 - x.v), P' = F(R S (F(P) - c) + c + d), L = diag(1, -1).
+static inline void w3d_uv_rows(const uint8_t* blob, const W3dUvAnim* a, uint32_t timeMs, float row0[4], float row1[4]) {
+    const W3dUvKey* k = (const W3dUvKey*)(blob + a->offKeys);
+    const float pos = (float)(timeMs % a->periodMs) / (float)a->periodMs * (float)(a->keyCount - 1);
+    uint32_t i = (uint32_t)pos;
+    if (i >= (uint32_t)a->keyCount - 1) i = a->keyCount - 2;
+    const float f = pos - (float)i;
+    float v[5];
+    for (int c = 0; c < 5; ++c) v[c] = ((const float*)&k[i])[c] * (1.0f - f) + ((const float*)&k[i + 1])[c] * f;
+    // A = R(rot) * diag(su, sv) in the M2's UV space
+    const float cs = cosf(v[2]), sn = sinf(v[2]);
+    const float a00 = cs * v[3], a01 = -sn * v[4], a10 = sn * v[3], a11 = cs * v[4];
+    // M = L A L
+    row0[0] = a00;  row0[1] = -a01; row1[0] = -a10; row1[1] = a11;
+    // b = L A (F(0) - c) + L (c + d) + (0, 1), with F(0) - c = (-0.5, 0.5)
+    const float tx = a00 * -0.5f + a01 * 0.5f, ty = a10 * -0.5f + a11 * 0.5f;
+    row0[2] = tx + 0.5f + v[0];
+    row1[2] = -(ty + 0.5f + v[1]) + 1.0f;
+    row0[3] = row1[3] = 0.0f;
 }
 
 // ---------------------------------------------------------------- placements
@@ -232,6 +353,30 @@ typedef struct {
     uint32_t pad[3];
     // W3dPlacement[count]
 } W3dPlacementHeader;
+
+// 6.59: a game object whose model is a building (GameObjectDisplayInfo -> .wmo: Turtle WoW places its new houses, towers and ruins
+// this way). The WMO's groups (MODL entries, as the buildings of the tiles) and the furniture of its doodad set 0 as placements in
+// the object's own space (the object's matrix T(pos) * Rz(yaw) * S(scale) in front of each), then its collision triangles in the
+// same space (floors and walls alike, 9 floats each; the client sorts them by their normal).
+typedef struct {
+    uint32_t partCount;
+    uint32_t collTriCount;
+    float    radius;              // around the object's origin, every part and triangle inside
+    float    bmin[3], bmax[3];    // of the collision triangles (object space)
+    uint32_t pad[1];
+    // W3dPlacement[partCount]; float[collTriCount * 9]
+} W3dObjWmoHeader;                // 40 bytes
+// 6.59c: what the client can use - the converter writes nothing bigger (a whole city or dungeon as an object: its collision grid
+// is a tile's, 533 yd, and thousands of parts would stall the frame)
+#define W3D_OBJWMO_MAX_PARTS  4096u
+#define W3D_OBJWMO_MAX_COLL   200000u
+#define W3D_OBJWMO_MAX_EXTENT 531.0f   /* yd, x and y of the collision box */
+static inline int w3d_objwmo_valid(const uint8_t* b, uint32_t size) {
+    if (!b || size < sizeof(W3dObjWmoHeader)) return 0;
+    const W3dObjWmoHeader* h = (const W3dObjWmoHeader*)b;
+    return h->partCount <= W3D_OBJWMO_MAX_PARTS && h->collTriCount <= W3D_OBJWMO_MAX_COLL &&
+           sizeof(W3dObjWmoHeader) + (uint64_t)h->partCount * sizeof(W3dPlacement) + (uint64_t)h->collTriCount * 36u <= size;
+}
 
 // ---------------------------------------------------------------- water
 // Liquid surfaces of one tile: the terrain's (MCLQ) and the buildings' (WMO MLIQ) that the tile owns.
@@ -364,7 +509,7 @@ enum W3dAnimId {
     W3D_ANIM_SWIM_BACKWARDS = 45, W3D_ANIM_ATTACK_BOW = 46, W3D_ANIM_FIRE_BOW = 47, W3D_ANIM_READY_RIFLE = 48,
     W3D_ANIM_ATTACK_RIFLE = 49, W3D_ANIM_LOOT = 50, W3D_ANIM_READY_SPELL_DIRECTED = 51, W3D_ANIM_READY_SPELL_OMNI = 52,
     W3D_ANIM_SPELL_CAST_DIRECTED = 53, W3D_ANIM_SPELL_CAST_OMNI = 54, W3D_ANIM_BATTLE_ROAR = 55,
-    W3D_ANIM_EMOTE_TALK = 60, W3D_ANIM_ATTACK_OFF = 87, W3D_ANIM_MOUNT = 91, W3D_ANIM_FLY = 135,
+    W3D_ANIM_EMOTE_TALK = 60, W3D_ANIM_ATTACK_OFF = 87, W3D_ANIM_SHEATHE = 89, W3D_ANIM_HIP_SHEATHE = 90, W3D_ANIM_MOUNT = 91, W3D_ANIM_FLY = 135,
     W3D_ANIM_SIT_GROUND_DOWN = 96, W3D_ANIM_SIT_GROUND = 97, W3D_ANIM_SIT_GROUND_UP = 98,
     W3D_ANIM_SLEEP_DOWN = 99, W3D_ANIM_SLEEP = 100, W3D_ANIM_SLEEP_UP = 101,
     W3D_ANIM_SIT_CHAIR_LOW = 102, W3D_ANIM_SIT_CHAIR_MED = 103, W3D_ANIM_SIT_CHAIR_HIGH = 104,
@@ -431,7 +576,7 @@ typedef struct {
     uint32_t offTex, offSubmeshes, offVertices, offIndices;
     uint32_t offPalettes, offBones, offSeqs, offKeys;
     int16_t  seatBone;            // mounts: the rider's seat (attachment 0/5/6/7/8), -1 = none
-    uint16_t pad2;
+    uint16_t farPalette;          // 7.0: the palette (index + 1) every piece uses at LOD 2 (its own vertex copies there); 0 = none
     float    seat[3];             // offset from that bone's pivot, model space (bind pose)
     uint32_t attachCount;         // v5: attachment points worn items hang on (W3dAttach)
     uint32_t offAttach;
@@ -476,6 +621,22 @@ enum W3dAttachId { W3D_ATT_SHIELD = 0, W3D_ATT_RHAND = 1, W3D_ATT_LHAND = 2, W3D
                    W3D_ATT_SHEATH_SHIELD = 28, W3D_ATT_LARGE_LEFT = 30, W3D_ATT_LARGE_RIGHT = 31, W3D_ATT_HIP_LEFT = 32,
                    W3D_ATT_HIP_RIGHT = 33 };
 
+// 6.92 (as WoWee's AppearanceComposer::weaponLocalTransform, tuned there against the live attachment 12): a two-hander / bow / gun
+// sheathed on the back (attachment 12) gets this extra matrix after bone * T(point): T(-0.03, -0.10, 0) * Rx(33) * Ry(90) * Rx(90).
+// Item models are authored along local X (the character's front-back axis): the blade is stood up, canted across the back and
+// rolled flat against it. 3x4, row-major, like the bone poses. Every other sheathed item takes its orientation from the bone.
+static inline void w3d_back_weapon_xform(float m[12]) {
+    const float a = 33.0f * 3.14159265358979f / 180.0f;
+    const float ca = cosf(a), sa = sinf(a);
+    // Rx(33) * Ry(90) * Rx(90): Ry(90) = [[0,0,1],[0,1,0],[-1,0,0]], Rx(90) = [[1,0,0],[0,0,-1],[0,1,0]]
+    // Ry*Rx = [[0,1,0],[0,0,-1],[-1,0,0]]
+    const float yx[9] = {0, 1, 0, 0, 0, -1, -1, 0, 0};
+    const float rx[9] = {1, 0, 0, 0, ca, -sa, 0, sa, ca};
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c) m[r * 4 + c] = rx[r * 3] * yx[c] + rx[r * 3 + 1] * yx[3 + c] + rx[r * 3 + 2] * yx[6 + c];
+    m[3] = -0.03f; m[7] = -0.10f; m[11] = 0.0f;
+}
+
 #define W3D_DISPLAY_GEOSETS 32
 typedef struct {
     uint32_t modelId;             // CMDL id
@@ -483,8 +644,22 @@ typedef struct {
     uint32_t tex[5];              // TEX ids for W3D_CTEX_SKIN1..3, BODY, HAIR (0 = none)
     uint16_t geosetCount;         // 0 = every submesh
     uint16_t geosets[W3D_DISPLAY_GEOSETS];
-    uint16_t pad;
+    uint16_t modelScaleMilli;     // 6.78: CreatureModelData.ModelScale x 1000 (its part of 'scale'); 0 = older pack (not known)
 } W3dDisplay;                     // 96 bytes
+
+// 6.78: the size a unit is drawn at. The game's rule is model scale x display scale x the unit's OBJECT_FIELD_SCALE_X - but the
+// MaNGOS family (vMaNGOS, CMaNGOS) already puts the display's scale (or creature_template.scale) into the unit's field, so multiplying
+// by the display again shrank every scaled creature twice (perf log 6.74: unit 0.85 x display 0.85 = 0.72; a bat 0.40 x 0.10 = 0.04).
+// When the server sends 1 it left the display's scale to the client (WoWee's server): model x display. Otherwise the server's value is
+// the creature's size, and only the model's own scale is added.
+static inline float w3d_unit_draw_scale(float unit, const W3dDisplay* d) {
+    const float ds = d && d->scale > 0.01f ? d->scale : 1.0f;   // display x model (the converter multiplies them since 6.60)
+    if (!(unit > 0.01f)) unit = 1.0f;
+    if (unit > 0.99f && unit < 1.01f) return ds;
+    if (d && d->modelScaleMilli) return unit * ((float)d->modelScaleMilli / 1000.0f);
+    if (unit > ds - 0.011f && unit < ds + 0.011f) return unit;  // (older pack: the same number twice is the display's scale)
+    return unit * ds;
+}
 
 // ---------------------------------------------------------------- glue screens (stage 5.29)
 // The 3D scenes behind the login screen and the character screens: Interface\Glues\Models\UI_*.m2 converted as one static

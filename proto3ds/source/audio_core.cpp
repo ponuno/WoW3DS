@@ -16,6 +16,19 @@ namespace snd {
 namespace {
 constexpr float kTile = 533.33333f;
 
+// 7.07: the sounds of a fight. With a sound pack these play the client's own files or nothing - never a built-in sine blip: the
+// blips stood in for spells, blows and spell damage the pack has no file for, and "a beep instead of the spell's sound" was the
+// result (most spells hit with a school blip on top of their own impact; physical abilities had only the blip). The original
+// plays nothing where its data has no sound. Without any pack (no sfx.w3ds) the blips stay, as before.
+bool combatEvent(const char* e) {
+    static const char* const k[] = {"spellcast", "spellcast_fire", "spellcast_frost", "spellcast_holy", "spellcast_nature",
+                                    "spellcast_shadow", "spellcast_arcane", "spellfail", "hit", "hitcrit", "hitfire", "hitfrost",
+                                    "hitnature", "hitshadow", "hitarcane", "hitholy", "hitburn", "hitfall", "hitdrown", "swing"};
+    for (const char* c : k)
+        if (!strcmp(e, c)) return true;
+    return false;
+}
+
 // events without their own sound use another one's
 const char* fallbackOf(const std::string& e) {
     static const std::pair<const char*, const char*> k[] = {
@@ -23,7 +36,10 @@ const char* fallbackOf(const std::string& e) {
         {"questsopen", "open"}, {"questsclose", "close"}, {"npcopen", "open"}, {"npcclose", "close"},
         {"auctionopen", "npcopen"}, {"auctionclose", "npcclose"}, {"questabandon", "close"}, {"mail", "click"},
         {"questaccept", "click"}, {"tab", "click"}, {"targetfriend", "targethostile"}, {"targetneutral", "targethostile"},
-        {"invite", "whisper"},
+        {"invite", "whisper"}, {"lootroll", "invite"}, {"equip", "lootitem"}, {"trade", "coin"}, {"questupdate", "click"}, {"error", "targetlost"},
+        {"spellcast_fire", "spellcast"}, {"spellcast_frost", "spellcast"}, {"spellcast_holy", "spellcast"}, {"spellcast_nature", "spellcast"},
+        {"spellcast_shadow", "spellcast"}, {"spellcast_arcane", "spellcast"},
+        {"hitcrit", "hit"},   // 7.07
     };
     for (const auto& [a, b] : k)
         if (e == a) return b;
@@ -48,7 +64,9 @@ SfxBank::~SfxBank() { release(); }
 
 void SfxBank::release() {
     if (blob_) (free_ ? free_ : ::free)(blob_);
+    if (extra_) (extraFree_ ? extraFree_ : ::free)(extra_);
     blob_ = nullptr;
+    extra_ = nullptr;
     size_ = 0;
     clips_.clear();
 }
@@ -94,6 +112,17 @@ const Clip* SfxBank::pick(const char* event) {
 
 bool SfxBank::synthesize(Alloc a, Free f) {
     release();
+    return synthInto(a, f, false, nullptr);
+}
+
+size_t SfxBank::synthesizeMissing(Alloc a, Free f) {
+    size_t n = 0;
+    if (!blob_ || extra_) return 0;
+    synthInto(a, f, true, &n);
+    return n;
+}
+
+bool SfxBank::synthInto(Alloc a, Free f, bool missingOnly, size_t* added) {
     // tone(ms, f0 -> f1 Hz, amplitude) segments per event; quiet, short, sine with a quick fade
     struct Seg { int ms; float f0, f1, amp; };
     struct Ev { const char* name; std::vector<Seg> segs; };
@@ -109,11 +138,41 @@ bool SfxBank::synthesize(Alloc a, Free f) {
         {"whisper", {{90, 1400, 1400, 0.16f}, {120, 1000, 1000, 0.14f}}},
         {"targethostile", {{35, 700, 600, 0.14f}}},
         {"targetlost", {{35, 500, 400, 0.10f}}},
+        // 6.39: an item picked up / created; our own spell going off or fizzling when the client has no sound for it
+        {"lootitem", {{35, 900, 1300, 0.16f}, {55, 1500, 1100, 0.12f}}},
+        {"spellcast", {{40, 300, 900, 0.14f}, {110, 900, 500, 0.12f}}},
+        // 6.95: melee blows when the pack has no weapon / creature sound: a dull thud, a harder one, a whoosh
+        {"hit", {{45, 230, 90, 0.26f}, {40, 150, 70, 0.18f}}},
+        {"hitcrit", {{50, 320, 80, 0.3f}, {50, 180, 60, 0.24f}, {50, 900, 400, 0.1f}}},
+        // 6.95: spells and the environment hurting us, by school
+        {"hitfire", {{60, 520, 260, 0.12f}, {40, 900, 500, 0.08f}, {50, 400, 220, 0.1f}}},
+        {"hitfrost", {{35, 1600, 1000, 0.1f}, {35, 1200, 800, 0.09f}, {60, 900, 600, 0.07f}}},
+        {"hitnature", {{50, 420, 300, 0.14f}, {50, 560, 380, 0.1f}}},
+        {"hitshadow", {{90, 200, 120, 0.18f}, {60, 150, 90, 0.14f}}},
+        {"hitarcane", {{40, 900, 1500, 0.1f}, {40, 1500, 700, 0.1f}}},
+        {"hitholy", {{50, 1100, 1100, 0.11f}, {80, 1480, 1480, 0.09f}}},
+        {"hitburn", {{30, 900, 500, 0.12f}, {30, 1300, 700, 0.1f}, {40, 700, 400, 0.1f}, {40, 1100, 600, 0.08f}}},
+        {"hitfall", {{80, 170, 55, 0.3f}, {50, 110, 50, 0.2f}}},
+        {"hitdrown", {{50, 300, 600, 0.14f}, {50, 350, 700, 0.12f}, {50, 280, 560, 0.1f}}},
+        {"swing", {{80, 350, 900, 0.07f}}},
+        {"spellfail", {{90, 360, 240, 0.16f}, {70, 230, 160, 0.14f}}},
     };
     const uint32_t rate = 22050;
     std::vector<std::pair<const char*, std::vector<int16_t>>> pcm;
     size_t total = 0;
     for (const Ev& ev : evs) {
+        if (missingOnly) {   // the pack's own sound, or the one the event falls back to, is better than a blip
+            if (combatEvent(ev.name)) continue;   // 7.07: a fight's sounds are the client's files or silence (see combatEvent)
+            bool have = false;
+            std::string e = ev.name;
+            for (int depth = 0; depth < 4 && !e.empty() && !have; ++depth) {
+                auto it = clips_.find(w3dSndHash(e.c_str()));
+                have = it != clips_.end() && !it->second.empty();
+                const char* fb = fallbackOf(e);
+                e = fb ? fb : "";
+            }
+            if (have) continue;
+        }
         std::vector<int16_t> s;
         for (const Seg& g : ev.segs) {
             const int n = g.ms * (int)rate / 1000;
@@ -128,15 +187,17 @@ bool SfxBank::synthesize(Alloc a, Free f) {
         total += s.size() * 2;
         pcm.push_back({ev.name, std::move(s)});
     }
-    blob_ = (uint8_t*)(a ? a(total) : malloc(total));
-    free_ = f;
-    if (!blob_) return false;
-    size_ = total;
+    if (pcm.empty()) return true;
+    uint8_t* mem = (uint8_t*)(a ? a(total) : malloc(total));
+    if (!mem) return false;
+    if (missingOnly) { extra_ = mem; extraFree_ = f; }
+    else { blob_ = mem; free_ = f; size_ = total; }
     size_t off = 0;
     for (auto& [name, s] : pcm) {
-        memcpy(blob_ + off, s.data(), s.size() * 2);
-        clips_[w3dSndHash(name)].push_back({(const int16_t*)(blob_ + off), (uint32_t)s.size(), rate, 1.0f});
+        memcpy(mem + off, s.data(), s.size() * 2);
+        clips_[w3dSndHash(name)].push_back({(const int16_t*)(mem + off), (uint32_t)s.size(), rate, 1.0f});
         off += s.size() * 2;
+        if (added) ++*added;
     }
     return true;
 }

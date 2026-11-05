@@ -28,6 +28,8 @@ def ffmpeg(src, dst, *args):
 tmp = path("tmp\\x")
 os.makedirs(os.path.dirname(tmp), exist_ok=True)
 # interface sounds (Sound\Interface)
+tone_wav(path("Sound\\Interface\\Error.wav"), 220, 0.25)                      # 6.40: found by its path, no SoundEntries row
+tone_wav(path("Sound\\Spells\\Cast\\FireCast.wav"), 440, 0.3)
 tone_wav(path("Sound\\Interface\\click.wav"), 1000, 0.2)                      # PCM16 44.1 kHz -> resampled
 tone_wav(path("Sound\\Interface\\open8.wav"), 500, 0.3, rate=22050, width=1)  # 8-bit
 src = os.path.join(out, "tmp", "tab_src.wav"); tone_wav(src, 800, 0.25, rate=22050)
@@ -117,6 +119,9 @@ dbc("CreatureSoundData.dbc", 30, csd, b"\0")
 dbc("CreatureDisplayInfo.dbc", 12, [zrow(12, {0: 100, 1: 1, 2: 1}), zrow(12, {0: 101, 1: 2, 2: 2}), zrow(12, {0: 102, 1: 3, 2: 0}),
     zrow(12, {0: 103, 1: 4, 11: 7}), zrow(12, {0: 104, 1: 4, 11: 8}), zrow(12, {0: 105, 1: 4, 11: 9}),
     zrow(12, {0: 106, 1: 5, 3: 50}), zrow(12, {0: 107, 1: 5, 3: 51})], b"\0")
+# CreatureModelData (6.60): ID, flags, path, size class, scale, blood, ... SoundDataID 13 - model 3 keeps its sound set (2) there, its
+# display 102 has none of its own (the fixed-skin creatures); model 1 repeats the display's own set
+dbc("CreatureModelData.dbc", 14, [zrow(14, {0: 1, 13: 1}), zrow(14, {0: 3, 13: 2}), zrow(14, {0: 4})], b"\0")
 dbc("NPCSounds.dbc", 5, [[7, 500, 501, 502, 0], [8, 503, 0, 0, 0], [9, 504, 0, 0, 0]], b"\0")
 dbc("CreatureDisplayInfoExtra.dbc", 20, [zrow(20, {0: 50, 1: 1, 2: 1}), zrow(20, {0: 51, 1: 3, 2: 0})], b"\0")
 dbc("EmotesTextSound.dbc", 5, [[1, 21, 1, 0, 800], [2, 21, 1, 1, 9999]], b"\0")   # (9999: no such sound - skipped)
@@ -164,3 +169,28 @@ def adt(tx, ty, area_of):
     open(path("World\\Maps\\Azeroth\\Azeroth_%d_%d.adt" % (tx, ty)), "wb").write(bytes(b))
 adt(32, 48, lambda cx, cy: 12 if cx < 8 else 87)
 adt(32, 49, lambda cx, cy: 1519)
+
+# 7.04: an intro cinematic - CinematicSequences 7 (sound 1) -> CinematicCamera 70 (Cameras\FlyByTest.mdx, origin 100 200 50,
+# facing pi/2) whose M2 camera flies linearly (0,0,10) -> (10,0,10) -> (10,10,10) over 2 s from position_base (1,0,0)
+import math
+m2 = bytearray(0x140 + 124)
+m2[0:4] = b"MD20"; struct.pack_into("<I", m2, 4, 256)
+struct.pack_into("<II", m2, 0x124, 1, 0x140)
+cam_ = 0x140
+struct.pack_into("<Ifff", m2, cam_, 0, 0.8, 1000.0, 0.2)
+def track(at, interp, times, keys, ranges=()):
+    global m2
+    orr = len(m2)
+    for r in ranges: m2 += struct.pack("<II", *r)   # 7.09: vanilla per-animation key ranges (inclusive)
+    ot = len(m2); m2 += struct.pack("<%dI" % len(times), *times)
+    ok = len(m2)
+    for k in keys: m2 += struct.pack("<9f", *(list(k) + [0.0] * 6))   # M2SplineKey<C3Vector>: value, in, out
+    struct.pack_into("<HhIIIIII", m2, at, interp, -1, len(ranges), orr if ranges else 0, len(times), ot, len(keys), ok)
+# 7.09: a one-key range first (0, 0) - the flight is the longest range (0, 2), not a camera frozen at its first key
+track(cam_ + 16, 1, [0, 1000, 2000], [(0, 0, 10), (10, 0, 10), (10, 10, 10)], [(0, 0), (0, 2)])
+struct.pack_into("<3f", m2, cam_ + 44, 1.0, 0.0, 0.0)
+track(cam_ + 56, 1, [0, 2000], [(0, 0, 0), (0, 5, 0)])
+open(path("Cameras\\FlyByTest.m2"), "wb").write(bytes(m2))
+S[:] = [b"\0"]
+dbc("CinematicCamera.dbc", 7, [[70, s("Cameras\\FlyByTest.mdx"), 1, 100.0, 200.0, 50.0, math.pi / 2]], strtab())
+dbc("CinematicSequences.dbc", 10, [[7, 0, 70, 0, 0, 0, 0, 0, 0, 0], [8, 0, 0, 0, 0, 0, 0, 0, 0, 0]], b"\0")

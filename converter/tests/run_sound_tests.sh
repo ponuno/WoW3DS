@@ -17,6 +17,16 @@ grep -qP "^N\t107\t21[0-9]{8}\t0\t0$" "$V" && \
 grep -q "^V	1	0	norage	600$" "$V" && grep -q "^V	1	0	outofrange	601$" "$V" && grep -qP "^V\t2\t1\tnomana\t21[0-9]{8}$" "$V" && \
 grep -q "^T	21	1	0	800$" "$V" && ! grep -q "9999" "$V" && grep -q "voices: 3 error lines (2 listed, 1 by file name), 3 NPC sets, 5 displays with a voice (2 by race), 1 emote voices" "$OUT/conv.log" \
   && echo "VOICES (sounds.txt N / V / T): PASS" || { echo "VOICES: FAIL"; grep -E "^(N|V|T)	" "$V"; grep voices "$OUT/conv.log"; exit 1; }
+# 6.60: creature sound sets - the display's own (100, 101) and, for a display with none, its model's (102 through CreatureModelData col 13)
+grep -q "^D	100	1$" "$V" && grep -q "^D	101	2$" "$V" && grep -q "^D	102	2$" "$V" && ! grep -q "^D	103	" "$V" \
+  && echo "CREATURE SOUND SETS (sounds.txt D): PASS" || { echo "CREATURE SOUND SETS: FAIL"; grep "^D	" "$V"; exit 1; }
+grep -q "creature sounds: 2 displays with their own sound set, 1 through their model (6.60), 5 of 8 without" "$OUT/conv.log" || { grep "creature sounds" "$OUT/conv.log"; exit 1; }
+# 7.04: the intro cinematic, baked in world coordinates (linear track; base (1,0,0); facing pi/2 about origin 100 200 50)
+C="$OUT/sound/cinematics.txt"
+grep -qP "^Q\t7\t2000$" "$C" && grep -qP "^K\t7\t0\t100.00\t201.00\t60.00\t" "$C" && grep -qP "^K\t7\t1000\t100.00\t211.00\t60.00\t" "$C" && \
+grep -qP "^K\t7\t2000\t90.00\t211.00\t60.00\t95.00\t200.00\t50.00$" "$C" && grep -qP "^S\t7\t0\tcin7_0\.(ima|mp3)\t" "$C" && \
+! grep -qP "^Q\t8\t" "$C" && grep -q "cinematics: 1 of 2 sequences" "$OUT/conv.log" \
+  && echo "CINEMATICS (cinematics.txt): PASS" || { echo "CINEMATICS: FAIL"; head -8 "$C"; grep -P "^(Q|S)\t" "$C"; grep cinemat "$OUT/conv.log"; exit 1; }
 ls "$OUT/sound" "$OUT/sound/music"
 g++ -std=c++20 -O1 -g -fsanitize=address,undefined -Wall -I"$W/proto3ds/source" -I"$W/common" \
     "$W/proto3ds/tests/sound_test.cpp" "$W/proto3ds/source/audio_core.cpp" -o "$OUT/sound_test"

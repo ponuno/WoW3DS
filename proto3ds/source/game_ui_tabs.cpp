@@ -247,11 +247,20 @@ int GameUi::petStrip(w3n::GameSession& g, const Input& in) {
 // ------------------------------------------------------------------ Map: the zone (or continent) with us, units, quest givers
 void GameUi::drawMap(w3n::GameSession& g, const Input& in) {
     const int mx = 2, my = kTop + 2, mw = 258, mh = 172;
-    ui::MapView mv = mapMode_ == 0 ? assets().zoneAt(in.mapId, in.pos[0], in.pos[1]) : assets().continent(in.mapId);
+    // 6.69: our zone / our continent / the whole world / what a tap picked (mapMode_)
+    ui::MapView mv;
+    bool worldView = false;
+    switch (mapMode_) {
+        case 1: mv = assets().continent(in.mapId); break;
+        case 2: mv = assets().world(); worldView = true; break;
+        case 3: mv = mapPickArea_ ? assets().zoneByArea(mapPickArea_) : assets().continent(mapPickMap_); break;
+        default: mv = assets().zoneAt(in.mapId, in.pos[0], in.pos[1], in.zone); break;
+    }
+    const bool worldStandIn = worldView && !mv.ok();   // an older pack: no picture of the world, two buttons on a plain panel
     list_.rect(mx, my, mw, mh, hudRgba(20, 26, 30));
     float pu = 0.5f, pv = 0.5f;
     auto worldToUv = [&](float x, float y, float* u, float* v) {
-        if (!mv.ok()) return false;
+        if (!mv.ok() || mv.m->mapId != in.mapId) return false;   // (the world and the other continent show none of our position)
         *u = (mv.m->left - y) / (mv.m->left - mv.m->right);
         *v = (mv.m->top - x) / (mv.m->top - mv.m->bottom);
         return true;
@@ -260,11 +269,16 @@ void GameUi::drawMap(w3n::GameSession& g, const Input& in) {
     float u0 = 0, v0 = 0, span = 1.0f / (float)mapZoom_;
     const bool onMap = mv.ok() && worldToUv(in.pos[0], in.pos[1], &pu, &pv) && pu >= 0 && pu <= 1 && pv >= 0 && pv <= 1;
     if (mv.ok()) {
-        if (mapZoom_ > 1 && onMap) {
-            u0 = std::clamp(pu - span / 2, 0.0f, 1.0f - span);
-            v0 = std::clamp(pv - span / 2, 0.0f, 1.0f - span);
+        if (mapZoom_ > 1) {
+            if (mapPanned_) { u0 = mapCu_ - span / 2; v0 = mapCv_ - span / 2; }   // 6.69: moved by the stylus
+            else if (onMap) { u0 = pu - span / 2; v0 = pv - span / 2; }
+            else { u0 = 0.5f - span / 2; v0 = 0.5f - span / 2; }
+            u0 = std::clamp(u0, 0.0f, 1.0f - span);
+            v0 = std::clamp(v0, 0.0f, 1.0f - span);
         }
         list_.imagePart(mx, my, mw, mh, mv.image, u0, v0, u0 + span, v0 + span);
+    } else if (worldStandIn) {
+        list_.rect(mx + mw / 2, my, 1, mh, hudRgba(60, 70, 80));
     } else {   // no map in the pack: a schematic around us, 60 yd to the edge, north up
         for (int k = 1; k < 4; ++k) {
             list_.rect(mx, my + mh * k / 4, mw, 1, hudRgba(40, 50, 56));
@@ -281,12 +295,16 @@ void GameUi::drawMap(w3n::GameSession& g, const Input& in) {
         list_.textCentered(mx + mw / 2, my + mh - 12, why, kGrey, false);
     }
     list_.outline(mx - 1, my - 1, mw + 2, mh + 2, kFrame);
+    mapShown_ = mv.ok() ? mv.m : nullptr;
+    mapU0_ = u0; mapV0_ = v0; mapSpan_ = mv.ok() ? span : 1.0f;
+    mapRectX_ = mx; mapRectY_ = my; mapRectW_ = mw; mapRectH_ = mh;
+    if (mv.ok() || worldStandIn) region(mx, my, mw, mh, Act::MapTap, 0);   // 6.69: taps open zones, a drag moves the picture
     // world -> screen
     const float yardsPerPx = 60.0f * 2 / mh;
     auto toScreen = [&](float x, float y, int* sx, int* sy) {
         if (mv.ok()) {
             float u = u0, v = v0;
-            worldToUv(x, y, &u, &v);
+            if (!worldToUv(x, y, &u, &v)) return false;
             *sx = mx + (int)((u - u0) / span * mw);
             *sy = my + (int)((v - v0) / span * mh);
         } else {   // north (+x) up, west (+y) left
@@ -296,6 +314,111 @@ void GameUi::drawMap(w3n::GameSession& g, const Input& in) {
         return *sx >= mx && *sx < mx + mw && *sy >= my && *sy < my + mh;
     };
     list_.clip(mx, my, mw, mh);
+    // 6.63: the areas of the followed quests (Questie's data, questdb.bin): translucent discs in the quest's colour over what its
+    // objectives ask for; a finished quest shows where to hand it in
+    if (mapQuests_ && !watch_.ids().empty()) {
+        if (!qdbTried_) { qdbTried_ = true; qdb_.open("sdmc:/3ds/w3dproto/questdb.bin"); }
+        auto zoneToWorld = [&](const ui::MapView& zm, float px, float py, float* wx, float* wy) {
+            *wy = zm.m->left - (px / 10000.0f) * (zm.m->left - zm.m->right);
+            *wx = zm.m->top - (py / 10000.0f) * (zm.m->top - zm.m->bottom);
+        };
+        std::vector<std::pair<uint32_t, ui::MapView>> zones;   // (the lookups of this frame)
+        auto zoneOf = [&](uint32_t area) -> const ui::MapView* {
+            for (auto& z : zones) if (z.first == area) return z.second.ok() ? &z.second : nullptr;
+            zones.push_back({area, assets().zoneByArea(area)});
+            return zones.back().second.ok() ? &zones.back().second : nullptr;
+        };
+        auto disc = [&](int cx, int cy, int r, uint32_t col) {
+            if (cx + r < mx || cx - r > mx + mw || cy + r < my || cy - r > my + mh) return;
+            if (r <= 2) { list_.rect(cx - 1, cy - 1, 3, 3, col); return; }
+            for (int dy = -r; dy <= r; dy += 2) {
+                const int hw = (int)sqrtf((float)(r * r - dy * dy));
+                list_.rect(cx - hw, cy + dy, 2 * hw + 1, 2, col);
+            }
+        };
+        int drawn = 0;
+        for (uint32_t qid : watch_.ids()) {
+            const questdb::Quest* qd = questAreas(qid);
+            if (!qd) continue;
+            const int slot = watch_.slot(qid);
+            const w3n::QuestLogEntry* le = nullptr;
+            std::vector<w3n::QuestLogEntry> log = g.questLog();
+            for (const w3n::QuestLogEntry& e : log) if (e.id == qid) { le = &e; break; }
+            if (!le) continue;
+            const w3n::QuestInfo* qi = g.questInfoIfKnown(qid);
+            // which of the quest's own objectives (server slots 0..3) is this Questie objective, and is it done. By id first; when the ids
+            // differ (a kill credit of another creature, a variant of the object) by position among the objectives of the same kind
+            // (6.76: before, an objective that was not found by id counted as not done - so a finished stage kept its areas on the map)
+            auto objectiveDone = [&](const questdb::Objective& ob) {
+                if (le->complete) return true;
+                if (!qi) return false;
+                int slotOf = -1;
+                std::vector<int> sameKind;   // the server's objectives of this kind, in slot order
+                for (int j = 0; j < 4; ++j) {
+                    const w3n::QuestInfo::Objective& so = qi->obj[j];
+                    if (ob.kind == questdb::kItem) {
+                        if (!so.item || !so.itemCount) continue;
+                        sameKind.push_back(j);
+                        if (so.item == ob.id) slotOf = j;
+                    } else if (so.creatureOrGo && so.count) {
+                        const bool go = (so.creatureOrGo & 0x80000000u) != 0;
+                        if (go != (ob.kind == questdb::kObject)) continue;
+                        sameKind.push_back(j);
+                        if ((so.creatureOrGo & 0x7FFFFFFFu) == ob.id) slotOf = j;
+                    }
+                }
+                if (slotOf < 0) {   // by position among Questie's objectives of the same kind
+                    size_t idx = 0;
+                    for (const questdb::Objective& o2 : qd->obj) {
+                        if (&o2 == &ob) break;
+                        if (o2.kind == ob.kind) ++idx;
+                    }
+                    if (idx < sameKind.size() && ob.kind != questdb::kExplore) slotOf = sameKind[idx];
+                }
+                if (slotOf < 0) return false;
+                const w3n::QuestInfo::Objective& so = qi->obj[slotOf];
+                if (ob.kind == questdb::kItem) return g.itemCount(so.item) >= so.itemCount;
+                return le->kills[slotOf] >= so.count;
+            };
+            auto markAt = [&](const questdb::Pt& p, const char* glyph, uint32_t col) {
+                float wx, wy; int sx, sy;
+                if (qd->world) {   // version 2: the world position itself
+                    if (p.area != in.mapId) return;
+                    wx = p.x; wy = p.y;
+                } else {
+                    const ui::MapView* zm = zoneOf(p.area);
+                    if (!zm || zm->m->mapId != in.mapId) return;
+                    zoneToWorld(*zm, p.x, p.y, &wx, &wy);
+                }
+                if (toScreen(wx, wy, &sx, &sy)) { list_.rect(sx - 5, sy - 5, 11, 11, hudRgba(0, 0, 0, 170)); list_.textCentered(sx, sy - 6, glyph, col, true, Font::Normal); }
+            };
+            if (le->complete) {   // hand it in
+                for (const questdb::Pt& p : qd->end) markAt(p, "?", kGold);
+                continue;
+            }
+            for (const questdb::Objective& ob : qd->obj) {
+                if (objectiveDone(ob)) continue;
+                for (const questdb::Blob& b : ob.blobs) {
+                    if (++drawn > 500) break;
+                    float wx, wy, rYards; int sx, sy, ex, ey;
+                    if (qd->world) {
+                        if (b.area != in.mapId) continue;
+                        wx = b.x; wy = b.y; rYards = b.r;
+                    } else {
+                        const ui::MapView* zm = zoneOf(b.area);
+                        if (!zm || zm->m->mapId != in.mapId) continue;
+                        zoneToWorld(*zm, b.x, b.y, &wx, &wy);
+                        rYards = (b.r / 10000.0f) * (zm->m->left - zm->m->right);
+                    }
+                    toScreen(wx, wy, &sx, &sy);
+                    toScreen(wx, wy - rYards, &ex, &ey);
+                    const int r = std::clamp((int)lroundf(sqrtf((float)((ex - sx) * (ex - sx) + (ey - sy) * (ey - sy)))), 2, 40);
+                    disc(sx, sy, r, questSlotColor(slot, 85));
+                    if (ob.kind != questdb::kKill || r <= 5) list_.rect(sx - 1, sy - 1, 3, 3, questSlotColor(slot));   // (a dot marks the middle)
+                }
+            }
+        }
+    }
     // units: quest givers as marks, others as dots by reaction
     for (auto& [guid, o] : g.objects.all()) {
         if (!o.hasPos || o.self || !o.isUnitLike()) continue;
@@ -309,7 +432,7 @@ void GameUi::drawMap(w3n::GameSession& g, const Input& in) {
             ui::Image qi = assets().sprite(mark[0] == '!' ? "quest_new" : "quest_done");
             if (qi.ok() && !w3n::questMarkGrey(st)) list_.image(sx - 6, sy - 6, 12, 12, qi);
             else list_.textCentered(sx, sy - 6, mark, w3n::questMarkGrey(st) ? kGrey : kGold, true, Font::Normal);
-        } else if (mapZoom_ > 1 || !mv.ok()) {
+        } else if (mapUnits_ || !mv.ok()) {   // 6.63: the creatures' dots only when asked for (the Units button)
             list_.rect(sx - 1, sy - 1, 3, 3, reactionColor(g, o));
             if (guid == g.target()) list_.outline(sx - 3, sy - 3, 7, 7, kGold);
         }
@@ -324,12 +447,29 @@ void GameUi::drawMap(w3n::GameSession& g, const Input& in) {
         int sx, sy;
         if (toScreen(px, py, &sx, &sy)) { list_.rect(sx - 2, sy - 2, 5, 5, kBlue); list_.outline(sx - 3, sy - 3, 7, 7, kBlack); }
     }
-    // our corpse while a ghost
-    if (g.life() == w3n::Life::Ghost && g.corpse.known && g.corpse.map == in.mapId) {
+    // our corpse (the place of death): a little skull, while dead or a ghost
+    if ((g.life() == w3n::Life::Ghost || g.life() == w3n::Life::Dead) && g.corpse.known && g.corpse.map == in.mapId) {
         int sx, sy;
         if (toScreen(g.corpse.x, g.corpse.y, &sx, &sy)) {
-            list_.rect(sx - 4, sy, 9, 1, kCyan);
-            list_.rect(sx, sy - 4, 1, 9, kCyan);
+            static const char* const kSkull[8] = {
+                "..XXXXX..", ".XXXXXXX.", ".XOOXOOX.", ".XOOXOOX.",
+                ".XXXXXXX.", "..XXOXX..", "..XXXXX..", "..X.X.X.."};
+            list_.rect(sx - 5, sy - 5, 11, 10, kBlack);
+            for (int r = 0; r < 8; r++)
+                for (int c = 0; c < 9; c++) {
+                    char ch = kSkull[r][c];
+                    if (ch == 'X') list_.rect(sx - 4 + c, sy - 4 + r, 1, 1, kWhite);
+                    else if (ch == 'O') list_.rect(sx - 4 + c, sy - 4 + r, 1, 1, kBlack);
+                }
+        }
+    }
+    // 6.82: the spirit healer (a gold cross) while a ghost
+    if (g.life() == w3n::Life::Ghost && g.healer.known && g.healer.map == in.mapId) {
+        int sx, sy;
+        if (toScreen(g.healer.x, g.healer.y, &sx, &sy)) {
+            list_.rect(sx - 4, sy - 1, 9, 3, kGold);
+            list_.rect(sx - 1, sy - 4, 3, 9, kGold);
+            list_.outline(sx - 5, sy - 5, 11, 11, kBlack);
         }
     }
     // us: the arrow sprite turned to our facing (north up), else a dot with a nose
@@ -348,39 +488,118 @@ void GameUi::drawMap(w3n::GameSession& g, const Input& in) {
             }
         }
     }
+    // 6.69: the world: the two continents' names (ours in gold) over the picture, the stylus on one lights it
+    if (worldView) {
+        const bool down = press_.active && press_.onButton && press_.button.act == Act::MapTap;
+        const int px = down ? (press_.x < mx + mw / 2 ? 0 : 1) : -1;
+        const char* nm[2] = {tr("Kalimdor", "Калимдор"), tr("Eastern Kingdoms", "Восточные королевства")};
+        const uint32_t mine = in.mapId == 1 ? 0 : 1;
+        for (int k = 0; k < 2; ++k) {
+            const int cx = mx + (k == 0 ? mw / 4 : mw * 3 / 4);
+            if (px == k) list_.rect(mx + (k == 0 ? 0 : mw / 2), my, mw / 2, mh, hudRgba(255, 220, 120, 50));
+            const int w = HudList::width(nm[k], Font::Normal);
+            list_.rect(cx - w / 2 - 4, my + mh / 2 - 8, w + 8, 16, hudRgba(0, 0, 0, 150));
+            list_.textCentered(cx, my + mh / 2 - 7, nm[k], (uint32_t)k == mine && (in.mapId == 0 || in.mapId == 1) ? kGold : kText, true, Font::Normal);
+        }
+    } else if (mv.ok() && mv.m->areaId == 0) {
+        // a continent: while the stylus is down on it, the zone under it is outlined with its name
+        if (press_.active && press_.onButton && press_.button.act == Act::MapTap && !press_.moved) {
+            const float u = u0 + (float)(press_.x - mx) / mw * span, v = v0 + (float)(press_.y - my) / mh * span;
+            const float wy = mv.m->left - u * (mv.m->left - mv.m->right), wx = mv.m->top - v * (mv.m->top - mv.m->bottom);
+            uint32_t shapeZone = 0;
+            ui::MapView z = zoneUnder(in, mv.m->mapId, wx, wy, &shapeZone);
+            if (z.ok() && z.m->areaId && shapeZone) {
+                // 7.04: the zone as it is shaped (as the original lights it): the map's pixels whose terrain belongs to it,
+                // sampled every 2 px and joined into runs per row, with a gold edge where the zone ends
+                const int st = 2, cols = (mw + st - 1) / st, rows = (mh + st - 1) / st;
+                std::vector<uint8_t> in2((size_t)cols * rows, 0);
+                for (int r = 0; r < rows; ++r) {
+                    const float vv = v0 + (r * st + st * 0.5f) / mh * span;
+                    const float px = mv.m->top - vv * (mv.m->top - mv.m->bottom);
+                    for (int c = 0; c < cols; ++c) {
+                        const float uu = u0 + (c * st + st * 0.5f) / mw * span;
+                        const float py = mv.m->left - uu * (mv.m->left - mv.m->right);
+                        in2[(size_t)r * cols + c] = in.zoneAtPoint(mv.m->mapId, px, py) == shapeZone;
+                    }
+                }
+                auto at = [&](int c, int r) { return c >= 0 && r >= 0 && c < cols && r < rows && in2[(size_t)r * cols + c]; };
+                for (int r = 0; r < rows; ++r)
+                    for (int c = 0; c < cols;) {
+                        if (!at(c, r)) { ++c; continue; }
+                        int e = c;
+                        while (at(e, r)) ++e;
+                        list_.rect(mx + c * st, my + r * st, (e - c) * st, st, hudRgba(255, 220, 120, 60));
+                        for (int k = c; k < e; ++k)   // the edge: a cell with a neighbour outside the zone
+                            if (!at(k - 1, r) || !at(k + 1, r) || !at(k, r - 1) || !at(k, r + 1))
+                                list_.rect(mx + k * st, my + r * st, st, st, kGold);
+                        c = e;
+                    }
+            } else if (z.ok() && z.m->areaId) {   // the terrain's areas are not known here: the zone's rectangle, as before
+                auto edge = [&](float zx, float zy, int* sx, int* sy) {
+                    *sx = mx + (int)(((mv.m->left - zy) / (mv.m->left - mv.m->right) - u0) / span * mw);
+                    *sy = my + (int)(((mv.m->top - zx) / (mv.m->top - mv.m->bottom) - v0) / span * mh);
+                };
+                int ax, ay, bx2, by2;
+                edge(z.m->top, z.m->left, &ax, &ay);
+                edge(z.m->bottom, z.m->right, &bx2, &by2);
+                list_.rect(ax, ay, bx2 - ax, by2 - ay, hudRgba(255, 220, 120, 45));
+                list_.outline(ax, ay, bx2 - ax, by2 - ay, kGold);
+            }
+            if (z.ok() && z.m->areaId) {
+                const int w = HudList::width(z.name, Font::Normal);
+                list_.rect(mx + mw / 2 - w / 2 - 4, my + mh - 18, w + 8, 16, hudRgba(0, 0, 0, 170));
+                list_.textCentered(mx + mw / 2, my + mh - 17, z.name, kGold, true, Font::Normal);
+            }
+        }
+    }
     list_.noClip();
     list_.clip(0, kTop, kTouchW, kContentH);
     // zone name and the tracked quest over the map
-    if (mv.ok()) {
-        int w = HudList::width(mv.name, Font::Normal);
+    if (mv.ok() || worldStandIn) {
+        std::string title = mv.ok() ? mv.name : std::string("World");
+        if (worldView) title = tr("World", "Мир");
+        else if (mv.m->areaId == 0 && mv.m->mapId == 0) title = tr("Eastern Kingdoms", "Восточные королевства");
+        else if (mv.m->areaId == 0 && mv.m->mapId == 1) title = tr("Kalimdor", "Калимдор");
+        int w = HudList::width(title, Font::Normal);
         list_.rect(mx, my, w + 8, 16, hudRgba(0, 0, 0, 140));
-        list_.text(mx + 4, my + 1, mv.name, kGold, true, Font::Normal);
+        list_.text(mx + 4, my + 1, title, kGold, true, Font::Normal);
     }
-    if (tracked_) {
-        std::vector<w3n::QuestLogEntry> log = g.questLog();
-        for (const w3n::QuestLogEntry& e : log) {
-            if (e.id != tracked_) continue;
-            std::vector<std::string> lines = g.questProgressKnown(e);
-            int n = 1 + (int)std::min<size_t>(lines.size(), 2);
-            int ty = my + mh - n * 12 - 2;
-            list_.rect(mx, ty - 1, mw, n * 12 + 3, hudRgba(0, 0, 0, 150));
-            list_.textFit(mx + 4, ty, g.questTitleKnown(e.id), mw - 8, e.complete ? kGreen : kGold, true);
-            for (int k = 0; k < n - 1; ++k) list_.textFit(mx + 10, ty + 12 * (k + 1), lines[k], mw - 14, kText, true);
+    if (mapQuests_ && !watch_.ids().empty()) {   // 6.63: the legend of the followed quests
+        const int n = (int)watch_.ids().size();
+        const int ty = my + mh - n * 12 - 2;
+        list_.rect(mx, ty - 1, mw, n * 12 + 3, hudRgba(0, 0, 0, 150));
+        int k = 0;
+        for (uint32_t qid : watch_.ids()) {
+            bool done = false;
+            for (const w3n::QuestLogEntry& e : g.questLog()) if (e.id == qid) done = e.complete;
+            list_.rect(mx + 3, ty + 12 * k + 2, 8, 8, questSlotColor(k));
+            list_.textFit(mx + 15, ty + 12 * k, g.questTitleKnown(qid), mw - 20, done ? kGreen : kText, true);
+            ++k;
         }
     }
     // controls
     const int bx = 266, bw = 50;
-    btn(bx, kTop + 2, bw, 22, tr("Zone", "Зона"), Act::MapMode, 0, mapMode_ == 0 ? Style::ToggleOn : Style::Toggle, Font::Small);
-    btn(bx, kTop + 26, bw, 22, tr("World", "Мир"), Act::MapMode, 1, mapMode_ == 1 ? Style::ToggleOn : Style::Toggle, Font::Small);
-    btn(bx, kTop + 56, bw, 26, "+", Act::MapZoom, mapZoom_ * 2, mapZoom_ < 4 ? Style::Normal : Style::Disabled, Font::Large);
-    btn(bx, kTop + 84, bw, 26, "-", Act::MapZoom, mapZoom_ / 2, mapZoom_ > 1 ? Style::Normal : Style::Disabled, Font::Large);
+    // 6.69: Zone (ours) / Continent / World; a tap on the world picks a continent, a tap on a continent a zone; "Zone" comes back
+    btn(bx, kTop + 2, bw, 19, tr("Zone", "Зона"), Act::MapMode, 0, mapMode_ == 0 ? Style::ToggleOn : Style::Toggle, Font::Small);
+    btn(bx, kTop + 22, bw, 19, tr("Contin.", "Контин."), Act::MapMode, 1, mapMode_ == 1 || (mapMode_ == 3 && !mapPickArea_) ? Style::ToggleOn : Style::Toggle, Font::Small);
+    btn(bx, kTop + 42, bw, 19, tr("World", "Мир"), Act::MapMode, 2, mapMode_ == 2 ? Style::ToggleOn : Style::Toggle, Font::Small);
+    btn(bx, kTop + 63, bw, 20, "+", Act::MapZoom, mapZoom_ * 2, mapZoom_ < 4 ? Style::Normal : Style::Disabled, Font::Large);
+    btn(bx, kTop + 84, bw, 20, "-", Act::MapZoom, mapZoom_ / 2, mapZoom_ > 1 ? Style::Normal : Style::Disabled, Font::Large);
     char b[32];
     if (onMap) snprintf(b, sizeof b, "%.1f %.1f", pu * 100, pv * 100);
-    else snprintf(b, sizeof b, "%.0f %.0f", in.pos[0], in.pos[1]);
-    list_.textCentered(bx + bw / 2, kTop + 118, b, kText);
-    snprintf(b, sizeof b, "x%d", mapZoom_);
-    list_.textCentered(bx + bw / 2, kTop + 132, b, kGrey);
-    if (g.newMail) list_.textCentered(bx + bw / 2, kTop + 150, tr("Mail!", "Почта!"), kYellow);
+    else if (mv.ok() && mv.m->mapId == in.mapId) snprintf(b, sizeof b, "%.0f %.0f", in.pos[0], in.pos[1]);
+    else b[0] = 0;
+    list_.textCentered(bx + bw / 2, kTop + 107, b, kText);
+    snprintf(b, sizeof b, mapZoom_ > 1 ? tr("x%d drag", "x%d тяни") : "x%d", mapZoom_);
+    list_.textCentered(bx + bw / 2, kTop + 118, b, kGrey);
+    // 6.63: what the map shows: the creatures' dots (off: they hid the map), the followed quests' areas
+    btn(bx, kTop + 130, bw, 20, tr("Mobs", "Мобы"), Act::MapUnits, mapUnits_ ? 0 : 1, mapUnits_ ? Style::ToggleOn : Style::Toggle, Font::Small);
+    btn(bx, kTop + 152, bw, 20, tr("Quests", "Задан."), Act::MapQuests, mapQuests_ ? 0 : 1, mapQuests_ ? Style::ToggleOn : Style::Toggle, Font::Small);
+    if (g.newMail) {
+        const int w = HudList::width(tr("Mail!", "Почта!"), Font::Normal);
+        list_.rect(mx + mw - w - 8, my, w + 8, 16, hudRgba(0, 0, 0, 140));
+        list_.text(mx + mw - w - 4, my + 1, tr("Mail!", "Почта!"), kYellow, true, Font::Normal);
+    }
 }
 
 // ------------------------------------------------------------------ Chat: channel tabs, lines, keyboard, quick phrases
@@ -393,21 +612,49 @@ void GameUi::drawChat(w3n::GameSession& g, const Input& in) {
     const Font f = listFont();
     const int lh = HudList::lineHeight(f), top = kTop + 24, bottom = kTabY - 28, rows = (bottom - top) / lh;
     // newest lines first, wrapped
-    struct Line { uint32_t color; std::string text; };
+    struct Line { uint32_t color; std::string text; uint32_t item = 0; };
     std::vector<Line> lines;
     const int want = rows + chatScroll_;
     for (size_t i = g.chat.size(); i-- > 0 && (int)lines.size() < want;) {
         const w3n::ChatLine& l = g.chat[i];
         if (!chatInChannel(l.type, chatChannel_)) continue;
-        std::vector<std::string> w = HudList::wrap(trText(g.lineText(l)), kTouchW - 10, f);
-        for (size_t k = w.size(); k-- > 0 && (int)lines.size() < want;) lines.push_back({chatColor(l.type), (k ? "  " : "") + w[k]});
+        // 6.91: the line's items - links (|Hitem:N|h[Name]|h, shown without their codes) or our own loot lines (the entry kept with them)
+        const std::string raw = g.lineText(l);
+        std::vector<w3n::ItemLink> links = w3n::itemLinks(raw);
+        if (links.empty() && l.type == w3n::Chat::Loot && !l.channel.empty()) {
+            w3n::ItemLink k;
+            k.entry = (uint32_t)strtoul(l.channel.c_str(), nullptr, 10);
+            const size_t a = raw.find('['), b = raw.find(']', a == std::string::npos ? 0 : a);
+            if (a != std::string::npos && b != std::string::npos) k.shown = raw.substr(a, b - a + 1);
+            if (k.entry) links.push_back(k);
+        }
+        std::vector<std::string> w = HudList::wrap(trText(w3n::stripWowCodes(raw)), kTouchW - 10, f);
+        // which item a wrapped row belongs to: the first link whose name (or its start / its end, when it is cut by the wrap) is on it
+        auto itemOfRow = [&](const std::string& row) -> uint32_t {
+            if (links.size() == 1) return links[0].entry;   // 6.95: one item in the line: every row of it opens that item (a wrap cannot lose it)
+            for (const w3n::ItemLink& k : links) {
+                if (k.shown.empty()) continue;
+                const size_t n = std::min<size_t>(k.shown.size(), 6);
+                if (row.find(k.shown) != std::string::npos || row.find(k.shown.substr(0, n)) != std::string::npos ||
+                    row.find(k.shown.substr(k.shown.size() - n)) != std::string::npos)
+                    return k.entry;
+            }
+            return 0;
+        };
+        for (size_t k = w.size(); k-- > 0 && (int)lines.size() < want;) lines.push_back({chatColor(l.type), (k ? "  " : "") + w[k], itemOfRow(w[k])});
     }
     const int maxScroll = std::max(0, (int)lines.size() - rows);
     chatScroll_ = std::min(chatScroll_, maxScroll);
     list_.rect(2, top - 2, kTouchW - 4, bottom - top + 4, hudRgba(0, 0, 0, 90));
     for (int r = 0; r < rows; ++r) {
         int k = chatScroll_ + (rows - 1 - r);
-        if (k < (int)lines.size()) list_.text(5, top + r * lh, lines[k].text, lines[k].color, true, f);
+        if (k < (int)lines.size()) {
+            list_.text(5, top + r * lh, lines[k].text, lines[k].color, true, f);
+            if (lines[k].item) {   // 6.91: a row with an item: underlined like a link, a tap shows the item
+                list_.rect(5, top + r * lh + lh - 2, std::min(kTouchW - 10, HudList::width(lines[k].text, f)), 1, kCyan);
+                region(2, top + r * lh, kTouchW - 4, lh, Act::ItemCard, (int)lines[k].item);
+            }
+        }
     }
     if (lines.empty()) list_.text(8, top + 4, tr("No messages.", "Сообщений нет."), kGrey);
     const int by = kTabY - 24;
@@ -473,9 +720,10 @@ void GameUi::drawItems(w3n::GameSession& g, const Input& in) {
     page_ = std::min(page_, pages - 1);
     if (selected_ >= (int)items.size()) selected_ = std::max(0, (int)items.size() - 1);
     const w3n::InvItem* sel = selected_ < (int)items.size() ? &items[selected_] : nullptr;
+    btn(164, kTop + 2, 74, 18, bagLabel(g, bagFilter_), Act::SubView, 10, bagFilter_ >= 0 ? Style::ToggleOn : Style::Toggle, Font::Small);   // 6.95
     if (sel) {
         const w3n::ItemInfo* info = g.itemInfoIfKnown(sel->entry);
-        list_.textFit(164, kTop + 5, g.itemName(sel->entry), kTouchW - 168, qualityColor(info ? info->quality : 1));
+        list_.textFit(242, kTop + 5, g.itemName(sel->entry), kTouchW - 244, qualityColor(info ? info->quality : 1));
     }
     if (items.empty()) list_.text(10, kTop + 30, tr("Your bags are empty.", "Ваши сумки пусты."), kGrey, true, Font::Normal);
     for (int k = 0; k < per; ++k) {
@@ -590,15 +838,11 @@ void GameUi::spellTabs(int active) {
     btn(2, kTop + 2, 72, 18, tr("Book", "Книга"), Act::SubView, 0, active == 0 ? Style::ToggleOn : Style::Toggle, Font::Small);
     btn(76, kTop + 2, 72, 18, tr("Talents", "Таланты"), Act::SubView, 1, active == 1 ? Style::ToggleOn : Style::Toggle, Font::Small);
     btn(150, kTop + 2, 72, 18, tr("Skills", "Навыки"), Act::SubView, 2, active == 2 ? Style::ToggleOn : Style::Toggle, Font::Small);
+    btn(224, kTop + 2, 78, 18, tr("Crafting", "Ремёсла"), Act::SubView, 3, active == 3 ? Style::ToggleOn : Style::Toggle, Font::Small);
 }
 
 void GameUi::drawSpells(w3n::GameSession& g, const Input& in) {
-    spellTabs(0);
-    if (barsView_) {
-        char b[48];
-        snprintf(b, sizeof b, "%s %d/%d", tr("bar page", "стр. панели"), barsView_->page + 1, ActionLayout::kPages);
-        list_.textRight(kTouchW - 6, kTop + 5, b, kGrey);
-    }
+    spellTabs(0);   // (7.03: the bar page is written on the bottom row - up here the Crafting tab covered it)
     std::vector<uint32_t> sp = bookSpells(g);
     const int per = 10, rowH = 25, top = kTop + 22;
     const int pages = std::max(1, ((int)sp.size() + per - 1) / per);
@@ -615,15 +859,22 @@ void GameUi::drawSpells(w3n::GameSession& g, const Input& in) {
         iconBox(x + 2, y + 1, 21, spellIcon(s), g.spellNames.name(s), kFrameDim, cd > 1500);
         list_.textFit(x + 27, y + (f == Font::Small ? 1 : 2), g.spellNames.name(s), 126, kText, false, f);
         std::string rk = g.spellNames.rank(s);
+        const bool pass = g.spellNames.passive(s);
+        if (pass && rk.empty()) rk = tr("Passive", "Пассивное");
+        else if (pass) rk += std::string(" · ") + tr("Passive", "Пассивное");
         if (f == Font::Small) list_.text(x + 27, y + 11, cd > 1500 ? secs(cd) : rk, cd > 1500 ? kYellow : kGrey, false);
         Button& b = region(x, y, 156, rowH - 2, Act::BindSpell, (int)s);
         b.infoKind = 2;
         b.infoId = s;
-        b.dragKind = 1;
-        b.dragId = s;
+        if (!pass) { b.dragKind = 1; b.dragId = s; }   // 6.95: no dragging a passive onto a bar
     }
     const int by = kTabY - 24;
     btn(2, by, 120, 22, tr("Clear a button", "Очистить кнопку"), Act::ClearSlot, 0, Style::Normal, Font::Small);
+    if (barsView_) {
+        char b[48];
+        snprintf(b, sizeof b, "%s %d/%d", tr("bar", "панель"), barsView_->page + 1, ActionLayout::kPages);
+        list_.textCentered(pages > 1 ? 175 : 220, by + 6, b, kGrey);
+    }
     pager(by, page_, pages);
 }
 
@@ -633,7 +884,7 @@ void GameUi::drawTalents(w3n::GameSession& g, const Input& in) {
     spellTabs(1);
     char b[64];
     snprintf(b, sizeof b, "%s %u", tr("points:", "очки:"), (unsigned)g.talentPoints());
-    list_.textRight(kTouchW - 6, kTop + 5, b, g.talentPoints() ? kGreen : kGrey);
+    list_.textRight(kTouchW - 6, kTop + 25, b, g.talentPoints() ? kGreen : kGrey);   // (7.03: beside the trees, not under the tabs)
     std::vector<const w3n::TalentTree*> trees = g.talents.treesFor(g.classId());
     if (trees.empty()) {
         window(10, kTop + 30, kTouchW - 20, 70);
@@ -825,6 +1076,233 @@ void GameUi::drawSkills(w3n::GameSession& g, const Input& in) {
     pager(by, page_, pages);
 }
 
+// ------------------------------------------------------------------ Crafting (6.38): the profession window
+// The professions we have recipes for (recipes.txt) as chips, the known recipes of the chosen one coloured by difficulty, and
+// for the chosen recipe: what it makes, the tools and the reagents with what the bags hold. Create casts the recipe once, Create
+// All as often as the reagents allow (one cast after another); an enchant asks which item to put it on.
+namespace {
+uint32_t craftColour(int difficulty) {
+    static const uint32_t c[4] = {hudRgba(255, 128, 64), hudRgba(255, 210, 0), hudRgba(64, 192, 64), hudRgba(150, 150, 150)};
+    return c[difficulty & 3];
+}
+}  // namespace
+
+// short names of the equipment slots for the enchant picker (under a 42 px icon)
+const char* equipSlotShort(uint8_t slot) {
+    static const char* en[19] = {"Head", "Neck", "Shoul", "Shirt", "Chest", "Waist", "Legs", "Feet", "Wrist", "Hands",
+                                 "Ring", "Ring", "Trink", "Trink", "Back", "Main", "Off", "Range", "Tabard"};
+    static const char* ru[19] = {"Голова", "Шея", "Плечи", "Рубаха", "Грудь", "Пояс", "Ноги", "Ступни", "Запяст", "Кисти",
+                                 "Кольцо", "Кольцо", "Аксес", "Аксес", "Спина", "Пр.рук", "Лев.рук", "Дальн", "Герб"};
+    return slot < 19 ? tr(en[slot], ru[slot]) : "";
+}
+
+// 6.90: what an enchant can go on: the worn items first (the original lets you click them on the character), then the bags;
+// only those its spell fits (a weapon enchant: weapons; "Enchant Boots": feet ...). Bags (18) and ammunition are never offered.
+std::vector<w3n::InvItem> enchantTargets(w3n::GameSession& g, const w3n::Recipe* r) {
+    std::vector<w3n::InvItem> worn, bags;
+    for (const w3n::InvItem& it : g.inventory()) {
+        if (it.isBagSlot()) continue;
+        const w3n::ItemInfo* info = g.itemInfo(it.entry);
+        if (!info || !info->equippable() || info->inventoryType == 18 || info->inventoryType == 24) continue;
+        if (r && !r->fits(info->cls, info->subclass, info->inventoryType)) continue;
+        (it.equipped() ? worn : bags).push_back(it);
+    }
+    std::stable_sort(worn.begin(), worn.end(), [](const w3n::InvItem& a, const w3n::InvItem& b) { return a.slot < b.slot; });
+    worn.insert(worn.end(), bags.begin(), bags.end());
+    return worn;
+}
+
+bool craftHasMaterials(w3n::GameSession& g, const w3n::Recipe& r) {
+    for (const w3n::Recipe::Part& p : r.reagents)
+        if (g.itemCount(p.entry) < p.count) return false;
+    for (const w3n::Recipe::Part& t : r.tools)   // tools are carried, or worn (a fishing pole in hand, a skinning knife ...)
+        if (!g.itemCount(t.entry)) {
+            bool worn = false;
+            for (const w3n::InvItem& it : g.inventory()) worn = worn || (it.equipped() && it.entry == t.entry);
+            if (!worn) return false;
+        }
+    return true;
+}
+
+bool GameUi::craftCast(w3n::GameSession& g, const Input& in, uint32_t spell, uint64_t itemGuid) {
+    craftCastMs_ = in.nowMs ? in.nowMs : 1;
+    craftLastMs_ = craftCastMs_;
+    return itemGuid ? g.castSpellOnItem(spell, itemGuid, in.nowMs) : g.castSpell(spell, in.nowMs);
+}
+
+void GameUi::craftTick(w3n::GameSession& g, const Input& in) {
+    if (craftLeft_ <= 0) return;
+    const w3n::Recipe* r = g.recipes.find(craftSel_);
+    bool stop = !r || r->kind != 0 || g.life() != w3n::Life::Alive;
+    if (!stop && g.lastCastFailMs && g.lastCastFailMs >= craftCastMs_) stop = true;   // the last piece failed (moved, no reagents ...)
+    if (!stop && g.cast.active) return;                                               // still casting
+    if (!stop && in.nowMs - craftLastMs_ < 250) return;
+    if (!stop)
+        for (const w3n::Recipe::Part& p : r->reagents)
+            if (g.itemCount(p.entry) < p.count) stop = true;
+    if (!stop && !craftCast(g, in, r->spell, 0)) stop = true;
+    if (stop) { craftLeft_ = 0; dirty_ = true; return; }
+    --craftLeft_;
+    dirty_ = true;
+}
+
+void GameUi::drawCraft(w3n::GameSession& g, const Input& in) {
+    spellTabs(3);
+    if (!g.recipes.loaded()) {
+        window(10, kTop + 30, kTouchW - 20, 70);
+        list_.textCentered(kTouchW / 2, kTop + 44, tr("No recipes.txt on the SD card", "Нет recipes.txt на SD-карте"), kText, true, Font::Normal);
+        list_.textCentered(kTouchW / 2, kTop + 64, tr("(w3dconv --ui or --texts-only writes it)", "(его пишет w3dconv --ui или --texts-only)"), kGrey);
+        return;
+    }
+    std::vector<w3n::GameSession::SkillState> lines;
+    for (const w3n::GameSession::SkillState& s : g.playerSkills())
+        if (g.recipes.anyFor(s.id) && !g.knownRecipes(s.id).empty()) lines.push_back(s);
+    if (lines.empty()) {
+        list_.text(8, kTop + 30, tr("You know no crafting recipes.", "Вы не знаете ни одного рецепта."), kGrey, true, Font::Normal);
+        list_.text(8, kTop + 46, tr("Learn a profession from a trainer.", "Выучите профессию у учителя."), kGrey, false, Font::Small);
+        return;
+    }
+    bool have = false;
+    for (const auto& s : lines) have = have || s.id == craftSkill_;
+    if (!have) { craftSkill_ = lines[0].id; craftSel_ = 0; page_ = 0; }
+    const w3n::GameSession::SkillState* sk = nullptr;
+    const int chipW = (kTouchW - 4) / (int)std::min<size_t>(lines.size(), 5);
+    for (size_t i = 0; i < lines.size() && i < 5; ++i) {
+        const w3n::SkillLine* l = g.skills.find(lines[i].id);
+        const bool on = lines[i].id == craftSkill_;
+        if (on) sk = &lines[i];
+        btn(2 + (int)i * chipW, kTop + 22, chipW - 2, 18, l ? l->name : std::to_string(lines[i].id), Act::CraftSkill, (int)lines[i].id,
+            on ? Style::ToggleOn : Style::Toggle, Font::Small);
+    }
+    if (!sk) return;
+    const uint32_t skillValue = sk->value + (uint32_t)std::max<int>(0, sk->tempBonus + sk->permBonus);
+    std::vector<const w3n::Recipe*> rs = g.knownRecipes(craftSkill_);
+    if (craftHaveMats_)   // 6.90
+        rs.erase(std::remove_if(rs.begin(), rs.end(), [&](const w3n::Recipe* r) { return !craftHasMaterials(g, *r); }), rs.end());
+    std::stable_sort(rs.begin(), rs.end(), [&](const w3n::Recipe* a, const w3n::Recipe* b) {
+        const int da = a->difficulty(skillValue), db = b->difficulty(skillValue);
+        if (da != db) return da < db;
+        return g.spellNames.name(a->spell) < g.spellNames.name(b->spell);
+    });
+    const int by = kTabY - 24;
+    // the item picker of an enchant
+    if (craftPick_) {
+        const w3n::Recipe* r = g.recipes.find(craftSel_);
+        list_.textFit(6, kTop + 44, (r ? g.spellNames.name(r->spell) : std::string()) + " - " + tr("pick an item", "выберите вещь"), kTouchW - 12, kGold, true, Font::Small);
+        std::vector<w3n::InvItem> items = enchantTargets(g, r);
+        const int cols = 7, per = cols * 2, cell = 42;
+        const int pages = std::max(1, ((int)items.size() + per - 1) / per);
+        page_ = std::min(page_, pages - 1);
+        if (items.empty()) list_.text(10, kTop + 70, tr("Nothing this enchant fits.", "Нет вещей, подходящих для этого чара."), kGrey, true, Font::Normal);
+        for (int k = 0; k < per; ++k) {
+            const int idx = page_ * per + k;
+            if (idx >= (int)items.size()) break;
+            const w3n::InvItem& it = items[idx];
+            const int x = 6 + (k % cols) * cell, y = kTop + 58 + (k / cols) * cell;
+            const w3n::ItemInfo* info = g.itemInfo(it.entry);
+            iconBox(x + 1, y + 1, cell - 4, itemIcon(g, it.entry), g.itemName(it.entry), qualityColor(info ? info->quality : 1));
+            if (it.equipped()) {   // worn: a gold corner and the slot's name under the icon
+                list_.rect(x + 1, y + 1, 9, 9, kGold);
+                list_.textCentered(x + cell / 2 - 1, y + cell - 12, equipSlotShort(it.slot), kGold, true, Font::Small);
+            }
+            Button& b = region(x - 1, y - 1, cell, cell, Act::CraftItem, idx);
+            b.infoKind = 4;
+            b.infoId = it.entry;
+            b.guid = it.guid;
+        }
+        btn(2, by, 70, 22, tr("Back", "Назад"), Act::CraftPick, 0, Style::Normal, Font::Small);
+        if (pages > 1) pager(by, page_, pages);
+        return;
+    }
+    // left: the recipes, right: the chosen one
+    const int per = 5, rowH = 21, top = kTop + 43, lw = 152;
+    const int pages = std::max(1, ((int)rs.size() + per - 1) / per);
+    page_ = std::min(page_, pages - 1);
+    const w3n::Recipe* sel = nullptr;
+    for (const w3n::Recipe* r : rs)
+        if (r->spell == craftSel_) sel = r;
+    if (!sel && !rs.empty()) { sel = rs[0]; craftSel_ = sel->spell; }
+    for (int k = 0; k < per; ++k) {
+        const int idx = page_ * per + k;
+        if (idx >= (int)rs.size()) break;
+        const w3n::Recipe* r = rs[idx];
+        const int y = top + k * rowH;
+        list_.rect(2, y, lw, rowH - 1, r == sel ? kRowSel : (k % 2 ? kRowAlt : kRow));
+        const uint32_t icon = r->kind == 0 ? r->item : 0;
+        if (icon) iconBox(4, y + 1, rowH - 3, itemIcon(g, icon), g.spellNames.name(r->spell), kFrameDim);
+        else iconBox(4, y + 1, rowH - 3, spellIcon(r->spell), g.spellNames.name(r->spell), kFrameDim);
+        bool can = true;
+        for (const w3n::Recipe::Part& p : r->reagents) can = can && g.itemCount(p.entry) >= p.count;
+        list_.textFit(4 + rowH, y + 5, g.spellNames.name(r->spell), lw - rowH - 8, can ? craftColour(r->difficulty(skillValue)) : hudAlpha(craftColour(r->difficulty(skillValue)), 150),
+                      false, Font::Small);
+        Button& b = region(2, y, lw, rowH - 1, Act::CraftPick, (int)r->spell);   // arg 0 (Back) closes the item picker
+        b.infoKind = 2;
+        b.infoId = r->spell;
+    }
+    // the chosen recipe
+    const int rx = lw + 6, rw = kTouchW - rx - 2;
+    window(rx, top - 1, rw, by - top - 2);
+    char b[96];
+    if (!sel) {
+        list_.text(rx + 6, top + 6, tr("No recipes.", "Нет рецептов."), kGrey);
+    } else {
+        int y = top + 3;
+        const int diff = sel->difficulty(skillValue);
+        if (sel->kind == 0 && sel->item) {
+            const w3n::ItemInfo* info = g.itemInfo(sel->item);
+            iconBox(rx + 4, y, 22, itemIcon(g, sel->item), g.itemName(sel->item), qualityColor(info ? info->quality : 1));
+            snprintf(b, sizeof b, sel->count > 1 ? "%s x%u" : "%s", g.itemName(sel->item).c_str(), (unsigned)sel->count);
+            list_.textFit(rx + 30, y + 1, b, rw - 34, qualityColor(info ? info->quality : 1), true, Font::Small);
+        } else {
+            iconBox(rx + 4, y, 22, spellIcon(sel->spell), g.spellNames.name(sel->spell), kFrameDim);
+            list_.textFit(rx + 30, y + 1, g.spellNames.name(sel->spell), rw - 34, kGold, true, Font::Small);
+        }
+        static const char* kDiffEn[] = {"Difficult", "Medium", "Easy", "Trivial"};
+        static const char* kDiffRu[] = {"Сложно", "Средне", "Легко", "Тривиально"};
+        list_.text(rx + 30, y + 12, tr(kDiffEn[diff], kDiffRu[diff]), craftColour(diff), false, Font::Small);
+        y += 27;
+        if (!sel->tools.empty()) {
+            std::string t = tr("Tools: ", "Инструменты: ");
+            for (size_t i = 0; i < sel->tools.size(); ++i) t += (i ? ", " : "") + g.itemName(sel->tools[i].entry);
+            list_.textFit(rx + 6, y, t, rw - 10, kGrey, false, Font::Small);
+            y += 11;
+        }
+        list_.text(rx + 6, y, tr("Reagents:", "Реагенты:"), kText, false, Font::Small);
+        y += 11;
+        for (const w3n::Recipe::Part& p : sel->reagents) {
+            if (y + 10 > by - 4) break;
+            const uint32_t have = g.itemCount(p.entry);
+            snprintf(b, sizeof b, "%u/%u", (unsigned)std::min<uint32_t>(have, 999), (unsigned)p.count);
+            list_.textRight(rx + rw - 5, y, b, have >= p.count ? kGreen : kRed, false, Font::Small);
+            list_.textFit(rx + 6, y, g.itemName(p.entry), rw - 46, have >= p.count ? kText : kGrey, false, Font::Small);
+            y += 11;
+        }
+    }
+    // buttons: Create, Create All / Stop
+    bool can = sel != nullptr && !g.cast.active;
+    uint32_t most = 0;
+    if (sel) {
+        most = 9999;
+        for (const w3n::Recipe::Part& p : sel->reagents) most = std::min<uint32_t>(most, g.itemCount(p.entry) / p.count);
+        if (sel->reagents.empty()) most = 1;
+    }
+    if (craftLeft_ > 0) {
+        snprintf(b, sizeof b, "%s (%d)", tr("Stop", "Стоп"), craftLeft_);
+        btn(2, by, 90, 22, b, Act::CraftStop, 0, Style::Danger, Font::Small);
+    } else {
+        btn(2, by, 62, 22, sel && sel->kind == 1 ? tr("Enchant", "Зачаровать") : tr("Create", "Создать"), Act::CraftMake, 0,
+            can && (most > 0 || (sel && sel->kind == 1)) ? Style::Primary : Style::Disabled, Font::Small);
+        if (sel && sel->kind == 0) {
+            snprintf(b, sizeof b, "%s %u", tr("All", "Все"), (unsigned)(most < 999 ? most : 999));
+            btn(66, by, 66, 22, b, Act::CraftAll, 0, can && most > 1 ? Style::Normal : Style::Disabled, Font::Small);
+        }
+    }
+    btn(136, by, 88, 22, tr("Have mats", "Есть реагенты"), Act::CraftHaveMats, 0, craftHaveMats_ ? Style::ToggleOn : Style::Toggle, Font::Small);   // 6.90
+    if (rs.empty() && craftHaveMats_) list_.text(8, top + 4, tr("Nothing you can make now.", "Сейчас ничего не сделать."), kGrey, false, Font::Small);
+    if (pages > 1) pager(by, page_, pages);
+    (void)in;
+}
+
 // ------------------------------------------------------------------ Quests: log, one quest, reputation
 void GameUi::drawQuestLog(w3n::GameSession& g, const Input& in) {
     std::vector<w3n::QuestLogEntry> log = g.questLog();
@@ -861,7 +1339,7 @@ void GameUi::drawQuestLog(w3n::GameSession& g, const Input& in) {
     if (logView_ == 1) {   // one quest
         const w3n::QuestLogEntry& e = log[logSel_];
         const w3n::QuestInfo* q = g.questInfo(e.id);
-        struct L { uint32_t color; std::string text; Font f; };
+        struct L { uint32_t color; std::string text; Font f; uint32_t item = 0; };
         std::vector<L> body;
         std::string title = g.questTitle(e.id);
         if (q && q->level) title += " [" + std::to_string(q->level) + "]";
@@ -876,26 +1354,57 @@ void GameUi::drawQuestLog(w3n::GameSession& g, const Input& in) {
                 body.push_back({kGold, tr("Description", "Описание"), Font::Small});
                 for (const std::string& l : HudList::wrap(q->details, kTouchW - 12)) body.push_back({kGrey, l, Font::Small});
             }
+            // 6.94: the rewards, as in the quest window: the ones to choose from, the fixed ones, the money (a tap shows the item)
+            bool anyChoice = false, anyFixed = false;
+            for (int i = 0; i < 6; ++i) anyChoice |= q->choiceItem[i] != 0;
+            for (int i = 0; i < 4; ++i) anyFixed |= q->rewardItem[i] != 0;
+            auto itemLine = [&](uint32_t id, uint32_t count) {
+                const w3n::ItemInfo* info = g.itemInfo(id);
+                L l{qualityColor(info ? info->quality : 1), g.itemName(id) + (count > 1 ? " x" + std::to_string(count) : std::string()), Font::Normal};
+                l.item = id;
+                body.push_back(l);
+            };
+            if (anyChoice) {
+                body.push_back({kGold, tr("Choose one reward:", "Награда на выбор:"), Font::Normal});
+                for (int i = 0; i < 6; ++i) if (q->choiceItem[i]) itemLine(q->choiceItem[i], q->choiceCount[i]);
+            }
+            if (anyFixed) {
+                body.push_back({kGold, anyChoice ? tr("You will also receive:", "А также:") : tr("You will receive:", "Вы получите:"), Font::Normal});
+                for (int i = 0; i < 4; ++i) if (q->rewardItem[i]) itemLine(q->rewardItem[i], q->rewardCount[i]);
+            }
+            if (q->money) body.push_back({kText, std::string(tr("Money: ", "Деньги: ")) + w3n::moneyText(q->money), Font::Small});
         } else {
             body.push_back({kGrey, tr("(asking the server...)", "(запрос к серверу...)"), Font::Small});
         }
         const int top = kTop + 4, bottom = by - 4;
+        auto lineH = [&](const L& l) { return l.item ? 24 : HudList::lineHeight(l.f); };
         int maxScroll = 0, hTotal = 0;
-        for (const L& l : body) hTotal += HudList::lineHeight(l.f);
+        for (const L& l : body) hTotal += lineH(l);
         int skip = 0, acc = 0;
-        while (skip < (int)body.size() && hTotal - acc > bottom - top) acc += HudList::lineHeight(body[skip++].f);
+        while (skip < (int)body.size() && hTotal - acc > bottom - top) acc += lineH(body[skip++]);
         maxScroll = skip;
         questScroll_ = std::min(questScroll_, maxScroll);
+        qsOn_ = true; qsX_ = 0; qsY_ = top; qsW_ = kTouchW; qsH_ = bottom - top;   // 6.94: a finger drag scrolls the text
         int y = top;
         for (int i = questScroll_; i < (int)body.size(); ++i) {
-            int lh = HudList::lineHeight(body[i].f);
+            const L& l = body[i];
+            const int lh = lineH(l);
             if (y + lh > bottom) break;
-            list_.text(6, y, body[i].text, body[i].color, true, body[i].f);
+            if (l.item) {
+                list_.rect(4, y, kTouchW - 8, 22, kRow);
+                iconBox(6, y + 1, 20, itemIcon(g, l.item), l.text, l.color);
+                list_.textFit(32, y + 3, l.text, kTouchW - 40, l.color, true, l.f);
+                Button& bt = region(4, y, kTouchW - 8, 22, Act::ItemInfo, 999);
+                bt.infoKind = 1;
+                bt.infoId = l.item;
+            } else {
+                list_.text(6, y, l.text, l.color, true, l.f);
+            }
             y += lh;
         }
         btn(2, by, 58, 22, tr("Back", "Назад"), Act::LogBack, 0, Style::Normal, Font::Small);
-        btn(62, by, 82, 22, tracked_ == e.id ? tr("Untrack", "Не следить") : tr("Track", "Следить"), Act::TrackQuest, 0,
-            tracked_ == e.id ? Style::ToggleOn : Style::Normal, Font::Small);
+        btn(62, by, 82, 22, watch_.tracked(e.id) ? tr("Untrack", "Не следить") : tr("Track", "Следить"), Act::TrackQuest, 0,
+            watch_.tracked(e.id) ? Style::ToggleOn : Style::Normal, Font::Small);
         btn(146, by, 66, 22, tr("Abandon", "Отказ"), Act::LogAbandon, 0, Style::Danger, Font::Small);
         if (maxScroll) {
             btn(220, by, 46, 22, "▲", Act::QuestScroll, -3, questScroll_ ? Style::Normal : Style::Disabled);
@@ -918,7 +1427,7 @@ void GameUi::drawQuestLog(w3n::GameSession& g, const Input& in) {
         const w3n::QuestInfo* q = g.questInfo(e.id);
         const int y = kTop + 22 + k * 25;
         list_.rect(2, y, kTouchW - 4, 23, k % 2 ? kRowAlt : kRow);
-        if (tracked_ == e.id) list_.text(5, y + 5, "◆", kGold);
+        if (watch_.tracked(e.id)) list_.rect(4, y + 7, 9, 9, questSlotColor(watch_.slot(e.id)));   // 6.63: the colour its area has on the map
         uint32_t c = e.failed ? kRed : e.complete ? kGreen : kGold;
         list_.textFit(17, y + 3, g.questTitle(e.id), 230, c, false, Font::Normal);
         std::string st = e.failed ? tr("failed", "провал") : e.complete ? tr("done", "готово") : q && q->level ? "[" + std::to_string(q->level) + "]" : "";
@@ -1091,7 +1600,8 @@ void GameUi::drawSettings(const Input& in) {
         y -= 4;   // 8 rows (stage 5.32)
         label(tr("Draw distance", "Дальность"));
         const char* d[4] = {tr("Near", "Близко"), tr("Normal", "Норм."), tr("Far", "Далеко"), tr("Max", "Макс.")};
-        for (int i = 0; i < 4; ++i) opt(120 + i * 49, 47, d[i], c.drawDist == i, 70 + i);
+        for (int i = 0; i < 4; ++i) opt(120 + i * 39, 37, d[i], c.drawDist == i, 70 + i);
+        opt(120 + 4 * 39, 37, tr("Auto", "Авто"), c.autoDetail, 75);   // 6.72: shorter by itself in heavy scenes
         y += 20;
         label(tr("Crowds", "Толпы"));
         const char* cr[4] = {"10", "20", "40", tr("All", "Все")};
@@ -1131,8 +1641,9 @@ void GameUi::drawSettings(const Input& in) {
         opt(120, 96, tr("Normal", "Обычный"), !c.bigText, 110);
         opt(220, 96, tr("Large", "Крупный"), c.bigText, 110);
         y += 20;
-        label(tr("Dim HUD at rest", "Тусклый HUD вне боя"));
-        opt(120, 96, c.dimHud ? tr("On", "Вкл") : tr("Off", "Выкл"), c.dimHud, 120);
+        label(tr("Dim HUD / bubbles", "Тусклый HUD / облачка"));
+        opt(120, 96, c.dimHud ? tr("Dim: on", "Туск.: вкл") : tr("Dim: off", "Туск.: выкл"), c.dimHud, 120);
+        opt(220, 96, c.chatBubbles ? tr("Bubbles: on", "Облачка: вкл") : tr("Bubbles: off", "Облачка: выкл"), c.chatBubbles, 121);   // 6.67
         y += 20;
         label(tr("Auto tabs", "Автовкладки"));
         opt(120, 96, c.autoTabs ? tr("On", "Вкл") : tr("Off", "Выкл"), c.autoTabs, 130);
@@ -1145,10 +1656,10 @@ void GameUi::drawSettings(const Input& in) {
         opt(120, 96, tr("On", "Вкл"), c.showStats, 180);
         opt(220, 96, tr("Off", "Выкл"), !c.showStats, 181);
         y += 20;
-        label(tr("Log / GPU / VSync", "Лог / GPU / VSync"));   // stage 6: perf.csv; 6.3: the early GPU kick; 6.4: vsync (each button toggles)
+        label(tr("Log / GPU / Frame", "Лог / GPU / Кадр"));   // stage 6: perf.csv; 6.3: the early GPU kick; 6.4: vsync (each button toggles)
         opt(120, 64, c.perfLog ? tr("Log", "Лог") : tr("no log", "без лога"), c.perfLog, 202);
         opt(186, 64, c.gpuKick ? tr("GPU early", "GPU рано") : tr("GPU end", "GPU конец"), c.gpuKick, 203);
-        opt(252, 64, c.vsync ? "VSync" : tr("no VSync", "без VSync"), c.vsync, 204);
+        opt(252, 64, c.pace == 2 ? tr("Auto 60/30", "Авто 60/30") : c.pace == 1 ? tr("Steady 30", "Ровно 30") : tr("Free", "Свободно"), c.pace != 0, 204);   // 6.71
         y += 20;
         label(tr("Horizon", "Горизонт"));   // 6.34b: the ground and far buildings past the draw distance (costs GPU time)
         const char* hz[3] = {tr("Off", "Выкл"), "800", "1200"};
@@ -1267,12 +1778,12 @@ void GameUi::drawInspect(w3n::GameSession& g) {
     const std::string nm = o->self ? std::string() : (o->name.empty() ? g.objects.nameOf(o->guid) : o->name);
     list_.textCentered(mid, y0, HudList::fit(nm.empty() ? std::string(tr("You", "Вы")) : nm, cw, Font::Normal), kGold, true, Font::Normal);
     const uint32_t b0 = o->field(w3n::UF::UNIT_BYTES_0), race = b0 & 0xFF, cls = (b0 >> 8) & 0xFF;
-    static const char* kRaceEn[9] = {"", "Human", "Orc", "Dwarf", "Night Elf", "Undead", "Tauren", "Gnome", "Troll"};
-    static const char* kRaceRu[9] = {"", "Человек", "Орк", "Дворф", "Ночной эльф", "Нежить", "Таурен", "Гном", "Тролль"};
+    static const char* kRaceEn[11] = {"", "Human", "Orc", "Dwarf", "Night Elf", "Undead", "Tauren", "Gnome", "Troll", "Goblin", "High Elf"};
+    static const char* kRaceRu[11] = {"", "Человек", "Орк", "Дворф", "Ночной эльф", "Нежить", "Таурен", "Гном", "Тролль", "Гоблин", "Высший эльф"};
     char b[80];
     snprintf(b, sizeof b, "%s %u", tr("Level", "Уровень"), (unsigned)o->level());
     list_.textCentered(mid, y0 + 16, b, kText);
-    snprintf(b, sizeof b, "%s %s", race < 9 ? (ui::g_lang ? kRaceRu[race] : kRaceEn[race]) : "", className(cls));
+    snprintf(b, sizeof b, "%s %s", race < 11 ? (ui::g_lang ? kRaceRu[race] : kRaceEn[race]) : "", className(cls));
     list_.textCentered(mid, y0 + 28, HudList::fit(b, cw), classColor(cls));
     // honour (MSG_INSPECT_HONOR_STATS)
     const w3n::GameSession::HonorView& h = g.honor;

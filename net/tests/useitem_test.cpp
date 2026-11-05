@@ -1,6 +1,8 @@
 // useitem_test — an item whose spell needs a target (quest items "use on ...": Foreman's Blackjack on a Lazy Peon) names the
 // selected creature / object in CMSG_USE_ITEM; food, potions and ground spells keep mask 0.
+#include <algorithm>
 #include <cstdio>
+#include <vector>
 
 #include "../game.hpp"
 
@@ -80,6 +82,118 @@ int main() {
         i.entry = 16114; i.spellId[0] = 19938; i.spellTrigger[0] = 0;
         bare.testSetItemInfo(i);
         CHECK(bare.itemTargetSpell(16114) == 0, "no spell data -> no target spell");
+    }
+    {   // 6.59b: a quest item used with no target selected goes on the nearest usable object within 10 yd (Samuel's Remains on Marla's
+        // Grave, quest 6395: the original client asks for a click on the grave); a far one, a plain item or no object nearby: mask 0
+        GameSession q;
+        q.objects.setSelf(me);
+        q.spellNames.addSelfCast(433);
+        auto goAt = [&](uint64_t guid, uint32_t entry, float x, uint32_t goType, uint32_t dyn) {
+            std::vector<std::pair<uint32_t, uint32_t>> f = {{0, (uint32_t)guid}, {1, (uint32_t)(guid >> 32)}, {2, 0x21u}, {3, entry},
+                                                            {UF::GAMEOBJECT_TYPE_ID, goType}, {UF::GAMEOBJECT_DYN_FLAGS, dyn}};
+            uint32_t maxIdx = 0;
+            for (auto& kv : f) maxIdx = std::max(maxIdx, kv.first);
+            const uint32_t blocks = maxIdx / 32 + 1;
+            std::vector<uint32_t> mask(blocks, 0);
+            for (auto& kv : f) mask[kv.first / 32] |= 1u << (kv.first % 32);
+            std::sort(f.begin(), f.end());
+            Writer w;
+            w.u32(1); w.u8(0); w.u8(2); w.packedGuid(guid); w.u8(5);
+            w.u8(0x40); w.f32(x); w.f32(0); w.f32(0); w.f32(0);   // HAS_POSITION
+            w.u8((uint8_t)blocks);
+            for (uint32_t m : mask) w.u32(m);
+            for (auto& kv : f) w.u32(kv.second);
+            q.handle(0x0A9, w.b, 1);
+        };
+        goAt(0xF110000002B7A001ull, 178090, 3.0f, 10, 1);    // Marla's Grave, 3 yd away, usable for the quest
+        goAt(0xF110000000000002ull, 1234, 2.0f, 5, 0);       // a plain decoration nearer: not a usable kind
+        goAt(0xF110000000000003ull, 999, 40.0f, 10, 1);      // a goober far away
+        ItemInfo rem;
+        rem.entry = 16333; rem.cls = 12; rem.spellId[0] = 20804; rem.spellTrigger[0] = 0;
+        q.testSetItemInfo(rem);
+        ItemInfo tool;
+        tool.entry = 5956; tool.cls = 7; tool.spellId[0] = 20805; tool.spellTrigger[0] = 0;
+        q.testSetItemInfo(tool);
+        std::vector<Bytes> out;
+        q.tap = [&](uint32_t, int dir, uint16_t op, const Bytes& d) { if (dir == 1 && op == 0x0AB) out.push_back(d); };
+        InvItem r1; r1.bag = 255; r1.slot = 25; r1.entry = 16333;
+        q.useItem(r1, 100);
+        CHECK(out.size() == 1 && out[0].size() > 5 && out[0][3] == 0x00 && out[0][4] == 0x08, "quest item, no target -> the grave (0x800)");
+        if (out.size() == 1 && out[0].size() > 5) {
+            Reader r(out[0]);
+            r.u8(); r.u8(); r.u8(); r.u16();
+            CHECK(r.packedGuid() == 0xF110000002B7A001ull, "the grave's guid");
+        }
+        out.clear();
+        InvItem t1; t1.bag = 255; t1.slot = 26; t1.entry = 5956;
+        q.useItem(t1, 110);   // not a quest item: as before
+        CHECK(out.size() == 1 && out[0].size() == 5 && out[0][3] == 0 && out[0][4] == 0, "a trade good -> mask 0");
+    }
+    {   // 6.73: quest objects of every kind answer the use key; the ones the server flagged for us come first
+        GameSession q;
+        q.objects.setSelf(me);
+        auto goAt = [&](uint64_t guid, uint32_t entry, float x, uint32_t goType, uint32_t dyn) {
+            std::vector<std::pair<uint32_t, uint32_t>> f = {{0, (uint32_t)guid}, {1, (uint32_t)(guid >> 32)}, {2, 0x21u}, {3, entry},
+                                                            {UF::GAMEOBJECT_TYPE_ID, goType}, {UF::GAMEOBJECT_DYN_FLAGS, dyn}};
+            uint32_t maxIdx = 0;
+            for (auto& kv : f) maxIdx = std::max(maxIdx, kv.first);
+            const uint32_t blocks = maxIdx / 32 + 1;
+            std::vector<uint32_t> mask(blocks, 0);
+            for (auto& kv : f) mask[kv.first / 32] |= 1u << (kv.first % 32);
+            std::sort(f.begin(), f.end());
+            Writer w;
+            w.u32(1); w.u8(0); w.u8(2); w.packedGuid(guid); w.u8(5);
+            w.u8(0x40); w.f32(x); w.f32(0); w.f32(0); w.f32(0);
+            w.u8((uint8_t)blocks);
+            for (uint32_t m : mask) w.u32(m);
+            for (auto& kv : f) w.u32(kv.second);
+            q.handle(0x0A9, w.b, 1);
+        };
+        goAt(0xF110000000000011ull, 11, 2.0f, 10, 0);   // a goober with no flag yet
+        goAt(0xF110000000000012ull, 12, 2.5f, 1, 0);    // a button
+        goAt(0xF110000000000013ull, 13, 3.0f, 9, 0);    // a readable text
+        goAt(0xF110000000000014ull, 14, 3.5f, 22, 0);   // a spell caster
+        goAt(0xF110000000000015ull, 15, 4.0f, 0, 0);    // a door: not offered
+        const char* v = nullptr;
+        const float pos[3] = {0, 0, 0};
+        CHECK(q.useVerb(*q.objects.find(0xF110000000000011ull)) && !std::strcmp(q.useVerb(*q.objects.find(0xF110000000000011ull)), "Use"), "unflagged goober: Use");
+        CHECK(q.useVerb(*q.objects.find(0xF110000000000012ull)) != nullptr, "button: offered");
+        CHECK(q.useVerb(*q.objects.find(0xF110000000000013ull)) && !std::strcmp(q.useVerb(*q.objects.find(0xF110000000000013ull)), "Read"), "text: Read");
+        CHECK(q.useVerb(*q.objects.find(0xF110000000000014ull)) != nullptr, "spell caster: offered");
+        CHECK(q.useVerb(*q.objects.find(0xF110000000000015ull)) == nullptr, "door: not offered");
+        goAt(0xF110000000000016ull, 16, 5.0f, 10, 1);   // flagged, farther than the unflagged one
+        CHECK(q.softInteract(pos, 0.0f, 100, &v) == 0xF110000000000016ull, "the flagged goober beats the nearer unflagged ones");
+        std::vector<Bytes> out;
+        q.tap = [&](uint32_t, int dir, uint16_t op, const Bytes& d) { if (dir == 1 && op == 0x0B1) out.push_back(d); };
+        const float at[3] = {0, 0, 0};
+        CHECK(q.interact(0xF110000000000012ull, at, 200).empty() && out.size() == 1, "using the button sends CMSG_GAMEOBJ_USE");
+    }
+    {   // 7.07: an item that begins a quest and has no spell asks the item for its quest (CMSG_QUESTGIVER_QUERY_QUEST u64 item,
+        // u32 quest); CMSG_USE_ITEM would get "Item not found". An item with a spell and a quest keeps CMSG_USE_ITEM.
+        GameSession q;
+        q.objects.setSelf(me);
+        ItemInfo note;
+        note.entry = 1972; note.cls = 12; note.startQuest = 783;
+        q.testSetItemInfo(note);
+        ItemInfo both;
+        both.entry = 2000; both.startQuest = 5; both.spellId[0] = 433; both.spellTrigger[0] = 0;
+        q.testSetItemInfo(both);
+        std::vector<std::pair<uint16_t, Bytes>> out;
+        q.tap = [&](uint32_t, int dir, uint16_t op, const Bytes& d) { if (dir == 1) out.push_back({op, d}); };
+        InvItem n; n.bag = 255; n.slot = 27; n.entry = 1972; n.guid = 0x4000000000001234ull;
+        q.useItem(n, 10);
+        CHECK(out.size() == 1 && out[0].first == 0x186 && out[0].second.size() == 12, "quest item -> CMSG_QUESTGIVER_QUERY_QUEST");
+        if (out.size() == 1 && out[0].second.size() == 12) {
+            Reader r(out[0].second);
+            const uint64_t g = r.u64();
+            const uint32_t quest = r.u32();
+            CHECK(g == n.guid && quest == 783, "the item's guid and its quest");
+        }
+        CHECK(note.usable(), "a quest item counts as usable");
+        out.clear();
+        InvItem b; b.bag = 255; b.slot = 28; b.entry = 2000; b.guid = 0x4000000000001235ull;
+        q.useItem(b, 20);
+        CHECK(out.size() == 1 && out[0].first == 0x0AB, "quest item with an on-use spell -> CMSG_USE_ITEM");
     }
     std::printf("USE ITEM ON TARGET: %d checks, %d failed -> %s\n", g_ok + g_fail, g_fail, g_fail ? "FAIL" : "PASS");
     return g_fail != 0;

@@ -43,5 +43,24 @@ if d:
     seqCount, offSeqs = h[14 + 5], h[22 + 6]
     ids = sorted(struct.unpack_from("<H", b, off + offSeqs + 16 * k)[0] for k in range(seqCount))
     check(ids == sorted(exp["doorSeqs"]), f"door sequences {ids}")
+# 6.59: the house as a game object (a .wmo model): an OWMO entry, no CDSP; its two groups and the two lamps of doodad set 0 as parts
+# (groups first, at their centres in the house's own space), every part's model in the pack, its collision triangles
+ow = E.get((F("OWMO"), 0x80000000 | exp["houseObj"]))
+check(ow is not None and dsp(exp["houseObj"]) is None, "house object: OWMO entry, no CDSP")
+if ow:
+    o0, sz = ow
+    parts, tris, rad = struct.unpack_from("<IIf", b, o0)
+    bmin = struct.unpack_from("<3f", b, o0 + 12); bmax = struct.unpack_from("<3f", b, o0 + 24)
+    check(40 + parts * 32 + tris * 36 <= sz, f"house object size {sz} for {parts} parts, {tris} triangles")
+    P = [struct.unpack_from("<I7f", b, o0 + 40 + 32 * k) for k in range(parts)]
+    check(parts == 3, f"house object parts {parts} (2 groups + the lamp of doodad set 0; its barrel has no model in the data)")
+    check(all((F("MODL"), p[0]) in E for p in P), "every part's model packed")
+    check(tris >= 12 and all(bmin[k] < bmax[k] for k in range(3)), f"collision triangles {tris}, box {bmin} .. {bmax}")
+    check(all(abs(p[1]) < rad and abs(p[2]) < rad for p in P), f"parts inside the radius {rad:.1f}")
+    lamps = [p for p in P[2:]]
+    check(all(abs(p[7] - 1.0) < 1e-3 for p in lamps), "lamp scale 1")
+# 6.59c: nothing written for the buildings too big for an object
+check(E.get((F("OWMO"), 0x80000000 | exp["giantObj"])) is None and E.get((F("OWMO"), 0x80000000 | exp["wideObj"])) is None,
+      "no OWMO for the city-sized Giant / Wide")
 print("WORLD OBJECTS CONVERT:", "FAIL" if bad else "PASS")
 sys.exit(1 if bad else 0)

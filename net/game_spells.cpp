@@ -10,6 +10,8 @@
 
 #include "game.hpp"
 
+#include <cmath>
+
 namespace w3n {
 
 namespace {
@@ -20,7 +22,7 @@ enum : uint16_t {
     SMSG_SPELL_FAILED_OTHER = 0x2A6,
     SMSG_SPELL_START = 0x131, SMSG_SPELL_GO = 0x132, SMSG_SPELL_FAILURE = 0x133, SMSG_SPELL_COOLDOWN = 0x134,
     SMSG_COOLDOWN_EVENT = 0x135, SMSG_SPELLHEALLOG = 0x150, SMSG_CLEAR_COOLDOWN = 0x1DE, SMSG_ITEM_COOLDOWN = 0x0B0,
-    SMSG_REMOVED_SPELL = 0x203, SMSG_SPELLNONMELEEDAMAGELOG = 0x250,
+    SMSG_REMOVED_SPELL = 0x203, SMSG_SPELLNONMELEEDAMAGELOG = 0x250, SMSG_PERIODICAURALOG = 0x24E,
     CMSG_CANCEL_AURA = 0x136, SMSG_UPDATE_AURA_DURATION = 0x137,
 };
 constexpr uint16_t TARGET_FLAG_UNIT = 0x0002;
@@ -70,6 +72,37 @@ bool SpellNames::load(const char* path) {
             unsigned id = 0;
             float range = 0, radius = 0;
             if (sscanf(line + 8, "%u %f %f", &id, &range, &radius) == 3 && id) addGround(id, range, radius);
+            continue;
+        }
+        if (!strncmp(line, "@school\t", 8)) {   // 6.40: "@school id school"
+            unsigned id = 0, sc = 0;
+            if (sscanf(line + 8, "%u %u", &id, &sc) == 2 && id && sc <= 6) addSchool(id, (uint8_t)sc);
+            continue;
+        }
+        if (!strncmp(line, "@range\t", 7)) {   // 6.87: "@range id min max"
+            unsigned id = 0;
+            float mn = 0, mx = 0;
+            if (sscanf(line + 7, "%u %f %f", &id, &mn, &mx) == 3 && id && mx > 0 && mn >= 0 && mn < mx) addRange(id, mn, mx);
+            continue;
+        }
+        if (!strncmp(line, "@hidden\t", 8)) {   // 6.99: "@hidden id" - never listed in the book
+            unsigned id = 0;
+            if (sscanf(line + 8, "%u", &id) == 1 && id) addHidden(id);
+            continue;
+        }
+        if (!strncmp(line, "@passive\t", 9)) {   // 6.95: "@passive id"
+            unsigned id = 0;
+            if (sscanf(line + 9, "%u", &id) == 1 && id) addPassive(id);
+            continue;
+        }
+        if (!strncmp(line, "@combat\t", 8)) {   // 6.87: "@combat id kind"
+            unsigned id = 0, k = 0;
+            if (sscanf(line + 8, "%u %u", &id, &k) == 2 && id && k && k < 8) addCombat(id, (uint8_t)k);
+            continue;
+        }
+        if (!strncmp(line, "@cast\t", 6)) {   // 6.64: "@cast id ms"
+            unsigned id = 0, ms = 0;
+            if (sscanf(line + 6, "%u %u", &id, &ms) == 2 && id && ms && ms <= 60000) addCastMs(id, ms);
             continue;
         }
         if (!strncmp(line, "@self\t", 6)) {   // 5.48: "@self id": no unit target needed
@@ -209,6 +242,16 @@ GameSession::Power GameSession::selfPower() const {
 }
 
 // ------------------------------------------------------------------ casting
+void GameSession::predictCast(uint32_t spell, uint64_t target, uint32_t nowMs) {
+    cast = CastState();
+    cast.active = true;
+    cast.spell = spell;
+    cast.startMs = nowMs;
+    cast.target = target;
+    cast.durMs = spellNames.castMs(spell);
+    cast.predicted = cast.durMs != 0;
+}
+
 bool GameSession::castSpell(uint32_t spell, uint32_t nowMs) {
     if (spell == kSpellAttack) {
         if (attackWanted_) stopAttack(nowMs); else startAttack(nowMs);
@@ -230,6 +273,23 @@ bool GameSession::castSpell(uint32_t spell, uint32_t nowMs) {
               cls == 1 || cls == 4 ? Vocal::AbilityCooldown : Vocal::SpellCooldown, nowMs, spellNames.name(spell) + b);
         return false;
     }
+    // 6.87: range, as the original client checks it before sending (vMaNGOS Spell::CheckRange measures between the bounding
+    // spheres: centre distance - both UNIT_BOUNDINGRADIUS; a player gets 1.25 yd of leeway on max range)
+    if (target_ && target_ != self_ && !spellNames.selfCast(spell)) {
+        const SpellNames::Range* rg = spellNames.range(spell);
+        const WorldObject* t = objects.find(target_);
+        const WorldObject* me = selfObject();
+        if (rg && t && t->isUnitLike() && t->hasPos) {
+            float p[3];
+            t->positionAt(nowMs, p);
+            const MovementInfo& m = mover.info();
+            const float dx = p[0] - m.x, dy = p[1] - m.y, dz = p[2] - m.z;
+            float d = std::sqrt(dx * dx + dy * dy + dz * dz) - t->fieldF(UF::UNIT_BOUNDINGRADIUS) - (me ? me->fieldF(UF::UNIT_BOUNDINGRADIUS) : 0.0f);
+            if (d < 0) d = 0;
+            if (d > rg->max + 1.25f) { error("Out of range", Vocal::OutOfRange, nowMs); return false; }
+            if (rg->min > 0 && d < rg->min) { error("Target too close", Vocal::None, nowMs); return false; }
+        }
+    }
     Writer w;
     w.u32(spell);
     if (target_ && !spellNames.selfCast(spell)) {
@@ -239,10 +299,50 @@ bool GameSession::castSpell(uint32_t spell, uint32_t nowMs) {
         w.u16(0);   // self / no explicit target
     }
     send(CMSG_CAST_SPELL, w.b, nowMs);
-    cast.active = true;
-    cast.spell = spell;
-    cast.startMs = nowMs;
-    cast.durMs = 0;
+    predictCast(spell, target_ && !spellNames.selfCast(spell) ? target_ : 0, nowMs);
+    combatAfterCast(spell, nowMs);
+    return true;
+}
+
+// 6.87: what the original client does with auto-attack when an ability goes out. A melee ability at an enemy turns
+// auto-attack on (the server never does: vMaNGOS starts melee only on CMSG_ATTACKSWING); one with
+// SPELL_ATTR_STOP_ATTACK_TARGET (Gouge, Sap) turns it off - the server stops it itself, we only forget the wish so the
+// next blow does not start it again. Ranged abilities do not start Auto Shot (it is its own button in 1.12).
+void GameSession::combatAfterCast(uint32_t spell, uint32_t nowMs) {
+    const uint8_t k = spellNames.combat(spell);
+    if (k & SpellNames::kCombatStops) { attackWanted_ = false; return; }
+    if (!(k & SpellNames::kCombatMelee) || attackWanted_ || !target_) return;
+    const WorldObject* t = objects.find(target_);
+    if (!t || !t->isUnitLike() || t->dead() || !enemyLike(*t)) return;
+    startAttack(nowMs);
+}
+
+std::vector<const Recipe*> GameSession::knownRecipes(uint32_t skill) const {
+    std::vector<const Recipe*> out;
+    for (const Recipe& r : recipes.all())
+        if (r.skill == skill && knowsSpell(r.spell)) out.push_back(&r);
+    return out;
+}
+
+uint32_t GameSession::itemCount(uint32_t entry) const {
+    uint32_t n = 0;
+    for (const InvItem& it : inventory())
+        if (it.entry == entry && !it.equipped()) n += it.count;
+    return n;
+}
+
+bool GameSession::castSpellOnItem(uint32_t spell, uint64_t itemGuid, uint32_t nowMs) {
+    if (!spells.empty() && !knowsSpell(spell)) { fail("You do not know " + spellNames.name(spell), nowMs); return false; }
+    if (cast.active && (cast.durMs == 0 ? nowMs - cast.startMs < 400 : nowMs - cast.startMs < cast.durMs)) {
+        error("Another action is in progress", Vocal::None, nowMs, "Already casting");
+        return false;
+    }
+    Writer w;
+    w.u32(spell);
+    w.u16(0x0010);   // TARGET_FLAG_ITEM: the packed guid of the item
+    w.packedGuid(itemGuid);
+    send(CMSG_CAST_SPELL, w.b, nowMs);
+    predictCast(spell, itemGuid, nowMs);
     return true;
 }
 
@@ -263,11 +363,7 @@ bool GameSession::castSpellAt(uint32_t spell, const float pos[3], uint32_t nowMs
     w.u16(0x40);   // TARGET_FLAG_DEST_LOCATION: three floats
     w.f32(pos[0]); w.f32(pos[1]); w.f32(pos[2]);
     send(CMSG_CAST_SPELL, w.b, nowMs);
-    cast.active = true;
-    cast.spell = spell;
-    cast.startMs = nowMs;
-    cast.durMs = 0;
-    cast.target = 0;
+    predictCast(spell, 0, nowMs);
     return true;
 }
 
@@ -402,11 +498,16 @@ bool GameSession::handleSpells(uint16_t op, const Bytes& data, uint32_t nowMs) {
                 if (unitCasts_.size() > 64) unitCasts_.clear();
                 return true;
             }
+            {   // 6.64: the server began the cast about half a round trip after we sent it: move the predicted start there
+                uint32_t start = nowMs;
+                if (cast.active && cast.predicted && cast.spell == spell && nowMs - cast.startMs < 2000) start = cast.startMs + (nowMs - cast.startMs) / 2;
+                cast.startMs = start;
+            }
             cast.active = true;
             cast.spell = spell;
-            cast.startMs = nowMs;
             cast.durMs = ms;
             cast.target = tgt;
+            cast.predicted = false;
             return true;
         }
         case SMSG_SPELL_GO: {
@@ -431,8 +532,22 @@ bool GameSession::handleSpells(uint16_t op, const Bytes& data, uint32_t nowMs) {
                     o->castGoMs = nowMs ? nowMs : 1;
                     o->castGoSpell = spell;
                     o->castGoDirected = false;
-                    for (int i = 0; i < w.nTargets; ++i)
-                        if (w.targets[i] && w.targets[i] != caster) o->castGoDirected = true;
+                    o->castGoAtObject = false;
+                    // 6.36: a cast at a game object (Opening, herb / ore gathering, quest objects): the hit list names the
+                    // object, and so does the target of the cast we saw start
+                    uint64_t started = 0;
+                    if (caster == self_) { if (cast.spell == spell) started = cast.target; }
+                    else if (auto it = unitCasts_.find(caster); it != unitCasts_.end() && it->second.spell == spell) started = it->second.target;
+                    for (int i = 0; i < w.nTargets; ++i) {
+                        if (!w.targets[i] || w.targets[i] == caster) continue;
+                        const WorldObject* t = objects.find(w.targets[i]);
+                        if (t && t->type == ObjType::GameObject) o->castGoAtObject = true;
+                        else o->castGoDirected = true;
+                    }
+                    if (started && started != caster) {
+                        const WorldObject* t = objects.find(started);
+                        if (t && t->type == ObjType::GameObject) { o->castGoAtObject = true; o->castGoDirected = false; }
+                    }
                 }
             }
             if (caster != self_) { unitCasts_.erase(caster); return true; }
@@ -546,12 +661,39 @@ bool GameSession::handleSpells(uint16_t op, const Bytes& data, uint32_t nowMs) {
         case SMSG_SPELLNONMELEEDAMAGELOG: {
             uint64_t victim = r.packedGuid(), caster = r.packedGuid();
             uint32_t spell = r.u32(), dmg = r.u32();
+            if (!r.bad) {   // 6.95: the sound of the blow, for everyone near (the school byte follows the damage)
+                WorldSound w;
+                w.kind = WorldSound::SpellDamage;
+                w.src = caster;
+                w.dst = victim;
+                w.spell = spell;
+                w.victimState = r.left() >= 1 ? r.u8() : 0;
+                worldSound(w);
+            }
             if (r.bad || (caster != self_ && victim != self_)) return true;
             std::string c = caster == self_ ? "Your" : objects.nameOf(caster) + "'s";
             std::string v = victim == self_ ? "you" : objects.nameOf(victim);
             if (c == "'s") c = "?'s";
             if (v.empty()) v = "?";
             addLocal(c + " " + spellNames.name(spell) + " hits " + v + " for " + std::to_string(dmg) + ".", nowMs);
+            return true;
+        }
+        case SMSG_PERIODICAURALOG: {   // 6.95: damage-over-time ticks: only their sound (packed victim, packed caster, spell, count, then per tick: aura type 3 = damage, school, ...)
+            const uint64_t victim = r.packedGuid(), caster = r.packedGuid();
+            const uint32_t spell = r.u32(), count = r.u32();
+            if (r.bad || count == 0 || count > 8) return true;
+            const uint32_t type = r.u32();
+            if (r.bad || (type != 3 && type != 89)) return true;   // PERIODIC_DAMAGE (89 = percent damage); heals stay silent
+            const uint32_t dmg = r.u32();
+            (void)dmg;
+            WorldSound w;
+            w.kind = WorldSound::SpellDamage;
+            w.src = caster;
+            w.dst = victim;
+            w.spell = spell;
+            w.victimState = r.left() >= 4 ? r.u32() : 0;
+            w.hitInfo = 1;
+            worldSound(w);
             return true;
         }
         case SMSG_SPELLHEALLOG: {

@@ -44,9 +44,28 @@ uint32_t nameTint(const std::string& s) {
 
 ui::Font GameUi::listFont() const { return bigText_ ? Font::Normal : Font::Small; }
 
+bool GameUi::weaponSpell(const w3n::GameSession& g, uint32_t spell, int* which) {
+    int w = -1;
+    switch (spell) {
+        case w3n::kSpellAttack: w = 0; break;
+        case 75: case 3018: case 2480: case 7918: case 7919: case 2764: case 3137: case 10277: case 5019: w = 1; break;
+        default:
+            if (spell && (g.spellNames.combat(spell) & w3n::SpellNames::kCombatRanged)) w = 1;
+    }
+    if (which) *which = w;
+    return w >= 0;
+}
+
 ui::Image GameUi::spellIcon(uint32_t spell) const {
+    // 6.99: the weapon in hand first, as the game does - Attack and Shoot have icons of their own in SpellIcon.dbc (a generic
+    // fist / placeholder), which the game never shows while a weapon is held; the spell's own icon only without one
+    if (gameSess_ && (spell == w3n::kSpellAttack || weaponSpell(*gameSess_, spell, nullptr))) {
+        const int w = spell == w3n::kSpellAttack ? 0 : 1;
+        if (weaponIcon_[w].ok()) return weaponIcon_[w];
+    }
     ui::Image im = assets().spellIcon(spell);
-    if (!im.ok() && spell == w3n::kSpellAttack) im = assets().namedIcon("attack");
+    if (im.ok()) return im;
+    if (spell == w3n::kSpellAttack) im = assets().namedIcon("attack");
     return im;
 }
 
@@ -85,15 +104,16 @@ void GameUi::btn(int x, int y, int w, int h, const std::string& label, Act act, 
     uint32_t text = kText;
     ui::Image skin;
     switch (st) {
-        case Style::Primary: case Style::Danger:
+        case Style::Primary: case Style::Danger: case Style::Normal:   // 7.03: every push button wears the game's red one (as UIPanelButton)
             skin = assets().sprite(pressed ? "button_down" : "button");
             if (skin.ok()) list_.nine(x, y, w, h, skin);
             else {
-                list_.rect(x, y, w, h, pressed ? hudRgba(80, 10, 10) : st == Style::Danger ? hudRgba(110, 18, 14) : hudRgba(120, 22, 16));
+                list_.rect(x, y, w, h, pressed ? hudRgba(80, 10, 10) : st == Style::Danger ? hudRgba(110, 18, 14)
+                                                                     : st == Style::Normal ? hudRgba(100, 20, 14) : hudRgba(120, 22, 16));
                 list_.outline(x, y, w, h, kFrame);
                 list_.rect(x + 1, y + 1, w - 2, 1, hudAlpha(kWhite, 50));
             }
-            text = st == Style::Danger ? hudRgba(255, 200, 190) : kGold;
+            text = st == Style::Danger ? hudRgba(255, 200, 190) : st == Style::Normal ? kText : kGold;
             break;
         case Style::Disabled:
             skin = assets().sprite("button_off");
@@ -313,6 +333,8 @@ std::string GameUi::panelTitle(w3n::GameSession& g, Panel p) const {
         case Panel::ItemInfo: return tr("Item", "Предмет");
         case Panel::SpellInfo: return tr("Spell", "Заклинание");
         case Panel::Buffs: return tr("Buffs and debuffs", "Эффекты");
+        case Panel::Roll: return g.lootRolls.size() > 1 ? std::string(tr("Loot roll ", "Розыгрыш добычи ")) + "1/" + std::to_string(g.lootRolls.size())
+                                                        : std::string(tr("Loot roll", "Розыгрыш добычи"));
         case Panel::Invite: return g.duel.challenged || g.duel.asked ? tr("Duel", "Дуэль") : !g.groupInviteFrom.empty() ? tr("Group invitation", "Приглашение в группу") : tr("Guild invitation", "Приглашение в гильдию");
         case Panel::Menu: return tr("Menu", "Меню");
         case Panel::Confirm: return tr("Are you sure?", "Вы уверены?");
@@ -327,7 +349,7 @@ std::string GameUi::panelTitle(w3n::GameSession& g, Panel p) const {
         case Tab::Combat: return tr("Combat", "Бой");
         case Tab::Map: return tr("Map", "Карта");
         case Tab::Bags: case Tab::Gear: return subBags_ ? tr("Equipment", "Экипировка") : tr("Bags", "Сумки");
-        case Tab::Spells: return subSpells_ == 2 ? tr("Skills", "Навыки") : subSpells_ ? tr("Talents", "Таланты") : tr("Spellbook", "Книга заклинаний");
+        case Tab::Spells: return subSpells_ == 3 ? tr("Crafting", "Ремёсла") : subSpells_ == 2 ? tr("Skills", "Навыки") : subSpells_ ? tr("Talents", "Таланты") : tr("Spellbook", "Книга заклинаний");
         case Tab::Quests: return tr("Quest log", "Журнал заданий");
         case Tab::Chat: return tr("Chat", "Чат");
         case Tab::Social: return tr("Social", "Общение");
@@ -341,6 +363,7 @@ void GameUi::drawPanel(w3n::GameSession& g, const Input& in) {
     switch (p) {
         case Panel::Death: drawDeath(g, in); break;
         case Panel::Loot: drawLoot(g); break;
+        case Panel::Roll: drawRoll(g, in); break;
         case Panel::Gossip: drawGossip(g); break;
         case Panel::Vendor: drawVendor(g, in); break;
         case Panel::Quest: drawQuest(g); break;
@@ -401,7 +424,7 @@ void GameUi::drawPanel(w3n::GameSession& g, const Input& in) {
                 case Tab::Map: drawMap(g, in); break;
                 case Tab::Chat: drawChat(g, in); break;
                 case Tab::Bags: case Tab::Gear: if (subBags_) drawPaperDoll(g, in); else drawItems(g, in); break;
-                case Tab::Spells: if (subSpells_ == 2) drawSkills(g, in); else if (subSpells_) drawTalents(g, in); else drawSpells(g, in); break;
+                case Tab::Spells: if (subSpells_ == 3) drawCraft(g, in); else if (subSpells_ == 2) drawSkills(g, in); else if (subSpells_) drawTalents(g, in); else drawSpells(g, in); break;
                 case Tab::Quests: drawQuestLog(g, in); break;
                 case Tab::Social: drawSocial(g, in); break;
                 case Tab::Settings: drawSettings(in); break;
@@ -423,6 +446,13 @@ bool GameUi::draw(w3n::GameSession& g, const Input& in, float fps, uint32_t late
     list_.clear();
     buttons_.clear();
     pickerCells_.clear();
+    gameSess_ = &g;
+    for (int w = 0; w < 2; ++w) {   // 6.95: the weapons in hand (slot 15 main hand, 17 ranged)
+        weaponIcon_[w] = ui::Image();
+        for (const w3n::InvItem& it : g.inventory())
+            if (it.bag == w3n::kBagSelf && it.slot == (w ? 17 : 15)) weaponIcon_[w] = itemIcon(g, it.entry);
+    }
+    qsOn_ = false;   // 6.94: the quest windows set it when they draw
     list_.rect(0, 0, kTouchW, kTouchH, kBg);
     const Panel p = panel(g);
     header(g, panelTitle(g, p));
@@ -435,6 +465,7 @@ bool GameUi::draw(w3n::GameSession& g, const Input& in, float fps, uint32_t late
         crossbarPicker(g, in);
         list_.noClip();
     }
+    if (card_) drawItemCard(g);   // 6.91: the item's mini window over everything (its tap region is the last: it takes every tap)
     if (drag_.active) {   // the icon under the finger
         const ActionSlot da{drag_.kind >= 1 && drag_.kind <= 4 ? drag_.kind : (uint8_t)ActionSlot::Item, drag_.id};
         ui::Image im = actionIcon(g, da);

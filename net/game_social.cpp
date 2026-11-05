@@ -523,11 +523,24 @@ void GameSession::setStandState(uint8_t state, uint32_t nowMs) {   // CMSG_STAND
 // ------------------------------------------------------------------ target and melee
 void GameSession::setTarget(uint64_t guid, uint32_t nowMs) {
     if (guid == target_) return;
-    if (attackWanted_ && guid != target_) stopAttack(nowMs);
+    // 6.87: as in the original, auto-attack follows the selection: a new enemy is attacked in turn (CMSG_ATTACKSWING at it),
+    // anything else (a friend, nothing) ends it
+    const bool follow = attackWanted_;
     target_ = guid;
     Writer w;
     w.u64(guid);
     send(CMSG_SET_SELECTION, w.b, nowMs);
+    if (follow) {
+        const WorldObject* t = guid ? objects.find(guid) : nullptr;
+        if (t && t->isUnitLike() && !t->dead() && enemyLike(*t)) {
+            Writer a;
+            a.u64(guid);
+            send(CMSG_ATTACKSWING, a.b, nowMs);
+            attackError_ = 0;
+        } else {
+            stopAttack(nowMs);
+        }
+    }
 }
 
 uint64_t GameSession::pickTarget(const float pos[3], float yaw, float range, uint64_t current, uint32_t nowMs) const {
@@ -701,6 +714,7 @@ uint64_t GameSession::softInteract(const float pos[3], float yaw, uint32_t nowMs
         if (d > range) continue;
         float a = d < 0.5f ? 0.0f : std::fabs(std::remainder(std::atan2(dy, dx) - yaw, 6.2831853f));
         float key = d + (a > 1.5708f ? 4.0f : 0.0f) + (o.type == ObjType::GameObject ? 0.5f : 0.0f);   // in front, units first
+        if (o.type == ObjType::GameObject && objectAction(o).weak) key += 6.0f;   // not flagged for our quest: after everything else
         if (bobber) {   // a bite beats everything; else anything near comes first
             key = fishBiting(nowMs) ? -1.0f : 50.0f;
             v = fishBiting(nowMs) ? "Catch" : "Reel in";
@@ -791,6 +805,10 @@ bool GameSession::handleSocial(uint16_t op, const Bytes& data, uint32_t nowMs) {
             r.pos += len;
             while (!l.text.empty() && l.text.back() == '\0') l.text.pop_back();
             r.u8();   // chat tag (AFK/DND/GM)
+            // 6.99: addon messages (language LANG_ADDON = -1: SendAddonMessage, "prefix\tdata") are for addons, never shown -
+            // the original client turns them into CHAT_MSG_ADDON. OctoWoW's server addons (AIO "SAIO...", OctoRadio's
+            // "now playing" JSON) whisper them to the player: they filled the chat as whispers from and to ourselves.
+            if (l.lang == 0xFFFFFFFFu) { ++stats.addonMessages; return true; }
             if (l.sender && l.name.empty() && objects.nameOf(l.sender).empty() && l.sender != self_ &&
                 (l.sender >> 48) == 0 && askedNames_.insert(l.sender).second) {   // a player not in range: ask
                 Writer w;

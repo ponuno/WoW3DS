@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "w3d_format.h"
+#include "wmo_portals.hpp"
 #include "w3d_terrain_lod.h"
 #include "w3d_character.h"
 #include "w3d_fx.h"
@@ -94,7 +95,11 @@ struct Model {
     // per-frame visibility bucket (filled by the renderer)
     std::vector<const struct Instance*> visible;
     uint32_t mvBase = 0;             // stage 6.10: where its visible instances' matrices start (renderer, per frame)
+    const W3dPortalTable* portals = nullptr;   // 6.42: the portals of a WMO group (its doors to the neighbouring groups), null: none in this pack
+    const W3dUvAnimTable* uva = nullptr;   // 6.41: moving textures of its submeshes (M2 texture transforms), null: none
     const W3dSubLod* lods = nullptr; // stage 6.12: lighter versions of the submeshes (null: none in this pack)
+    bool foliage = false;            // 6.84: a doodad with alpha-keyed crown cards that has lighter levels: they come on nearer (w3d_lod_for_foliage)
+    float lodErr[2] = {0, 0};        // 6.47: yards LOD 1 / 2 lie from the full mesh (WMO groups of new packs; 0 = the radius rule)
     uint32_t drawableMs = 0;         // stage 6.11: when it became drawable (kFadeMs of fading in start there), streamerNowMs() clock
     uint32_t fadeCount = 0;          // stage 6.11: its visible instances that are fading this frame (renderer, per frame)
     bool texturesReady() const;
@@ -109,9 +114,14 @@ struct Instance {
     float lightModel[3];
     uint32_t animMs = 0;             // stage 5.35: age of an animated effect (Model::fxAnim)
     uint8_t lod = 0;                 // stage 6.12: the level drawn this frame (renderer; 0 = full)
+    int32_t sgroup = -1;             // 6.44: index in Tile::sgroups (a small static doodad merged with its neighbours), -1: drawn alone
+    int32_t pnode = -1;              // 6.42: index in Tile::pnodes (a building group of a tile with portals), -1: none
     uint16_t bldg = 0;               // stage 6.11: 1 + index in Tile::bldgs of the building (WMO groups sharing one transform), 0 = none
     uint16_t owner = 0;              // 6.33: 1 + the building whose doodad (tree, lamp, bench of the WMO) it is: shown only with it
     float fade = 1.0f;               // stage 6.11: opacity this frame (the renderer sets it while the instance appears / at the edge)
+    uint32_t pvsStamp = 0;           // 6.54: = RenderSettings::pvsStamp when the PVS says it can be seen this frame (pvs.cpp)
+    int8_t hblock = -1;              // 6.57: the horizon block (by * 4 + bx) whose mesh stands for it from afar (hlod.cpp), -1: none
+    uint32_t pl = 0;                 // 6.54: its index in the tile's PLCM (buildChunks reorders 'instances')
 };
 
 // Creature (stage 5.3): a CDSP display references a CMDL skinned model plus per-display
@@ -164,11 +174,13 @@ struct CreatureInstance {
         Model* model;
         int16_t bone;                // bone of the unit's model carrying the attachment
         float pos[3];                // attachment point, bind-pose model space
+        uint8_t backFix;             // 6.92: sheathed on the back (attachment 12): w3d_back_weapon_xform after the point
     };
     static constexpr int kMaxWorn = 7;
     Worn worn[kMaxWorn];
     int wornCount = 0;
     float fade = 1.0f;               // stage 6.12: opacity (appearing, or at the far edge); < 1 is drawn alpha-blended
+    uint32_t tint = 0x00FFFFFFu;     // 6.62: colour multiplied in while fade < 1 (R low byte; white = none): a ghost is translucent and blue
 };
 // Stage 6.12: units farther than this are posed in step with the others of their model and animation (one pose per model and
 // sequence a frame, 10 poses a second) and drawn with the lighter meshes; nearer ones are animated each on its own.
@@ -176,6 +188,13 @@ constexpr float kCreatureFullAnimRange = 110.0f;
 // The level of a model's mesh at distance d for a bounding radius r: by the size on the screen.
 static inline uint8_t w3d_lod_for(float d2, float r) {
     const float r1 = r * 12.0f, r2 = r * 30.0f;   // (smaller on the screen than at first planned: the switch shows less)
+    return d2 > r2 * r2 ? 2 : d2 > r1 * r1 ? 1 : 0;
+}
+
+// 6.84: the same for models of alpha-keyed foliage (trees, bushes): their cards fill the screen pixel by pixel (cut-out leaves cost
+// fill rate as well as triangles), so the lighter levels (whole cards fewer) come on earlier: 8 and 20 radii instead of 12 and 30.
+static inline uint8_t w3d_lod_for_foliage(float d2, float r) {
+    const float r1 = r * 8.0f, r2 = r * 20.0f;
     return d2 > r2 * r2 ? 2 : d2 > r1 * r1 ? 1 : 0;
 }
 
@@ -219,6 +238,13 @@ struct Tile {
     uint8_t* grnd = nullptr;         // 6.18a: GRND entry (the ADT's 145 heights + holes per chunk), malloc'd with the tile; null in older packs
     u32 grndSize = 0;
     std::vector<Instance> instances;
+    std::vector<int32_t> plToInst;   // 6.54: PLCM index -> index in 'instances' (-1: no model); the PVS names doodads by PLCM index
+    uint32_t pvsStamp = 0;           // 6.54: = RenderSettings::pvsStamp when the PVS covers this tile this frame
+    std::vector<uint32_t> pvsTerr;   // 6.54: per ground batch, = pvsStamp when it can be seen
+    // 6.57: the horizon - per block, = RenderSettings::hlodStamp when its mesh is drawn instead of its members this frame; the
+    // instances' blocks were set for these meshes (hlodGen) and this many instances / placements
+    uint32_t hlodFar[16] = {};
+    uint32_t hlodGen = 0, hlodInst = 0, hlodPl = 0;
     std::vector<Model*> models;      // one reference per distinct model
     // Stage 6.10: the instances sorted into a 4x4 grid of chunks (contiguous ranges of instances); the renderer rejects a
     // whole chunk by its bounding sphere before it looks at the instances. The radii come with the models' headers: until
@@ -242,6 +268,39 @@ struct Tile {
     };
     std::vector<Bldg> bldgs;
     int bldgsClosed = 0;
+    // 6.44: small static doodads merged per 32-yd cell, size class and owning building (render.cpp, static_batch.hpp). The plan is made
+    // once every model of the tile is in; a group's buffers are built when it is first near enough to be drawn merged.
+    struct StaticBatch {
+        GpuTex* tex = nullptr;
+        uint8_t blend = 0, flags = 0;
+        W3dModelVertex* v = nullptr;     // linear memory (freed with the tile, deferred)
+        uint16_t* idx = nullptr;         // linear memory
+        uint32_t vBytes = 0, iBytes = 0; // 6.52: their sizes
+        uint32_t first[3] = {0, 0, 0}, count[3] = {0, 0, 0};   // full / lighter levels
+        float scale[3] = {1, 1, 1}, offset[3] = {0, 0, 0}, uvScale = 1;
+    };
+    struct StaticGroup {
+        std::vector<uint32_t> members;   // indices into 'instances'
+        float center[3] = {0, 0, 0}, radius = 0;   // a sphere around every member's sphere; the batches' origin
+        float minR = 0, maxR = 0;
+        uint16_t owner = 0;              // the building that must be shown (Instance::owner), 0: none
+        uint8_t state = 0;               // 0 not built, 1 built, 2 cannot be (out of memory)
+        uint32_t bornMs = 0;             // the latest member became drawable
+        uint32_t firstBatch = 0, batchCount = 0;
+        uint32_t frame = 0;              // the frame of the decision below
+        bool merged = false;             // drawn merged this frame (its members are not drawn alone)
+    };
+    std::vector<StaticGroup> sgroups;
+    std::vector<StaticBatch> sbatches;
+    uint32_t sbytes = 0;                 // linear memory of the batches
+    uint32_t sinstances = 0;             // instances.size() when planned
+    uint8_t sstate = 0;                  // 0 not planned, 1 planned
+    // 6.42: the portal graph of the tile's building groups (render.cpp portalsReady): built once every group is in, walked once a frame
+    std::vector<wmoportal::Node> pnodes;
+    uint32_t pinstances = 0;         // instances.size() when built
+    uint32_t pframe = 0;             // the frame the walk was made in
+    uint32_t pcomp = 0xFFFFFFFFu;    // the building culled this frame (wmoportal::reach), none: nothing culled
+    uint8_t pstate = 0;              // 0: not built, 1: built, 2: no group of the tile has portals
     uint32_t readyMs = 0;            // when the ground became drawable (streamerNowMs): objects fade in from there
     // Stage 5.30: a tile is drawn as soon as its terrain and the terrain's textures are in (state Ready); its water when the
     // water's textures are, every model when the model is (Model::drawable). complete = everything of it is in.
@@ -302,9 +361,13 @@ struct StreamStats {
     u32 texVramMiss = 0;                // textures that went to linear memory because VRAM was full
     uint64_t texVramMissBytes = 0;
     uint32_t texEvicted = 0;          // 6.28: textures moved from VRAM to linear memory for a render target (3D / wide)
+    uint32_t texPromoted = 0;         // 6.50: textures moved back from linear memory to VRAM once there was room
+    uint64_t texPromotedBytes = 0;
     u32 collHeapMiss = 0;               // COLL that did not fit in the normal heap (went to linear memory)
     u32 badCreatureModels = 0;          // 6.35: CMDL blobs that failed w3d_creature_valid (not drawn)
     u32 lastBadCreature = 0;            // ... the last one's id
+    u32 badModelTex = 0;                // 6.99: MODL submeshes naming a texture past the model's list (drawn untextured)
+    u32 lastBadModel = 0;               // ... the last such model's id
     // 6.31: the normal heap (24 MB) is kept from running dry: COLL takes it only above a reserve, and under kHeapLow the wanted
     // ring shrinks to 3 x 3 tiles (7o crashed in Stormwind at 533 yd with 944 KB left: libctru / citro3d do not survive a
     // failed malloc)
@@ -342,6 +405,13 @@ void streamerMemory(StreamMemory* out);
 // Stage 6.5: moves textures out of VRAM into linear memory (farthest first, a GX copy each) until 'bytes' of VRAM are
 // free; returns how much moved. Outside a frame only (it waits for the GPU): for a render target that did not fit.
 uint32_t streamerEvictVram(const uint32_t* blocks, int n);   // (stage 6.9: until these blocks fit, each in one piece)
+// 6.52: the GPU test's vertex buffers in VRAM. streamerGtVram (main thread, outside a frame): 0 off (the reserve freed two frames
+// later), 1 a 1.5 MB VRAM reserve held empty (textures moved out for it), 2 the reserve filled with copies of the buffers drawn.
+// streamerGtVramCopy (renderer): the VRAM copy of a linear buffer once it is there (null meanwhile: it is asked for).
+struct GtVramStats { uint32_t reserveBytes = 0, movedTexBytes = 0, buffers = 0, bytesUsed = 0, copiesTotal = 0, misses = 0; };
+void streamerGtVram(int mode);
+const uint8_t* streamerGtVramCopy(const void* src, uint32_t bytes);
+const GtVramStats& streamerGtVramStats();
 
 // Stage 6.11: the clock of Model::drawableMs / Tile::readyMs / Tile::Bldg::openMs (milliseconds, wraps after 49 days: only
 // differences are used).
@@ -350,6 +420,7 @@ constexpr uint32_t kFadeMs = 500;        // an object appears over this long (6.
 constexpr uint32_t kBldgWaitMs = 2500;   // a building waits for its lagging groups this long
 
 bool streamerInit(PackIndex* index, char* err, size_t errLen);
+extern bool g_packHasPortals;   // 6.57g: a loaded model carries a portal table (a pack from 6.42 on)
 void streamerShutdown();
 // Load/unload around the camera; call once per frame before rendering. uploadsLater: the texture uploads (and the
 // players' bodies) wait for streamerUploadTextures(), called inside the frame after C3D_FrameBegin (stage 6: there the
@@ -360,6 +431,9 @@ void streamerUploadTextures();
 // take most of the frame then).
 void streamerSetView(float yaw);
 void streamerSetBoost(bool on);
+// 6.37: false on the login screens - no world tiles are read (the ones loaded are released): the glue scene gets the card and
+// the VRAM to itself. ensureMap and the world switch it back on.
+void streamerSetWorldWanted(bool on);
 // Ready tiles for rendering.
 const std::vector<Tile*>& streamerReadyTiles();
 // 6.24: the far ground (w3d_farlod.h): the tiles to draw this frame - within maxDist of the camera, without detailed ground.
@@ -408,9 +482,14 @@ bool streamerFloorHeight(float wx, float wy, float zFeet, float* out, bool* onFl
 // Returns true if a wall changed the target.
 static constexpr float kWalkerRadius = 0.35f;
 bool streamerCollideMove(float fromX, float fromY, float zFeet, float* toX, float* toY);
+// 6.42: the walker's head is kHeadHeight over the feet; streamerCeilingAbove() gives the lowest collision face over (wx, wy) higher
+// than zFrom (feet + kCeilingFrom: what is lower belongs to the floor under the feet), so a jump stops under a low roof.
+static constexpr float kHeadHeight = 2.0f;
+static constexpr float kCeilingFrom = 0.5f;
+bool streamerCeilingAbove(float wx, float wy, float zFrom, float* ceil);
 // 6.18c: the slope limit of the terrain (50 degrees, w3d_slope_move): a move uphill onto steeper ground keeps only its part along
 // the contour. Needs the GRND of the tile (older packs: no limit). Returns true if the target changed.
-bool streamerSlopeMove(float fromX, float fromY, float zFeet, float* toX, float* toY);
+bool streamerSlopeMove(float fromX, float fromY, float zFeet, float* toX, float* toY, float step = -1.0f);   // step < 0: kStepHeight; 6.95: in the air a jump's height (2.4)
 // Liquids (stage 5.26, LIQD): the surface over render (wx, wy) for something whose feet / eyes are at zRef. A liquid of
 // the terrain does not count below the terrain (a cave under a lake): zRef more than 2 yd under the ground there.
 struct LiquidHere {
@@ -431,6 +510,27 @@ CreatureDisplay* streamerAcquirePlayerDisplay(const W3dLook& look, const uint32_
 int streamerCharInfo(uint32_t race, uint32_t sex, const uint8_t** blob, uint32_t* size);
 // Reads the first 'size' bytes of an entry right away (small entries only: the GLUE scenes).
 bool streamerReadEntry(uint32_t type, uint32_t id, void* dst, uint32_t size);
+// 6.59: a game object whose model is a building (OWMO entry, id 0x80000000 | display): its parts (groups + furniture, models
+// acquired on the first ask) in the object's own space and its collision triangles (9 floats each). nullptr: none in the pack.
+// 'at' = where the object stands (the parts' read priority). Unused ones are released by streamerObjWmoTick after 30 s.
+struct ObjWmoPart { Model* model; float pos[3], rot[3], scale; };
+struct ObjWmo {
+    std::vector<ObjWmoPart> parts;
+    std::vector<float> coll;       // object space
+    std::vector<uint8_t> collBlob; // the same as a COLL blob (objcoll::build), empty when there is nothing to collide with
+    float radius = 0, bmin[3] = {0, 0, 0}, bmax[3] = {0, 0, 0};
+    uint32_t lastUseMs = 0;
+};
+const ObjWmo* streamerObjWmo(uint32_t displayId, const float at[3], uint32_t nowMs);
+bool streamerHasObjWmo(uint32_t displayId);
+void streamerObjWmoTick(uint32_t nowMs);   // (also forgets last frame's placed objects)
+// This frame's object at pos / yaw / scale: its floors, walls and ceilings join the queries below (streamerFloorHeight, ...).
+void streamerObjWmoPlace(const ObjWmo* w, const float pos[3], float yaw, float scale, uint64_t owner = 0);
+// 7.08: the object (owner given to streamerObjWmoPlace: its guid) whose floor holds feet at (x, y, zFeet) - the highest object floor
+// within a step, if it is the walker's floor (no higher terrain / building floor in the way is checked here); 0: none.
+uint64_t streamerObjFloorOwner(float x, float y, float zFeet);
+// 7.08: a floor of that object under (x, y) at most 'below' yards under the feet (or a step above them): true and *z.
+bool streamerObjFloorOf(uint64_t owner, float x, float y, float zFeet, float below, float* z);
 uint32_t streamerEntrySize(uint32_t type, uint32_t id);   // 0 = not in the pack (stage 5.33)
 // Worn items (stage 5.19): an ITEM entry (nullptr if the pack has none; check state / ok) and the item models.
 struct ItemDisplay {
@@ -460,6 +560,9 @@ struct FrameCounters {
     u32 drawCalls = 0, tris = 0, visibleInstances = 0, visibleBatches = 0, texBinds = 0, waterBatches = 0, markers = 0, buildings = 0;
     u32 creatures = 0, boneUploads = 0;
     double poseMs = 0;
+    double poseWaitMs = 0;
+    double gameSplitMs[4] = {0, 0, 0, 0};   // 7.05: the game phase - GameSession::update, collectCreatures, CreatureView::update, markers           // 7.05: rendererPrepare waiting for the pose thread (core 2); 0 when it was done in time
+    u32 posesThreaded = 0;           // 7.05: 1 when this frame's poses came from core 2
     u32 fxParticles = 0, fxGlows = 0, fxQuads = 0, fxSources = 0;   // stage 5.32
     double fxMs = 0;
     u32 lodBatches[W3D_TERRAIN_LODS] = {0, 0, 0};
@@ -475,12 +578,28 @@ struct FrameCounters {
     double kickMs = 0;               // CPU time of the kicks (cache flush + split)
     double prepareMs = 0;            // stage 6.4: rendererPrepare's poses + particles (its visibility is passMs[kCollect])
     double matrixMs = 0;             // stage 6.10: the visible instances' matrices (inside prepareMs)
+    u32 sbGroups = 0, sbMembers = 0, sbDraws = 0, sbBuilt = 0;   // 6.44: merged groups drawn / their doodads / draw calls / groups built this frame
     u32 chunksCulled = 0, chunksTested = 0;   // stage 6.10: tile chunks rejected whole / whose instances were tested
     u32 lodDraws[3] = {0, 0, 0};     // stage 6.12: model + creature draws by mesh level
-    u32 sharedPoses = 0, farUnits = 0;   // stage 6.12: far units posed together / their number
+    u32 bldgLod[3] = {0, 0, 0};      // 6.47: building groups (with errors in the pack) by the level picked
+    // 6.51: where the doodads' triangles / draws go. [blend: 0 opaque, 1 alpha-key, 2 alpha-blended / additive][size: radius < 1.5, < 4, < 12, bigger]
+    // dTris / dDraws: doodads drawn one by one (a fading opaque part counts under its own blend); sbTris / sbDrawsBl: the merged batches
+    u32 dTris[3][4] = {}, dDraws[3][4] = {};
+    u32 sbTris[3] = {0, 0, 0}, sbDrawsBl[3] = {0, 0, 0};
+    u32 vramTris = 0;                // 6.52: triangles drawn from vertex copies in VRAM (the GPU test)
+    u32 objWmoParts = 0;   // 6.59: parts of game objects that are buildings, collected
+    u32 hlodBlocks = 0, hlodHidden = 0, hlodSkip = 0, hlodTris = 0, hlodTiles = 0, hlodKB = 0;   // 6.57: the horizon's meshes drawn / hidden by the PVS, members skipped
+    u32 pvsOn = 0, pvsDood = 0, pvsTerr = 0, pvsRead = 0, pvsBldg = 0, pvsFar = 0;   // (6.54d: WMO groups skipped, far things skipped)   // 6.54: the PVS used this frame / doodads and ground batches it skipped
+    u32 sharedPoses = 0, farUnits = 0;
+    u32 posesFresh = 0, posesReused = 0;   // 6.99: mid-distance units posed this frame / drawn with their last pose   // stage 6.12: far units posed together / their number
     u32 fading = 0;                  // stage 6.11: instances drawn alpha-blended this frame (appearing / dissolving at the edge)
 };
 
+// 6.51: kGtAlphaKey leaves out the cut-out (alpha-keyed) parts of doodads - leaves, fences, grilles - to price their overdraw
+// 6.46: the GPU test's switches (RenderSettings::gpuTestOff): one thing at a time is left out to see what it costs the GPU
+constexpr uint32_t kGtTextures = 1, kGtTerrainLayers = 2, kGtTerrain = 4, kGtBuildings = 8, kGtAlpha = 16, kGtAlphaKey = 32, kGtPvsOff = 64,
+                   kGtInteriorNear = 128,   // 6.56: interior WMO groups from outside only within radius + 25 (as before)
+                   kGtHlodOff = 256;        // 6.57: no horizon meshes (every block's real buildings)
 struct RenderSettings {
     bool doodads = true;
     bool fog = true;
@@ -501,7 +620,32 @@ struct RenderSettings {
     // so the faded instances cost the transparent pass). pad.txt 'fadein'.
     bool fadeIn = true;
     uint32_t nowMs = 0;          // streamerNowMs() of this frame (main.cpp sets it)
+    uint32_t gpuTestOff = 0;     // 6.46: what the GPU test (/gputest) switches off this phase (kGt* bits)
+    bool staticBatch = true;     // 6.44: small static doodads drawn merged per cell (pad.txt 'staticbatch')
+    // 6.47: a building's LOD level is picked by how many pixels its error spans on the screen (at the group's nearest point):
+    // level k once lodErr[k] * pixelsPerRadian / distance < lodPixels. pad.txt 'lodpx'; wide = the 800-pixel top screen.
+    float lodPixels = 2.0f;
+    bool wide = false;
+    // 6.54: the PVS this frame (pvs.cpp): covered tiles' doodads / ground batches without this stamp are skipped, except within pvsNear
+    // yards; ground batches farther than pvsMaxDist are drawn as before (the horizon)
+    bool pvsOn = false;
+    bool pvsFarHidden = false;   // 6.54d: nothing past pvsFarR can be seen: the far ground, far building shells and ground wholly past it skipped
+    float pvsFarR = 500.0f;
+    uint32_t pvsStamp = 0;
+    float pvsNear = 25.0f, pvsMaxDist = 533.0f;
+    // 6.56: interior WMO groups from outside drawn to the draw distance (pad.txt 'interiorfar'); pvsInteriors: the PVS file (v4) lists
+    // them as such - with a v3 file the PVS leaves them alone
+    bool interiorFar = true, pvsInteriors = false;
+    int dbgBldg = 0;          // 6.57e: pad.txt 'dbgbldg' (a test: which kind of WMO group is it?)
+    uint32_t hlodStamp = 0;   // 6.57: Tile::hlodFar of the blocks drawn as their mesh this frame (0: no horizon)
 };
+// 6.47: the level of a building group whose levels carry their errors (Model::lodErr), at distance dn (yd) from its sphere
+static inline uint8_t w3d_lod_for_error(float dn, const float err[2], float scale, const RenderSettings& rs) {
+    // pixels per radian across the top screen: 60 degrees vertical over 240 rows -> 208; the wide screen's columns are twice as dense
+    const float ppr = rs.wide ? 416.0f : 208.0f;
+    const float lim = dn * (rs.lodPixels > 0.1f ? rs.lodPixels : 0.1f) / ppr;   // the error (yd) that spans lodPixels there
+    return err[1] > 0 && err[1] * scale <= lim ? 2 : err[0] > 0 && err[0] * scale <= lim ? 1 : 0;
+}
 
 // Stage 5: world objects drawn as coloured direction markers until creature models exist.
 struct Marker {
@@ -519,7 +663,13 @@ void fxForgetModel(const void* model);   // fx.cpp: a model with effects is bein
 void rendererShutdown();
 void rendererSetProjection(float drawDist);   // also rebuilds the fog LUT
 void rendererSetHorizon(float yards);         // 6.34b: 0 = off; else the ground / far shells to this distance (then call rendererSetProjection)
+void rendererSetViewer(const float* pos);    // 6.42: the character's position (seeds the portal walk too), null: none
 void rendererSetEye(float iod);               // stereoscopic 3D: the projection of one eye (-iod left, +iod right, 0 = mono)
+void rendererSetGhostFog(float share);   // 6.80: sight in the spirit world as a share of the zone's fog distance (0.25..1)
+void rendererSetGhost(float amount);   // 6.62: 0 alive .. 1 ghost: the sky and the fog go grey
+void rendererSetSkyModel(Model* m);   // 6.61: the zone's sky model over the dome (kept acquired by the caller), null: none
+void rendererSetCelestial(const float sunDir[3], float sunStrength, const float moonDir[3], float moonStrength);   // 6.61
+void rendererSetSky(const float top[3], const float mid[3], const float band1[3], const float band2[3], const float fog[3]);   // 6.60
 u32 rendererClearColor(const RenderSettings& rs);
 // Stage 5.29: a login / character screen scene: static models and creatures only (no terrain, sky, water or fog), seen
 // through a camera with its own vertical field of view and clip planes.
@@ -530,6 +680,7 @@ struct SceneModel {
     uint32_t fxKey = 0;
     bool emit = true;
     uint32_t fxAgeMs = 0;       // stage 5.35: since the effect started (the bone animation of the model)
+    bool building = false;      // 6.59: a part of a game object that is a building: lit as the world's buildings, drawn with effects off too
 };
 // Stage 5.33: where a point of a unit drawn in the last frames is (W3dSpellSlot: hands, chest, head, feet), from its
 // animated skeleton; false when the unit was not drawn lately or its model has no such attachment.
@@ -548,6 +699,10 @@ void rendererBeforeFrameEnd(FrameCounters& fc);
 struct tag_gxCmdQueue_s* rendererGxQueue();   // stage 6.7: citro3d's GX queue (nullptr when its layout does not look right)
 // Stage 6.4: the frame's visibility (which doodads / buildings / effect meshes are drawn) before C3D_FrameBegin, while
 // the GPU still draws the previous frame; rendererDraw (any number of eyes) then uses it, rendererEndFrame drops it.
+// 7.05: the units' poses of this frame start on core 2 (the list and the camera must not change until rendererPrepare joins);
+// false: no thread (Old 3DS) - rendererPrepare poses them itself.
+bool rendererPosesStart(const Camera& cam, const RenderSettings& rs, const std::vector<CreatureInstance>* list);
+void rendererPosesShutdown();
 void rendererPrepare(const Camera& cam, const RenderSettings& rs, FrameCounters& fc, const std::vector<SceneModel>* effects,
                      const std::vector<CreatureInstance>* creatures);
 void rendererEndFrame();

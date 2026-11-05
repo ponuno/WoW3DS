@@ -9,6 +9,10 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <map>
+#include <sstream>
+#include <string>
+#include <vector>
 
 #include "pipeline/m2_loader.hpp"
 
@@ -21,6 +25,8 @@ const SceneSrc kScenes[] = {
     {W3D_GLUE_MAINMENU, "UI_MainMenu"},
     {1, "UI_Human"}, {2, "UI_Orc"}, {3, "UI_Dwarf"}, {4, "UI_NightElf"}, {5, "UI_Scourge"}, {6, "UI_Tauren"},
     {7, "UI_Dwarf"}, {8, "UI_Orc"},
+    // 6.99: Turtle WoW's races - their own backdrop when the client has one, else the nearest (first that exists)
+    {9, "UI_Goblin|UI_Orc"}, {10, "UI_HighElf|UI_BloodElf|UI_NightElf"},
 };
 }  // namespace
 
@@ -32,7 +38,17 @@ bool convertGlueScenes(const Options& oIn, const DataDir& data, PackWriter& pack
     size_t ok = 0, missing = 0;
     std::map<std::string, W3dGlueScene> done;   // a scene shared by two races is converted once
     for (const SceneSrc& sc : kScenes) {
-        const std::string path = std::string("Interface\\Glues\\Models\\") + sc.name + "\\" + sc.name + ".m2";
+        std::string path;
+        {   // "A|B": the first that exists
+            std::string names = sc.name, n;
+            std::stringstream ns(names);
+            std::vector<uint8_t> probe;
+            while (std::getline(ns, n, '|')) {
+                path = std::string("Interface\\Glues\\Models\\") + n + "\\" + n + ".m2";
+                if (done.count(path) || data.read(path, probe)) break;
+            }
+            if (sc.id > 8 && !done.count(path) && !data.read(path, probe)) continue;   // a vanilla client: no such race, not missing
+        }
         auto it = done.find(path);
         W3dGlueScene g{};
         if (it != done.end()) {
@@ -45,7 +61,7 @@ bool convertGlueScenes(const Options& oIn, const DataDir& data, PackWriter& pack
                 done[path] = g;
                 continue;
             }
-            wowee::pipeline::M2Model mdl = wowee::pipeline::M2Loader::load(bytes);
+            wowee::pipeline::M2Model mdl = loadM2(bytes);
             g.modelId = addModelFromGame(pack, data, path, o, st);
             if (!g.modelId) {
                 std::fprintf(stderr, "  glue scene %s: the model did not convert\n", path.c_str());

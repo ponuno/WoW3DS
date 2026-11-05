@@ -52,6 +52,7 @@ public:
     const w3n::Timings& worldTimings() const { return world_.timings(); }
     uint32_t latencyMs() const { return world_.lastLatencyMs(); }
     const w3n::WorldClient& worldClient() const { return world_; }
+    w3n::WorldClient& worldClientMut() { return world_; }   // 7.04: the intro cinematics (playCinematics, completeCinematic)
     uint64_t bytesReceived() const { return world_.bytesReceived(); }
     size_t opcodesSeen() const { return world_.opcodeCounts().size(); }
     const std::string& characterName() const { return charName_; }
@@ -79,6 +80,7 @@ private:
     Phase phase_ = Phase::Menu;
     std::string server_ = "127.0.0.1:3724", account_, password_, charName_, lastRealm_, lastChar_;
     int protocol_ = 3;
+    bool turtle_ = false;   // 6.58: log in as the Turtle WoW 1.18.1 client (build 7272; world 5875)
     bool logOn_ = false;           // login.cfg "log=1": record packets to session.w3dl
     uint64_t sessionT0_ = 0;
     w3n::GameSession game_;

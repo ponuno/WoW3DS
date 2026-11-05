@@ -26,6 +26,6 @@ FL="-std=gnu++20 -g -O1 -Wall -Wno-maybe-uninitialized -fsanitize=address,undefi
 g++ $FL "$T/spellfx_test.cpp" "$T/../source/spellfx.cpp" -o "$OUT/spellfx_test"
 "$OUT/spellfx_test" "$OUT/sfx.w3dp" "$OUT/expect.json"
 g++ $FL -DW3D_PC_TEST -I"$T/stub" "$T/spell_stream_test.cpp" "$T/../source/spellfx.cpp" "$T/../source/fx.cpp" \
-    "$T/../source/streamer.cpp" "$T/stub/ctru_stub.cpp" -o "$OUT/spell_stream_test" -lpthread
+    "$T/../source/streamer.cpp $T/../source/hlod.cpp $T/../source/objcoll.cpp" "$T/stub/ctru_stub.cpp" -o "$OUT/spell_stream_test" -lpthread
 "$OUT/spell_stream_test" "$OUT/world.w3dp" | tail -2
 echo "SPELL FX TESTS: PASS"

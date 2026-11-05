@@ -50,6 +50,7 @@ bool PadConfig::load(const char* path) {
         else if (!strcmp(key, "effects")) effects = v < 0 ? 0 : v > 2 ? 2 : v;
         else if (!strcmp(key, "bigtext")) bigText = v != 0;
         else if (!strcmp(key, "dimhud")) dimHud = v != 0;
+        else if (!strcmp(key, "bubbles")) chatBubbles = v != 0;
         else if (!strcmp(key, "autotabs")) autoTabs = v != 0;
         else if (!strcmp(key, "music") && v >= 0 && v <= 10) musicVol = (int)v;
         else if (!strcmp(key, "sfx") && v >= 0 && v <= 10) sfxVol = (int)v;
@@ -58,21 +59,35 @@ bool PadConfig::load(const char* path) {
         else if (!strcmp(key, "perflog")) perfLog = v != 0;
         else if (!strcmp(key, "gpuearly")) gpuKick = v != 0;   // (6.7: a new key - 'gpukick' files start with it off)
         else if (!strcmp(key, "vsync")) vsync = v != 0;
+        else if (!strcmp(key, "pace") && v >= 0 && v <= 2) pace = (int)v;
+        else if (!strcmp(key, "autodetail")) autoDetail = v != 0;
         else if (!strcmp(key, "fadein")) fadeIn = v != 0;
+        else if (!strcmp(key, "staticbatch")) staticBatch = v != 0;
+        else if (!strcmp(key, "lodpx") && v >= 0.25f && v <= 16.0f) lodPixels = v;
+        else if (!strcmp(key, "doodadrange") && v >= 10.0f && v <= 120.0f) doodadRange = v;   // 6.51
+        else if (!strcmp(key, "doodadwide") && v >= 0.3f && v <= 1.5f) doodadWide = v;
+        else if (!strcmp(key, "ghostfog") && v >= 0.25f && v <= 1.0f) ghostFog = v;   // 6.80
+        else if (!strcmp(key, "pvs")) pvs = v != 0;   // 6.54
+        else if (!strcmp(key, "interiors")) interiorFar = v != 0;   // 6.56d
+        else if (!strcmp(key, "dbgbldg") && v >= 0 && v <= 4) dbgBldg = (int)v;   // 6.57e (a test, not written back)
+        else if (!strcmp(key, "skyhour") && v >= 0.0f && v < 24.0f) skyHour = v;   // 6.60 (a test, not written back)
+        else if (!strcmp(key, "hlod") && (v == 0 || (v >= 80 && v <= 600))) hlod = (int)v;   // 6.57
     }
     fclose(f);
     return true;
 }
 
 std::string PadConfig::text() const {
-    char b[640];
+    char b[1024];
     int n = snprintf(b, sizeof b, "scheme %d\ndead %.2f\nrun %.2f\nback %.2f\nface %d\ntoggle %d\ninvert %d\ncamspeed %.2f\ntracker %d\n",
             scheme == PadScheme::Classic ? 1 : 0, stickDead, runThreshold, backThreshold, faceMovement ? 1 : 0,
             toggleModifiers ? 1 : 0, invertY ? 1 : 0, camSpeed, questTracker ? 1 : 0);
-    n += snprintf(b + n, sizeof b - (size_t)n, "language %d\ndist %d\ncrowd %d\ndoodads %d\nbigtext %d\ndimhud %d\nautotabs %d\n", lang, drawDist, crowd, doodads ? 1 : 0,
-            bigText ? 1 : 0, dimHud ? 1 : 0, autoTabs ? 1 : 0);
-    n += snprintf(b + n, sizeof b - (size_t)n, "music %d\nsfx %d\nambience %d\ntopmode %d\neffects %d\nstats %d\nground %d\nperflog %d\ngpuearly %d\nvsync %d\nfadein %d\nhorizon %d\n", musicVol, sfxVol,
-            ambVol, topMode, effects, showStats ? 1 : 0, groundCast, perfLog ? 1 : 0, gpuKick ? 1 : 0, vsync ? 1 : 0, fadeIn ? 1 : 0, horizon);
+    n += snprintf(b + n, sizeof b - (size_t)n, "language %d\ndist %d\ncrowd %d\ndoodads %d\nbigtext %d\ndimhud %d\nautotabs %d\nbubbles %d\n", lang, drawDist, crowd, doodads ? 1 : 0,
+            bigText ? 1 : 0, dimHud ? 1 : 0, autoTabs ? 1 : 0, chatBubbles ? 1 : 0);
+    n += snprintf(b + n, sizeof b - (size_t)n, "music %d\nsfx %d\nambience %d\ntopmode %d\neffects %d\nstats %d\nground %d\nperflog %d\ngpuearly %d\nvsync %d\nfadein %d\nhorizon %d\nstaticbatch %d\nlodpx %.2f\ndoodadrange %.1f\ndoodadwide %.2f\npvs %d\ninteriors %d\nhlod %d\n", musicVol, sfxVol,
+            ambVol, topMode, effects, showStats ? 1 : 0, groundCast, perfLog ? 1 : 0, gpuKick ? 1 : 0, vsync ? 1 : 0, fadeIn ? 1 : 0, horizon,
+            staticBatch ? 1 : 0, lodPixels, doodadRange, doodadWide, pvs ? 1 : 0, interiorFar ? 1 : 0, hlod);
+    if (n < (int)sizeof b) n += snprintf(b + n, sizeof b - (size_t)n, "pace %d\nautodetail %d\nghostfog %.2f\n", pace, autoDetail ? 1 : 0, ghostFog);   // 6.71
     return std::string(b, (size_t)std::max(0, std::min(n, (int)sizeof b - 1)));
 }
 

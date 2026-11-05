@@ -82,6 +82,7 @@ void GameSession::updateLife(uint32_t nowMs) {
             addLocal("You have died. Release your spirit to return as a ghost.", nowMs);
         } else if (l == Life::Ghost) {
             corpse = CorpseInfo();
+            healer = HealerSpot();
             const MovementInfo& m = mover.info();   // the body lies where we fell, until the server says otherwise
             corpse.known = true;
             corpse.map = map_;
@@ -91,6 +92,7 @@ void GameSession::updateLife(uint32_t nowMs) {
         } else {
             ++resurrections;
             corpse = CorpseInfo();
+            healer = HealerSpot();
             resurrectOffer = ResurrectOffer();
             spiritHealerConfirm = 0;
             reclaimAt_ = 0;
@@ -111,7 +113,33 @@ void GameSession::updateLife(uint32_t nowMs) {
             corpse.x = o.mv.x; corpse.y = o.mv.y; corpse.z = o.mv.z;
         }
         if (!corpse.known && nowMs - corpseAskedMs_ > 10000) queryCorpse(nowMs);
+        // 6.82: the spirit healer: the nearest living one in view; its place is kept when it falls out of range
+        const MovementInfo& me2 = mover.info();
+        float bestD2 = 1e18f;
+        for (auto& [g, o] : objects.all()) {
+            if (o.type != ObjType::Unit || !o.hasPos || o.dead() || !(o.field(UF::UNIT_NPC_FLAGS) & kNpcSpiritHealer)) continue;
+            const float dx = o.mv.x - me2.x, dy = o.mv.y - me2.y, d2 = dx * dx + dy * dy;
+            if (d2 >= bestD2) continue;
+            bestD2 = d2;
+            healer.known = true; healer.guid = g; healer.map = map_;
+            healer.x = o.mv.x; healer.y = o.mv.y; healer.z = o.mv.z;
+        }
     }
+}
+
+float GameSession::healerDistance(const float pos[3]) const {
+    if (!healer.known || healer.map != map_) return -1.0f;
+    return dist2d(pos, healer.x, healer.y);
+}
+
+std::string GameSession::talkToHealer(const float pos[3], uint32_t nowMs) {
+    if (life() != Life::Ghost) return "Only ghosts can talk to spirit healers";
+    const WorldObject* h = healer.guid ? objects.find(healer.guid) : nullptr;
+    if (!h || !h->hasPos) {
+        const float d = healerDistance(pos);
+        return d >= 0 ? "The spirit healer is " + std::to_string((int)d) + " yards away" : "No spirit healer seen yet";
+    }
+    return interact(healer.guid, pos, nowMs);
 }
 
 void GameSession::releaseSpirit(uint32_t nowMs) {
@@ -192,7 +220,8 @@ void GameSession::selectGossip(size_t i, uint32_t nowMs) {
 // answers with SMSG_LOOT_RESPONSE (chests) or the quest giver's windows.
 namespace {
 enum : uint16_t { CMSG_GAMEOBJ_USE = 0x0B1 };
-constexpr uint32_t kGoQuestGiver = 2, kGoChest = 3, kGoGoober = 10, kGoActivate = 0x1;
+constexpr uint32_t kGoQuestGiver = 2, kGoChest = 3, kGoGoober = 10, kGoActivate = 0x1, kGoButton = 1, kGoText = 9, kGoRitual = 18,
+                    kGoSpellCaster = 22;
 }
 
 const char* GameSession::useVerb(const WorldObject& o) const {
@@ -224,10 +253,18 @@ GameSession::ObjectAction GameSession::objectAction(const WorldObject& o) const 
         return a;
     }
     if (type == kGoQuestGiver) { a.verb = "Quest"; return a; }
+    // 6.73: quest objects of other types too - buttons (1), readable texts (9), summoning rituals (18), spell casters (22): the
+    // original client lets you click any of them and the server decides (a quest credit, a spell, "nothing happens")
+    if (type == kGoButton || type == kGoText || type == kGoRitual || type == kGoSpellCaster) {
+        a.verb = type == kGoText ? "Read" : "Use";
+        a.weak = !(dyn & kGoActivate);
+        return a;
+    }
     if (type != kGoChest && type != kGoGoober) return a;
     const ObjectTable::GoInfo* gi = objects.goInfo(o.entry());
     const uint32_t lockId = gi ? gi->data[0] : 0;
-    if (type == kGoGoober && !(dyn & kGoActivate) && !lockId) return a;
+    // a goober the server did not flag for us (quest state not sent yet, other cores' flags) is still offered, after the flagged ones
+    if (type == kGoGoober && !(dyn & kGoActivate) && !lockId) a.weak = true;
     a.verb = type == kGoGoober ? "Use" : (dyn & kGoActivate) ? "Loot" : "Open";
     const std::vector<LockCase>* lock = lockId ? locks.lock(lockId) : nullptr;
     if (!lock) return a;   // no lock (or no locks.txt): CMSG_GAMEOBJ_USE
@@ -287,6 +324,13 @@ std::string GameSession::interact(uint64_t guid, const float pos[3], uint32_t no
         loot(guid, nowMs);
         return "";
     }
+    // 6.87: right-click on something we may attack starts auto-attack, as in the original (also a hostile NPC with a function)
+    if (t->isUnitLike() && !t->dead() && life() == Life::Alive && enemyLike(*t)) {
+        if (lootWindow.open) closeLoot(nowMs);
+        if (guid != target_) setTarget(guid, nowMs);
+        if (!attackWanted_) startAttack(nowMs);
+        return "";
+    }
     if (t->isUnitLike() && t->type == ObjType::Unit && t->field(UF::UNIT_NPC_FLAGS)) {
         if (d > kInteractRange) return "You are too far away";
         if (lootWindow.open) closeLoot(nowMs);
@@ -323,6 +367,16 @@ std::string GameSession::interact(uint64_t guid, const float pos[3], uint32_t no
             return "";
         }
         if (!act.why.empty()) return act.why;
+        // 6.75: a quest object flagged for us (Marla's Grave, quest 6395) with the quest's item in the bags: the click is the item's use on it,
+        // as in the original (the server gives no credit for a plain use of such an object)
+        if (t->field(UF::GAMEOBJECT_TYPE_ID) == kGoGoober && (t->field(UF::GAMEOBJECT_DYN_FLAGS) & kGoActivate)) {
+            for (const InvItem& it : inventory()) {
+                const ItemInfo* info = itemInfoIfKnown(it.entry);
+                if (!info || info->cls != 12 || !itemTargetSpell(it.entry)) continue;
+                useItem(it, nowMs, t);
+                return "";
+            }
+        }
         useGameObject(guid, nowMs);
         return "";
     }
@@ -428,6 +482,22 @@ bool GameSession::handleLife(uint16_t op, const Bytes& data, uint32_t nowMs) {
             if (gossip.open && gossip.npc == m.npc && gossip.textId == m.textId) m.text = gossip.text;
             gossip = std::move(m);
             ++gossipMenus;
+            // 7.08: a ghost talking to the spirit healer: its gossip ("Return me to life") was opened under the death page (the Combat
+            // tab shows that page while we are dead) and never seen - the healer "did not talk". As the original, the healer's offer is
+            // asked at once: its option is chosen (the server casts 17251 -> SPIRIT_HEALER_CONFIRM, Accept / Decline on the death
+            // page); a menu without options goes straight to the confirmation (Accept = CMSG_SPIRIT_HEALER_ACTIVATE).
+            if (life() == Life::Ghost) {
+                const WorldObject* npc = objects.find(gossip.npc);
+                if (npc && (npc->field(UF::UNIT_NPC_FLAGS) & kNpcSpiritHealer)) {
+                    if (!gossip.options.empty()) {
+                        selectGossip(0, nowMs);
+                    } else {
+                        spiritHealerConfirm = gossip.npc;
+                    }
+                    gossip = GossipMenu();
+                    return true;
+                }
+            }
             if (gossip.textId) {
                 Writer w;
                 w.u32(gossip.textId);

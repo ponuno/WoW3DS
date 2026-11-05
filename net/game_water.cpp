@@ -88,6 +88,13 @@ bool GameSession::handleWater(uint16_t op, const Bytes& data, uint32_t nowMs) {
             const uint32_t absorb = r.left() >= 4 ? r.u32() : 0;
             const uint32_t resist = r.left() >= 4 ? r.u32() : 0;
             if (r.bad) return true;
+            {   // 6.95: the sound of it
+                WorldSound w;
+                w.kind = WorldSound::Environment;
+                w.dst = victim;
+                w.victimState = type;
+                worldSound(w);
+            }
             // the texts of the original's combat log (GlobalStrings VSENVIRONMENTALDAMAGE_*_SELF / _OTHER)
             static const char* kSelf[6] = {"You are exhausted and lose %u health.", "You are drowning and lose %u health.",
                                            "You fall and lose %u health.", "You lose %u health for swimming in lava.",

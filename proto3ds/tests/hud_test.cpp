@@ -145,6 +145,36 @@ int main(int argc, char** argv) {
             setF(w3n::SF::RANGED_CRIT, bits(2.0f));
         }
     }
+    if (getenv("W3D_BUBBLES")) {   // 6.67: chat bubbles over the first units in view
+        static const char* lines[4] = {"Hail, traveler! The road ahead is dangerous, so stay close to the others.", "FOR THE HORDE!", "Anyone up for the quest in the barrow?", "Grr."};
+        static const uint8_t types[4] = {w3n::Chat::Say, w3n::Chat::Yell, w3n::Chat::Party, w3n::Chat::MonsterSay};
+        int k = 0;
+        for (auto& [g, o] : s.objects.all()) {
+            if (k >= 12) break;
+            if (!o.hasPos || !o.isUnitLike() || o.self) continue;
+            if (o.name.empty()) continue;   // the ones with a name plate in view
+            { const w3n::MovementInfo& mi = s.mover.info(); float dx = o.mv.x - mi.x, dy = o.mv.y - mi.y; if (dx * dx + dy * dy > 20.0f * 20.0f) continue; }
+            w3n::ChatLine cl;
+            cl.ms = in.nowMs - 500;
+            cl.type = types[k % 4];
+            cl.sender = g;
+            cl.text = lines[k % 4];
+            s.chat.push_back(cl);
+            ++k;
+        }
+        // 6.89: a whisper from the units that said the first line (pink over them, the newer line wins) and our own line in
+        // first person (pinned low in the middle, no tail)
+        for (const w3n::ChatLine& said : std::vector<w3n::ChatLine>(s.chat.begin(), s.chat.end()))
+            if (said.type == w3n::Chat::Say && said.sender != s.objects.self()) {
+                w3n::ChatLine cl;
+                cl.ms = in.nowMs - 300; cl.type = w3n::Chat::Whisper; cl.sender = said.sender; cl.text = "psst - meet me behind the abbey";
+                s.chat.push_back(cl);   // (every speaker of the first line: some of them are off screen)
+            }
+        w3n::ChatLine own;
+        own.ms = in.nowMs - 200; own.type = w3n::Chat::Say; own.sender = s.objects.self(); own.text = "My own words, said in first person.";
+        s.chat.push_back(own);
+        in.selfVisible = getenv("W3D_THIRD") != nullptr;
+    }
     static HudPadView pv;   // "pad": the Forever bars (stage 5.11) with a sample layout, ZR held, the aim ring
     if (argc > 5 && std::string(argv[5]) == "pad") {
         pv.show = true;

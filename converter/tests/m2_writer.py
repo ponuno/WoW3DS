@@ -46,7 +46,7 @@ def m2(name, verts, tris, submeshes, batches, textures, tex_lookup, render_flags
             for t, v in keylist:
                 ts.append(t)
                 keys += struct.pack("<4f", *v) if kind == "q" else struct.pack("<3f", *v)
-            ranges.append((start, len(ts)))
+            ranges.append((start, len(ts) - 1) if len(ts) > start else (start + 1, start))   # [first, last] inclusive, as the real files (6.43); none: first > last
         r_off = B.add(b"".join(struct.pack("<II", a, b) for a, b in ranges)) if gseq < 0 else 0
         t_off = B.add(struct.pack(f"<{len(ts)}I", *ts))
         k_off = B.add(keys)

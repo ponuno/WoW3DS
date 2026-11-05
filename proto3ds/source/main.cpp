@@ -12,7 +12,10 @@
 // Controls offline / free camera: Circle Pad move, C-Stick/D-Pad look, L/R down/up (fly), hold B fast,
 //           SELECT walk/fly, X draw distance, A doodads, ZR fog, ZL doodad detail, Y 40 s streaming benchmark,
 //           START quit. Online walking: the controller scheme of pad.hpp (Forever or Classic, START menu).
+#include <unordered_map>
 #include "audio.hpp"
+#include "audio_core.hpp"
+#include "cinematic.hpp"
 #include "unit_state.hpp"
 #include "w3d_worldobj.h"
 #include "sound_world.hpp"
@@ -20,6 +23,8 @@
 #include "portrait.hpp"
 #include "spell_view.hpp"
 #include "world.h"
+#include "w3d_collision.h"
+#include "vram_guard.hpp"
 #include "glue_data.hpp"
 #include "login.hpp"
 #include "creature_view.hpp"
@@ -27,6 +32,9 @@
 #include "hud_game.hpp"
 #include "zone_banner.hpp"
 #include "pad.hpp"
+#include "pacer.hpp"
+#include "autodetail.hpp"
+#include "stick_cal.hpp"
 #include "portal.hpp"
 #include "swim.hpp"
 #include "action_layout.hpp"
@@ -35,6 +43,9 @@
 #include "ui_render.hpp"
 #include "crash.hpp"
 #include "perflog.hpp"
+#include "pvs.hpp"
+#include "sky.hpp"
+#include "hlod.hpp"
 
 #include <math.h>
 #include <string.h>
@@ -47,8 +58,17 @@
 
 #define DISPLAY_TRANSFER_FLAGS                                                                        \
     (GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |                  \
-     GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |   \
+     GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGB8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |    \
      GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
+// 6.49: the top screen's targets hold 3 bytes of colour and 3 of depth (was RGBA8 + DEPTH24_STENCIL8, 4 + 4): the frame's alpha and
+// the stencil are never used (no destination-alpha blend, no stencil test), the screen shows 24-bit colour, the depth keeps its 24 bits -
+// the picture is the same, the targets take 25% less VRAM (800x240: 2.25 MB instead of 3 MB with the 400x240 one) and the GPU writes
+// fewer bytes per pixel.
+#define TOP_COLOR_FMT GPU_RB_RGB8
+#define TOP_DEPTH_FMT GPU_RB_DEPTH24
+#define TOP_BYTES_PER_PIXEL 6   // colour + depth
+// C3D_RenderTargetClear fills the colour with the low bytes of its value: an RGBA8 colour 0xRRGGBBAA becomes 0x00RRGGBB for RGB8
+static inline u32 topClearColor(u32 rgba) { return rgba >> 8; }
 // The touch screen keeps the console's RGB565 framebuffer (login and debug pages print to it).
 #define BOTTOM_TRANSFER_FLAGS                                                                         \
     (GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |                  \
@@ -72,6 +92,50 @@ struct Bench {
     double sumTileMsAtStart = 0;
     u32 minLinearFree = 0xFFFFFFFF;
 };
+
+// 6.46: the GPU test (/gputest in the chat): the character stands still while one thing at a time is left out, kGtSettle + kGtMeasure
+// seconds each; what the GPU needs a frame (C3D_GetDrawingTime + the early kick's lead, as perf.csv f_gpu_span) and the frame, CPU,
+// draws and triangles go to gputest.txt and perf_events.txt. The difference from the baseline is what that thing costs the GPU.
+// rangeMul 0: unchanged (6.51). vram (6.52): 0 none, 1 a 1.5 MB VRAM reserve held empty, 2 the reserve filled with copies of the
+// vertex / index buffers drawn (streamerGtVram); settle 0: kGtSettle
+struct GpuTestPhase { const char* name; uint32_t off; int doodads, creatures, fog, forceLod, effects; float rangeMul; int vram; float settle; };   // -1: unchanged
+static const GpuTestPhase kGpuTestPhases[] = {
+    {"baseline", 0, -1, -1, -1, -1, -1},
+    {"no texture fetches (all white)", kGtTextures, -1, -1, -1, -1, -1},
+    {"terrain: base layer only", kGtTerrainLayers, -1, -1, -1, -1, -1},
+    {"no terrain", kGtTerrain, -1, -1, -1, -1, -1},
+    {"no buildings (WMO)", kGtBuildings, -1, -1, -1, -1, -1},
+    {"no doodads", 0, 0, -1, -1, -1, -1},
+    {"doodads: no alpha-keyed parts", kGtAlphaKey, -1, -1, -1, -1, -1},   // 6.51
+    {"doodads: view distance x0.5", 0, -1, -1, -1, -1, -1, 0.5f},          // 6.51
+    {"PVS off (6.54)", kGtPvsOff, -1, -1, -1, -1, -1},
+    {"interiors: near only (before 6.56)", kGtInteriorNear, -1, -1, -1, -1, -1},
+    {"horizon meshes off (6.57)", kGtHlodOff, -1, -1, -1, -1, -1},
+    {"no units", 0, -1, 0, -1, -1, -1},
+    {"no water / transparent / particles", kGtAlpha, -1, -1, -1, -1, 0},
+    {"no fog", 0, -1, -1, 0, -1, -1},
+    {"lightest LOD everywhere", 0, -1, -1, -1, 2, -1},
+    {"baseline again", 0, -1, -1, -1, -1, -1},
+    // 6.52: last, so that the textures moved out for the reserve spoil no other phase; compare the two with each other
+    {"VRAM: 1.5 MB reserve, unused (control)", 0, -1, -1, -1, -1, -1, 0, 1, 1.5f},
+    {"VRAM: vertex / index buffers in it", 0, -1, -1, -1, -1, -1, 0, 2, 3.0f},
+};
+constexpr int kGpuTestCount = (int)(sizeof kGpuTestPhases / sizeof kGpuTestPhases[0]);
+constexpr float kGtSettle = 1.0f, kGtMeasure = 3.0f;
+static float gtSettle(int k) { return kGpuTestPhases[k].settle > 0 ? kGpuTestPhases[k].settle : kGtSettle; }
+static float gtTotalSec() { float s = 0; for (int k = 0; k < kGpuTestCount; ++k) s += gtSettle(k) + kGtMeasure; return s; }
+struct GpuTest {
+    bool running = false;
+    int phase = 0;
+    u64 phaseStart = 0;
+    float cam0[3] = {0, 0, 0}, yaw0 = 0;   // where the camera was at the start (moving spoils the comparison)
+    bool moved = false;
+    bool baseDoodads = true, baseCreatures = true, baseFog = true;
+    int baseLod = -1, baseEffects = 2;
+    struct Acc { double gpu = 0, frame = 0, cpu = 0, draws = 0, tris = 0, vramTris = 0; int n = 0; bool moved = false; } acc[kGpuTestCount];
+    GtVramStats vram;   // 6.52: the reserve and the copies at the end of the last VRAM phase
+};
+static GpuTest g_gpuTest;
 
 struct Report {
     char packPath[128] = {0};
@@ -116,6 +180,71 @@ static float farFadeAt(float d2) {
     if (d2 <= lim * lim) return 1.0f;
     return std::max(0.0f, (g_farRange - sqrtf(d2)) / (g_farRange - lim));
 }
+// 6.83: creatures stand on OUR ground. The server's Z comes from its own height maps (or, without them, from a straight line between
+// two path points), which is not the ground the client draws: mobs hung in the air or sank on slopes. A walking creature is put on the
+// floor the client knows under it (terrain, building floors, platforms); its height eases there. Not for flyers, swimmers, units on a
+// transport, riders, or where the floor is far from the server's Z (caves, cities inside mountains: the server is right there).
+// A new unit whose tile is not loaded yet is not drawn for up to 2.5 s instead of appearing at a wrong height and jumping.
+struct GroundMemo {
+    float z = 0, target = 0, tx = 0, ty = 0;
+    uint32_t seenMs = 0, queryMs = 0, firstMs = 0, frame = 0;
+    bool have = false, init = false, noData = false;
+};
+static std::unordered_map<uint64_t, GroundMemo> g_groundMemo;
+static uint32_t g_groundFrame = 0;
+// 6.99: the height a unit is drawn at (its snapped ground), for what is drawn at its feet - the selection circle
+static float drawnZ(uint64_t guid, float serverZ) {
+    auto it = g_groundMemo.find(guid);
+    return it != g_groundMemo.end() && it->second.have && it->second.init && g_groundFrame - it->second.frame <= 1 ? it->second.z : serverZ;   // (snapped this frame: the counter moved on after it)
+}
+static bool snapToGround(const w3n::WorldObject& o, CreatureSeen& c, uint32_t nowMs) {
+    GroundMemo& m = g_groundMemo[o.guid];
+    const uint32_t dt = m.seenMs ? nowMs - m.seenMs : 0;
+    if (!m.seenMs) m.firstMs = nowMs ? nowMs : 1;
+    m.seenMs = nowMs ? nowMs : 1;
+    m.frame = g_groundFrame;
+    const uint32_t kNoSnap = w3n::MoveFlag::Flying | w3n::MoveFlag::CanFly | w3n::MoveFlag::Levitating | w3n::MoveFlag::Swimming |
+                             w3n::MoveFlag::FixedZ | w3n::MoveFlag::OnTransport;
+    if (o.carried || o.taxiFlight() || (o.mv.flags & kNoSnap) || (o.pathActive && o.pathSmooth) || c.swimming || c.flying ||
+        c.mountDisplay) {
+        m.have = m.init = false;
+        m.queryMs = 0;
+        return true;
+    }
+    const float x = c.pos[0], y = c.pos[1];
+    const float mx = x - m.tx, my = y - m.ty;
+    if (!m.queryMs || mx * mx + my * my > 0.36f || nowMs - m.queryMs > 400) {
+        float g = 0;
+        bool onF = false, held = false;
+        const bool ok = streamerFloorHeight(x, y, c.pos[2] + 1.0f, &g, &onF, &held) && !held;
+        m.queryMs = nowMs ? nowMs : 1;
+        m.tx = x; m.ty = y;
+        // 6.99: a unit standing still is not pulled DOWN more than a little: its Z is the spawn's, taken from the real game, and a
+        // floor of ours far below it means it stands on something we have no floor for (Turtle WoW's new platforms, tents,
+        // decks - their doodads carry no collision here): pulled down onto the terrain under them it sank to the waist, its
+        // selection circle (at the server's Z) round its middle. Walking ones still follow our ground (a path's straight line).
+        const bool still = !o.pathActive;
+        if (ok && still && g < c.pos[2] - 0.75f) {
+            m.target = c.pos[2]; m.have = true; m.noData = false;
+        } else if (ok && std::fabs(g - c.pos[2]) <= 15.0f) {
+            m.target = g; m.have = true; m.noData = false;
+        } else {
+            float tg;
+            m.have = false;
+            m.noData = !ok && !held && !streamerGroundHeight(x, y, &tg);
+        }
+    }
+    if (!m.have) {
+        m.init = false;
+        return !(m.noData && nowMs - m.firstMs < 2500);   // the ground is not there yet: wait a little, hidden
+    }
+    if (!m.init || dt > 1000 || std::fabs(m.z - m.target) > 3.0f) m.z = m.target;
+    else m.z += (m.target - m.z) * std::min(1.0f, (float)dt * 0.02f);
+    m.init = true;
+    c.pos[2] = m.z;
+    return true;
+}
+
 // Players are included (stage 5.5): drawn from their race model + appearance when they are in
 // their own shape (display == native display), else from the creature display (forms, ghosts).
 // The own character only when the camera is free (in walking mode the camera is its eyes).
@@ -157,6 +286,10 @@ static void collectCreatures(w3n::GameSession& g, uint32_t nowMs, const float ca
         c.speed = o.self && !taxi ? ((g.mover.info().flags & w3n::MoveFlag::MaskMoving) ? g.mover.speeds.forFlags(g.mover.info().flags) : 0.0f)
                          : o.groundSpeedAt(nowMs);
         fillUnitState(g, o, nowMs, c);   // the animation stage: everything the unit is doing
+        if (!o.self && o.type == w3n::ObjType::Unit && !snapToGround(o, c, nowMs)) continue;   // 6.83
+        // 6.62: ghosts (PLAYER_FLAGS_GHOST: we ourselves, or another ghost we can see) and spirit healers / guides are translucent
+        if (o.type == w3n::ObjType::Player) c.ghost = o.self ? g.life() == w3n::Life::Ghost : (o.field(w3n::UF::PLAYER_FLAGS) & 0x10) != 0;
+        else c.ghost = (o.field(w3n::UF::UNIT_NPC_FLAGS) & 0x60) != 0 && !o.dead();
         cand.push_back({d2, c});
     }
     // Ships and zeppelins (stage 5.21): GAMEOBJECT_TYPE_MO_TRANSPORT objects whose pose ObjectTable::tickTransports computed
@@ -211,6 +344,8 @@ static void collectCreatures(w3n::GameSession& g, uint32_t nowMs, const float ca
         c.scale = 1.0f;
         cand.push_back({d2, c});
     }
+    if (++g_groundFrame % 120 == 0)   // 6.83: forget units that have not been seen for a while
+        for (auto it = g_groundMemo.begin(); it != g_groundMemo.end();) it = g_groundFrame - it->second.frame > 60 ? g_groundMemo.erase(it) : std::next(it);
     // the nearest kMaxCreatures within kCreatureRange, then the nearest kMaxFar beyond it (ourselves always: withSelf)
     std::sort(cand.begin(), cand.end(), [](const Cand& a, const Cand& b) { return a.d2 < b.d2; });
     size_t nearN = 0, farN = 0;
@@ -279,7 +414,15 @@ static void buildMarkers(w3n::GameSession& g, uint32_t nowMs, const float camPos
         if (view.drawn(guid)) continue;   // drawn as an animated model
         // Stage 6.12: no stand-in while a model loads or for a unit too far / over the crowd limit - only what has no model
         // in the pack at all gets a marker (near): a unit whose display is missing, an object not converted.
-        if (unit ? !view.missing(guid) : (o.displayId() && streamerHasDisplay(0x80000000u | o.displayId()))) continue;
+        if (unit ? !view.missing(guid) : (o.displayId() && (streamerHasDisplay(0x80000000u | o.displayId()) ||
+                                                            streamerHasObjWmo(0x80000000u | o.displayId())))) continue;   // (6.59)
+        if (!unit) {   // 6.95: scenery objects (braziers, campfires, traps, spell foci, cameras, area damage ...) are never "used": a model
+            // missing from the pack leaves them invisible instead of a yellow diamond (every Orgrimmar brazier showed one)
+            switch (o.field(w3n::UF::GAMEOBJECT_TYPE_ID)) {
+                case 5: case 6: case 8: case 12: case 13: case 14: case 16: case 21: case 22: case 30: continue;
+                default: break;
+            }
+        }
         Marker mk;
         float yaw;
         o.positionAt(nowMs, mk.pos, &yaw);
@@ -323,7 +466,7 @@ static void buildMarkers(w3n::GameSession& g, uint32_t nowMs, const float camPos
             mk.width = rad * (1.0f + 0.03f * sinf((float)(nowMs % 1200) / 1200.0f * 6.2831853f));
             mk.shape = 2;
             out.push_back(mk);
-        } else if (o.type == w3n::ObjType::Corpse && o.corpseOwner() == g.objects.self()) {
+        } else if (o.type == w3n::ObjType::Corpse && o.corpseOwner() == g.objects.self() && g.life() == w3n::Life::Ghost && !o.corpseBones()) {   // 6.79: only while we are a ghost looking for the body (the server keeps the corpse as bones after the resurrection)
             Marker mk;
             mk.pos[0] = o.mv.x; mk.pos[1] = o.mv.y; mk.pos[2] = o.mv.z;
             mk.yaw = rs_markerSpin(nowMs);
@@ -349,7 +492,7 @@ static void buildMarkers(w3n::GameSession& g, uint32_t nowMs, const float camPos
             if (t->isUnitLike() && out.size() + 2 <= 256) {
                 Marker rg;
                 t->positionAt(nowMs, rg.pos);
-                rg.pos[2] += 0.17f;
+                rg.pos[2] = drawnZ(t->guid, rg.pos[2]) + 0.17f;   // 6.99: where the model stands, not the server's Z
                 rg.yaw = 0;
                 rg.height = 1.0f;
                 float br = t->fieldF(w3n::UF::UNIT_BOUNDINGRADIUS);
@@ -376,6 +519,23 @@ static void buildMarkers(w3n::GameSession& g, uint32_t nowMs, const float camPos
 static ZoneBanner g_zoneBanner;   // stage 5.45
 static std::string zoneNameOf(uint32_t id) { const std::string* z = g_login.glueTexts().zone(id); return z ? *z : std::string(); }
 static uint32_t zoneParentOf(uint32_t id) { return g_login.glueTexts().zoneParent(id); }
+
+// 7.04: the zone of the terrain at a world point (the continent map picks and lights zones by their shape): the area grid of
+// the map (areas_<map>.bin, written with the sound) -> the AreaTable top parent. A table of its own - the sound thread's
+// one fills its grids lazily and must not be touched from here.
+static snd::MusicTable g_mapAreas;
+static uint32_t zoneAtPoint(uint32_t mapId, float x, float y) {
+    static bool tried = false, ok = false;
+    if (!tried) { tried = true; ok = g_mapAreas.load((std::string(kOutDir) + "/sound").c_str()); }
+    if (!ok) return 0;
+    uint32_t a = g_mapAreas.areaAt(mapId, x, y);
+    for (int i = 0; a && i < 3; ++i) {
+        const uint32_t p = zoneParentOf(a);
+        if (!p || p == a) break;
+        a = p;
+    }
+    return a;
+}
 
 static const char* findPack() {
     // map0.w3dp: the Eastern Kingdoms of 'w3dconv --all' (stage 5.27, with the shared pool common*.w3dp); test.w3dp: a region
@@ -497,6 +657,24 @@ static void writeReport(const Bench* b, float drawDist, const RenderSettings& rs
                            "tilted objects %u, ground-spell areas %u, corpses %u (ours %u)\n", doors, closed, doorsModel, lifts, liftsMoving, liftsModel,
                         g.objects.transports.loaded() ? "yes" : "no (transports.txt missing or without A lines)", tilted, areas, corpses, corpsesOwn);
             }
+            {   // 6.95: ships and zeppelins one by one: where does the chain break (template / path / pose / model)?
+                int shown = 0;
+                for (auto& [guid, o] : g.objects.all()) {
+                    if (o.type != w3n::ObjType::GameObject || !(o.hasTransportProgress || o.goType() == 15)) continue;
+                    if (o.goType() == 11 || shown >= 8) continue;
+                    ++shown;
+                    const w3n::ObjectTable::GoInfo* gi = g.objects.goInfo(o.entry());
+                    const w3n::TransportPose* tp = g.objects.transportPose(guid);
+                    fprintf(f, "  transport entry %u display %u: progress %s (%u), template %s (type %u, path %u), path in transports.txt %s, "
+                               "pose %s, model in the pack %s, files %s\n",
+                            (unsigned)o.entry(), (unsigned)o.displayId(), o.hasTransportProgress ? "yes" : "NO", (unsigned)o.transportProgress,
+                            gi ? "yes" : "NO", gi ? (unsigned)gi->type : 0u, gi ? (unsigned)gi->data[0] : 0u,
+                            gi && g.objects.transports.loaded() && g.objects.transports.path(gi->data[0], (float)gi->data[1], (float)gi->data[2]) ? "yes" : "NO",
+                            tp ? "yes" : "NO", o.displayId() && streamerHasDisplay(0x80000000u | o.displayId()) ? "yes" : "NO",
+                            g.objects.transports.loaded() ? "loaded" : "transports.txt NOT loaded");
+                }
+                if (!shown) fprintf(f, "  transports: none known (no GO of type 15 / with transport progress seen yet)\n");
+            }
             fprintf(f, "  monster moves %lu (failed %lu), player moves %lu, own movement packets %lu, teleports %lu, speed changes %lu\n\n",
                     (unsigned long)os.monsterMoves, (unsigned long)os.monsterMoveFails, (unsigned long)os.playerMoves,
                     (unsigned long)g.mover.packetsSent, (unsigned long)g.stats.teleports, (unsigned long)g.stats.speedChanges);
@@ -561,6 +739,43 @@ static void fail(const char* msg) {
     }
 }
 
+// 6.59: game objects whose model is a building (OWMO entries: Turtle WoW's houses, towers, ruins) - their parts (groups and furniture)
+// at the object's place, turn and scale, drawn through the scene models with the world's building light. Up to the draw distance
+// (+ the building's radius); unused ones are let go by the streamer after 30 s.
+static void addObjectBuildings(w3n::GameSession& g, uint32_t nowMs, const float camPos[3], float drawDist, std::vector<SceneModel>& out) {
+    streamerObjWmoTick(nowMs);
+    for (auto& [guid, o] : g.objects.all()) {
+        if (o.type != w3n::ObjType::GameObject || !o.hasPos || !o.displayId()) continue;
+        const uint32_t did = 0x80000000u | o.displayId();
+        if (!streamerHasObjWmo(did)) continue;
+        float p[3], yaw;
+        o.positionAt(nowMs, p, &yaw);
+        const ObjWmo* w = streamerObjWmo(did, p, nowMs);
+        if (!w) continue;
+        float scale = o.fieldF(w3n::UF::OBJECT_SCALE_X);
+        if (!(scale > 0.05f && scale < 20.0f)) scale = 1.0f;
+        streamerObjWmoPlace(w, p, yaw, scale, guid);   // its floors and walls for this frame's walking (7.08: and whose they are)
+        const float dx = p[0] - camPos[0], dy = p[1] - camPos[1], dz = p[2] - camPos[2];
+        const float reach = drawDist + w->radius * scale;
+        if (dx * dx + dy * dy + dz * dz > reach * reach) continue;
+        const float c = cosf(yaw), s = sinf(yaw);
+        for (size_t k = 0; k < w->parts.size(); ++k) {
+            const ObjWmoPart& part = w->parts[k];
+            SceneModel sm;
+            sm.model = part.model;
+            const float lx = part.pos[0] * scale, ly = part.pos[1] * scale, lz = part.pos[2] * scale;
+            sm.pos[0] = p[0] + c * lx - s * ly;
+            sm.pos[1] = p[1] + s * lx + c * ly;
+            sm.pos[2] = p[2] + lz;
+            sm.rot[0] = part.rot[0]; sm.rot[1] = part.rot[1]; sm.rot[2] = part.rot[2] + yaw;   // Rz(yaw) * Rz Ry Rx
+            sm.scale = part.scale * scale;
+            sm.fxKey = 0x40000000u | ((uint32_t)(guid & 0xFFFFFu) << 10) | (uint32_t)(k & 0x3FFu);   // (lamps' flames; never an address)
+            sm.building = true;
+            out.push_back(sm);
+        }
+    }
+}
+
 int main() {
     crashInstall();   // 6.31: crash.txt on a CPU exception
     osSetSpeedupEnable(true);  // 804 MHz + L2 on New 3DS
@@ -576,7 +791,7 @@ int main() {
     }
     C3D_Init(C3D_DEFAULT_CMDBUF_SIZE * 8);   // 2 MB: thousands of draws per frame
 
-    C3D_RenderTarget* top = C3D_RenderTargetCreate(240, 400, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+    C3D_RenderTarget* top = C3D_RenderTargetCreate(240, 400, TOP_COLOR_FMT, TOP_DEPTH_FMT);
     C3D_RenderTargetSetOutput(top, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
     rendererInit();
     // UI stages 1/7: the touch screen through the GPU while in the game; ui.w3dp (optional) gives the skin
@@ -599,6 +814,8 @@ int main() {
     char err[160] = "no pack found (put test.w3dp in sdmc:/3ds/w3dproto/)";
     const char* packPath = findPack();
     bool ok = packPath && index.open(packPath, err, sizeof err) && streamerInit(&index, err, sizeof err);
+    if (ok) pvs::load(index.path, index.buildId);   // 6.54
+    if (ok) hlod::load(index.path, index.buildId);   // 6.57
     if (!ok) {
         fail(err);
         rendererShutdown();
@@ -624,18 +841,13 @@ int main() {
     rendererSetProjection(cam.drawDist);
     const float spawn[2] = {cam.pos[0], cam.pos[1]};
 
-    // Wait for the spawn tile (counts as "time to first frame").
-    u64 t0 = svcGetSystemTick();
-    printf("\x1b[1;1HLoading %s ...", packPath);
-    while (aptMainLoop() && !streamerTileReadyAt(cam.pos[0], cam.pos[1])) {
-        streamerUpdate(cam.pos, cam.drawDist);
-        streamerEndFrame();
-        gspWaitForVBlank();
-        if (ticksToMs(svcGetSystemTick() - t0) > 20000) break;
-    }
-    g_report.firstFrameMs = ticksToMs(svcGetSystemTick() - t0);
-    float ground = 0;
-    if (streamerGroundHeight(cam.pos[0], cam.pos[1], &ground)) cam.pos[2] = ground + 25.0f;
+    // 6.37: no wait for a tile here any more. Up to 6.36 the start waited (up to 20 s) for the tile in the middle of the pack -
+    // a place nobody plays at - and then streamed the world around it behind the login screens, reading the card and filling
+    // VRAM the glue scene needed. The login screens now stream nothing of the world (streamerSetWorldWanted, main loop); the
+    // offline flight puts the camera over the ground once that tile is in (camPlaced).
+    bool camPlaced = false;
+    const u64 t0 = svcGetSystemTick();
+    float ground = 0;   // (scratch, used further down)
     consoleClear();
 
     g_login.init();
@@ -684,6 +896,10 @@ int main() {
             release();
             id = sceneId;
             have = streamerReadEntry(W3D_ENTRY_GLUE, sceneId, &g, sizeof g) && g.modelId;
+            // 6.99: Turtle WoW's races in a pack without their scene: the nearest one (Goblin - the Orcs' Durotar, High Elf - the
+            // Night Elves' forest) instead of the character alone on the clear colour
+            if (!have && (sceneId == 9 || sceneId == 10))
+                have = streamerReadEntry(W3D_ENTRY_GLUE, sceneId == 9 ? 2u : 4u, &g, sizeof g) && g.modelId;
             if (have) model = streamerAcquireItemModel(g.modelId);
         }
         bool ready() const { return model && model->h && model->state == AssetState::Ready && model->texturesReady(); }
@@ -722,8 +938,9 @@ int main() {
     ui::g_lang = padCfg.lang;   // 6.20: the language from the first frame on (the main menu too)
     rs.effects = padCfg.effects;
     perf::init(kOutDir, padCfg.perfLog);   // stage 6: perf.csv (a row a second) + perf_events.txt
-    perf::event("pack %s: %d tiles, %lu index entries; first tile after %.0f ms", g_report.packPath, g_report.tilesInPack,
-                (unsigned long)index.entries.size(), g_report.firstFrameMs);
+    perf::event("PVS: %s", pvs::status());   // 6.54
+    perf::event("horizon: %s", hlod::status());   // 6.57
+    perf::event("pack %s: %d tiles, %lu index entries", g_report.packPath, g_report.tilesInPack, (unsigned long)index.entries.size());
     // Top screen mode (Settings): 800x240 wide, or stereoscopic 3D with a second target for the right eye.
     C3D_RenderTarget* topWide = nullptr;
     C3D_RenderTarget* topRight = nullptr;
@@ -731,14 +948,15 @@ int main() {
     // Stage 6.5: no VRAM held back for the other modes any more (5.31 kept 1.5 MB free in 400x240 for switching to 800x240:
     // perf log - 476 textures, 2.4 MB, in the slower linear memory meanwhile). A target that does not fit now moves the
     // farthest textures out of VRAM (streamerEvictVram, a GX copy each) and tries again.
-    constexpr size_t kWideBytes = 240 * 800 * 4 * 2, kRightBytes = 240 * 400 * 4 * 2;
+    constexpr size_t kWideBytes = 240 * 800 * TOP_BYTES_PER_PIXEL, kRightBytes = 240 * 400 * TOP_BYTES_PER_PIXEL;
+    constexpr size_t kTopBytes = 240 * 400 * TOP_BYTES_PER_PIXEL;   // 6.49b: the 400x240 target is made again after the wide mode
     auto makeTarget = [&](int w, size_t bytes) -> C3D_RenderTarget* {
-        (void)bytes;
-        C3D_RenderTarget* t = C3D_RenderTargetCreate(240, w, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
-        if (!t) {   // colour (RGBA8) and depth (24 + stencil 8): two blocks of 240 x w x 4 bytes, each in one piece
-            const uint32_t blocks[2] = {240u * (uint32_t)w * 4u, 240u * (uint32_t)w * 4u};
+        // 6.43: never the last bytes of VRAM (vram_guard.hpp): without room it is made only after textures moved out
+        C3D_RenderTarget* t = vramRoomFor((u32)bytes) ? C3D_RenderTargetCreate(240, w, TOP_COLOR_FMT, TOP_DEPTH_FMT) : nullptr;
+        if (!t) {   // colour (RGB8) and depth (24): two blocks of 240 x w x 3 bytes, each in one piece (6.49; were 4 + 4)
+            const uint32_t blocks[2] = {240u * (uint32_t)w * 3u, 240u * (uint32_t)w * 3u};
             const uint32_t moved = streamerEvictVram(blocks, 2);
-            t = C3D_RenderTargetCreate(240, w, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+            t = vramRoomFor((u32)bytes) ? C3D_RenderTargetCreate(240, w, TOP_COLOR_FMT, TOP_DEPTH_FMT) : nullptr;
             perf::event("VRAM for a %dx240 target: %lu KB of textures moved to linear memory - %s", w, (unsigned long)(moved / 1024),
                         t ? "created" : "STILL no room");
         }
@@ -748,10 +966,25 @@ int main() {
         if (want == topModeNow) return;
         // leave the old mode
         if (topModeNow == 1) {
+            // 6.49b: the 400x240 target was freed for the wide one; made again in the VRAM the wide one leaves (always room: 1125 KB
+            // freed, 562 needed). Should it still fail, the wide target comes back and the mode stays wide.
             gfxSetWide(false);
             C3D_RenderTargetDetachOutput(topWide);
             C3D_RenderTargetDelete(topWide);
             topWide = nullptr;
+            if (!top) top = makeTarget(400, kTopBytes);
+            if (!top) {
+                topWide = makeTarget(800, kWideBytes);
+                if (topWide) {
+                    gfxSetWide(true);
+                    C3D_RenderTargetSetOutput(topWide, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
+                    netNote = "400x240: not enough VRAM";
+                    return;   // (still wide)
+                }
+                // neither: nothing to draw on - should not happen; the next frame retries through the menu
+                netNote = "top screen: not enough VRAM";
+                return;
+            }
             C3D_RenderTargetSetOutput(top, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
         } else if (topModeNow == 2) {
             gfxSet3D(false);
@@ -763,9 +996,24 @@ int main() {
         topModeNow = 0;
         if (want == 1) {
             topWide = makeTarget(800, kWideBytes);
+            if (!topWide && top) {   // 6.49b: the 400x240 target goes anyway in wide mode - free it first and try again
+                C3D_RenderTargetDetachOutput(top);
+                C3D_RenderTargetDelete(top);
+                top = nullptr;
+                topWide = makeTarget(800, kWideBytes);
+                if (!topWide) {
+                    top = makeTarget(400, kTopBytes);
+                    if (top) C3D_RenderTargetSetOutput(top, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
+                }
+            }
             if (topWide) {
                 gfxSetWide(true);
-                C3D_RenderTargetDetachOutput(top);
+                // 6.49b: the 400x240 target is not drawn on in wide mode: its 562 KB of VRAM go to textures (it was kept, idle)
+                if (top) {
+                    C3D_RenderTargetDetachOutput(top);
+                    C3D_RenderTargetDelete(top);
+                    top = nullptr;
+                }
                 C3D_RenderTargetSetOutput(topWide, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
                 topModeNow = 1;
             } else {
@@ -793,6 +1041,14 @@ int main() {
     float charYaw = 0;
     float portalHold = 0;   // seconds the portal has been closed without a new map
     HudList hud;   // top-screen game HUD (stage 5.9), rebuilt every frame while online
+    // 7.04: intro cinematics (sound/cinematics.txt of w3dconv --sound): the camera flies the intro's path, the narration plays,
+    // A or B skips; the server hears CMSG_COMPLETE_CINEMATIC when it ends. Without the file the intro is answered at once.
+    cine::Table cineTable;
+    const bool haveCine = cineTable.load(std::string(kOutDir) + "/sound/cinematics.txt");
+    perf::event("cinematics: %s", haveCine ? "sound/cinematics.txt read" : "no sound/cinematics.txt - intros are skipped");
+    struct CinePlay { const cine::Sequence* s = nullptr; uint32_t id = 0, startMs = 0; size_t nextSound = 0; float yaw = 0, pitch = 0; };
+    CinePlay cinPlay;
+    HudList cineHud;
     std::vector<CreatureSeen> seen;
     std::vector<CreatureInstance> creatures;
     CreatureInstance portraitInst[2] = {};                  // UI stage 8: ours and the target's, for the portraits
@@ -832,7 +1088,8 @@ int main() {
         C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
         for (int eye = 0; eye < (topModeNow == 2 && topRight ? 2 : 1); ++eye) {
             C3D_RenderTarget* t = eye == 1 ? topRight : (topModeNow == 1 ? topWide : top);
-            C3D_RenderTargetClear(t, C3D_CLEAR_ALL, 0x240A0EFF, 0);
+            if (!t) continue;   // (6.49b: no top target after a failed mode switch)
+            C3D_RenderTargetClear(t, C3D_CLEAR_ALL, topClearColor(0x240A0EFF), 0);
             C3D_FrameDrawOn(t);
             uiDraw(a, kHudW);
         }
@@ -872,6 +1129,7 @@ int main() {
         }
         fclose(probe);
         perf::Scope perfScope(perf::kMapLoad);   // the whole swap is a wait of its own in the perf log
+        streamerSetWorldWanted(true);   // 6.37 (its wait below streams the tile under the character)
         const u64 perfT0 = svcGetSystemTick();
         char oldPath[128];
         snprintf(oldPath, sizeof oldPath, "%s", index.path);
@@ -889,9 +1147,15 @@ int main() {
                 fail(e2);
                 exit(0);
             }
+            pvs::load(index.path, index.buildId);   // 6.54
+            hlod::load(index.path, index.buildId);   // 6.57
             netNote = std::string("map pack failed: ") + e;
             return false;
         }
+        pvs::load(index.path, index.buildId);   // 6.54: map<ID>.pvs of the new map (or none)
+        perf::event("PVS: %s", pvs::status());
+        hlod::load(index.path, index.buildId);   // 6.57: map<ID>.hlod (or none)
+        perf::event("horizon: %s", hlod::status());
         curMap = m;
         snprintf(g_report.packPath, sizeof g_report.packPath, "%s", path);
         g_report.tilesInPack = 0;
@@ -918,10 +1182,15 @@ int main() {
         return true;
     };
 
+    static FramePacer pacer;   // 6.71
+    static AutoDetail autoDetail;   // 6.72
+    static u64 pacedAt = 0;    // the blank the last paced frame began on
     while (aptMainLoop()) {
         u64 frameStart = svcGetSystemTick();
         float frameMs = (float)ticksToMs(frameStart - lastTick);
-        float dt = std::min(frameMs / 1000.0f, 0.1f);
+        pacer.setMode(padCfg.pace);
+        // 6.71: paced, the step is what the screen shows between frames (even movement); else the measured time
+        float dt = std::min((pacer.active() && pacer.shownMs() > 0 ? pacer.shownMs() : frameMs) / 1000.0f, 0.1f);
         lastTick = frameStart;
         rs.timeSec = (float)ticksToMs(frameStart - startTick) / 1000.0f;
         // (perf log: the frame's marks start in perf::endFrame of the previous one, so nothing between frames is lost)
@@ -929,6 +1198,7 @@ int main() {
         perf::mark("input");
         hidScanInput();
         u32 down = hidKeysDown(), held = hidKeysHeld();
+        const u32 padDown = down;   // 7.08: as pressed (the game below takes A / B from 'down' while walking: the intro's skip never saw them)
         if ((down & KEY_START) && g_login.phase() == LoginFlow::Phase::Offline) break;   // flying offline: START quits
         // The login screens (stage 4; the original client's screens since stage 5.29) own both screens and the buttons
         // until the world: login, realms, the characters and their creation.
@@ -982,6 +1252,13 @@ int main() {
         circlePosition cpRaw{}, csRaw{};
         hidCircleRead(&cpRaw);
         hidCstickRead(&csRaw);
+        {   // 6.57i: a C-Stick that rests off centre (drift): its rest position is learned and taken off
+            static StickCal csCal;
+            int ox, oy;
+            csCal.apply(csRaw.dx, csRaw.dy, dt, ox, oy);
+            csRaw.dx = (s16)ox;
+            csRaw.dy = (s16)oy;
+        }
         PadOut po;
         GameUi::Output uiOut;
         GameUi::Input uiIn{};
@@ -1004,6 +1281,17 @@ int main() {
             uiIn.touchHeld = (held & KEY_TOUCH) != 0;
             uiIn.touchUp = (hidKeysUp() & KEY_TOUCH) != 0;
             uiIn.mapId = g_login.mapId();
+            {   // 6.94: the zone we stand in: the top parent of the terrain's area (the map picks its picture by it)
+                uint32_t zone = audio::area();
+                if (zone == ~0u) zone = 0;
+                for (int i = 0; zone && i < 3; ++i) {
+                    const uint32_t p = zoneParentOf(zone);
+                    if (!p || p == zone) break;
+                    zone = p;
+                }
+                uiIn.zone = zone;
+                uiIn.zoneAtPoint = zoneAtPoint;
+            }
             {   // UI stage 10: the ground spells' ring - the C-Stick (with its dead zone), the camera, the ground
                 const float sx = csRaw.dx / 156.0f, sy = csRaw.dy / 156.0f;
                 const bool live = sx * sx + sy * sy > padCfg.stickDead * padCfg.stickDead;
@@ -1062,14 +1350,54 @@ int main() {
         if (down & KEY_A) rs.doodads = !rs.doodads;
         if (down & KEY_ZR) rs.fog = !rs.fog;
         if (down & KEY_ZL) {   // doodad detail: near / normal / far
-            static const float kRanges[3] = {25.0f, 45.0f, 80.0f};
-            detailIdx = (detailIdx + 1) % 3;
-            rs.doodadRange = kRanges[detailIdx];
+            detailIdx = (detailIdx + 1) % 3;   // (6.51: the range itself is set every frame, below)
         }
         if (down & KEY_SELECT) walk = !walk;   // offline (online: the game menu / SELECT via the pad)
         const bool online = g_login.online();
         w3n::GameSession* game = online ? &g_login.game() : nullptr;
         const uint32_t netMs = online ? g_login.sessionMs() : 0;
+        g_login.worldClientMut().playCinematics = haveCine;   // 7.04 (the connection may be a new one)
+        if (online) {   // 7.04: an intro the server started, and the one playing
+            w3n::WorldClient& wcm = g_login.worldClientMut();
+            if (const uint32_t id = wcm.takeCinematic()) {
+                const cine::Sequence* s = id != ~0u ? cineTable.find(id) : nullptr;
+                if (s && !cinPlay.s) {
+                    cinPlay = CinePlay();
+                    cinPlay.s = s;
+                    cinPlay.id = id;
+                    cinPlay.startMs = netMs;
+                    cinPlay.yaw = cam.yaw;
+                    cinPlay.pitch = cam.pitch;
+                    perf::event("cinematic %u: playing, %.1f s, %zu narration files", (unsigned)id, s->totalMs / 1000.0, s->sounds.size());
+                } else {
+                    wcm.completeCinematic();
+                    perf::event("cinematic %u: not in cinematics.txt - answered at once", (unsigned)id);
+                }
+            }
+            if (cinPlay.s && loadingWorld) cinPlay.startMs = netMs;   // (it starts when the world under the loading screen is there)
+            if (cinPlay.s) {
+                const uint32_t t = netMs - cinPlay.startMs;
+                while (cinPlay.nextSound < cinPlay.s->sounds.size() && cinPlay.s->sounds[cinPlay.nextSound].startMs <= t) {
+                    const cine::Sound& sn = cinPlay.s->sounds[cinPlay.nextSound++];
+                    audio::playCinematic(sn.file.c_str(), sn.volume);
+                }
+                const bool skip = !loginUi && (padDown & (KEY_A | KEY_B)) && t > 500;   // 7.08: the raw press (see padDown)
+                if (skip || t >= cinPlay.s->totalMs + 300) {
+                    audio::playCinematic(nullptr);
+                    wcm.completeCinematic();
+                    perf::event("cinematic %u: %s after %.1f s", (unsigned)cinPlay.id, skip ? "skipped" : "over", t / 1000.0);
+                    cam.yaw = cinPlay.yaw;
+                    cam.pitch = cinPlay.pitch;
+                    cinPlay = CinePlay();
+                } else {
+                    uiOut.blockMove = true;   // the character stays put while the camera is away (the original's too)
+                    uiOut.blockJump = true;
+                }
+            }
+        } else if (cinPlay.s) {
+            audio::playCinematic(nullptr);
+            cinPlay = CinePlay();
+        }
         if (online) {   // the server announced a map change (instance door, portal, ship to another continent)
             uint32_t pendingMap;
             if (game->takeTransferPending(&pendingMap) && pendingMap != curMap && !loadingWorld) {
@@ -1112,6 +1440,9 @@ int main() {
             float tp[3], to;
             if (game->takeTeleport(tp, &to)) {
                 const bool mapChange = game->mapId() != curMap;
+                // 7.03: perf log - a server teleport drops the ride (a server that does not take our place on a zeppelin puts us back)
+                perf::event("teleport by the server: map %lu -> %lu, %.1f %.1f %.1f -> %.1f %.1f %.1f, riding %llx", (unsigned long)curMap,
+                            (unsigned long)game->mapId(), pl[0], pl[1], pl[2], tp[0], tp[1], tp[2], (unsigned long long)ride.guid);
                 if (mapChange) {   // close the loading screen over the old world first, then swap the pack under it
                     portal.setPicture(ui::assets().loadingScreen(game->mapId()));
                     portal.setProgress(0.0f);
@@ -1282,6 +1613,7 @@ int main() {
                 if (ride.guid) {
                     const w3n::TransportPose* tp = game->objects.transportPose(ride.guid);
                     if (!tp) {   // the ship is gone (out of range, zoned): stay where we are
+                        perf::event("ride: transport %llx has no pose any more - off it", (unsigned long long)ride.guid);
                         ride.guid = 0;
                         game->mover.clearTransport(netMs);
                     } else {
@@ -1303,7 +1635,8 @@ int main() {
                         if (!dk) continue;
                         float l[3];
                         w3n::worldToTransport(pose, x, y, zref, 0, l, nullptr);
-                        if (!dk->contains(l[0], l[1])) continue;
+                        const float mg = ride.guid == guid ? 1.0f : 0.0f;   // 6.95: the deck we ride on is 1 yd wider (no slipping off its edge)
+                        if (!(l[0] >= dk->x0 - mg && l[0] <= dk->x1 + mg && l[1] >= dk->y0 - mg && l[1] <= dk->y1 + mg)) continue;
                         const float dz = pose.z + dk->z;
                         if (w3n::deckReaches(dz, zref, ride.guid == guid ? 3.0f : 1.6f, fallDrop)) {
                             *g = dz;
@@ -1435,7 +1768,9 @@ int main() {
                     wallHit = ride.guid ? false : streamerCollideMove(pl[0], pl[1], pl[2], &nx, &ny);   // no walls on a ship (yet)
                     if (!ride.guid && !doorBoxes.empty())
                         wallHit |= w3d_block_boxes_move(doorBoxes.data(), (int)doorBoxes.size(), pl[0], pl[1], pl[2], &nx, &ny, kWalkerRadius) != 0;
-                    if (!ride.guid && !airborne) wallHit |= streamerSlopeMove(pl[0], pl[1], pl[2], &nx, &ny);   // 6.18c: no climbing a 50+ degree slope
+                    // 6.18c: no climbing a 50+ degree slope; 6.95: not by jumping either - in the air the same limit holds while the feet are within a
+                    // jump's height (2.4 yd) of the ground ahead (bunny-hopping up a cliff): the walker slides along the slope
+                    if (!ride.guid) wallHit |= streamerSlopeMove(pl[0], pl[1], pl[2], &nx, &ny, airborne ? 2.4f : -1.0f);
                     wallUs += (float)(ticksToMs(svcGetSystemTick() - w0) * 1000.0);
                     if (floorW(nx, ny, pl[2], &ground)) { pl[0] = nx; pl[1] = ny; }
                     else if (!airborne) dir = 0;   // never walk onto an unloaded tile
@@ -1466,6 +1801,14 @@ int main() {
                                 perf::event("  object platform here: z %.2f (object at %.1f %.1f %.1f)", dz, sd.pos[0], sd.pos[1], sd.pos[2]);
                         }
                         if (!doorBoxes.empty()) perf::event("  closed doors near: %d", (int)doorBoxes.size());
+                        for (auto& [guid, o] : game->objects.all()) {   // 6.44c: the creatures within 15 yd and what they play (T-poses)
+                            if (o.type != w3n::ObjType::Unit || !o.hasPos) continue;
+                            const float ddx = o.mv.x - pl[0], ddy = o.mv.y - pl[1];
+                            if (ddx * ddx + ddy * ddy > 225.0f) continue;
+                            char ub[200];
+                            if (creatureView.describeUnit(guid, ub, sizeof ub))
+                                perf::event("  unit near: entry %u at %.1f %.1f %.1f, %s", (unsigned)o.entry(), o.mv.x, o.mv.y, o.mv.z, ub);
+                        }
                         for (auto& [guid, o] : game->objects.all()) {
                             if (o.type != w3n::ObjType::GameObject || !o.hasPos) continue;
                             const float ddx = o.mv.x - pl[0], ddy = o.mv.y - pl[1];
@@ -1538,7 +1881,13 @@ int main() {
                     plVz = 0;   // stage 5.28: the data under us is not loaded (yet): hang here instead of dropping through the world
                 } else if (airborne) {
                     plVz -= 19.291105f * dt;   // the client's gravity
-                    pl[2] += plVz * dt;
+                    {   // 6.42: a jump stops under a ceiling (a low roof, a bridge's deck): the head does not pass through it
+                        float ceilZ = 0;
+                        const bool haveCeil = plVz > 0 && !ride.guid && streamerCeilingAbove(pl[0], pl[1], pl[2] + kCeilingFrom, &ceilZ);
+                        int hitCeil = 0;
+                        pl[2] = w3d_rise_under_ceiling(pl[2], plVz * dt, kHeadHeight, haveCeil, ceilZ, &hitCeil);
+                        if (hitCeil) plVz = 0;   // (the next frame falls)
+                    }
                     if (plVz < 0 && !ride.guid && game->mover.airborne()) {   // 6.19b: falling: FALLINGFAR for the server's fall damage
                         game->mover.update(dir, pl[0], pl[1], pl[2], charYaw, netMs);
                         game->mover.descend(netMs);
@@ -1599,15 +1948,60 @@ int main() {
                 {
                     uint64_t on = 0;
                     const w3n::TransportPose* onPose = nullptr;
+                    // 7.08: the ship's own floor holds us (its model's collision, placed where the ship is): we are on it. The deck box of
+                    // transports.txt was the only test before - a zeppelin without one, or whose real floor is not where its box says,
+                    // carried nobody: the walker stood on the moving floor bound to the world ("floor"), slid back across it and fell
+                    // off unless it walked along with the ship.
+                    {
+                        uint64_t owner = !airborne ? streamerObjFloorOwner(pl[0], pl[1], pl[2]) : 0;
+                        float fz;
+                        // in the air (a jump, a lurch): still ours while its floor is under us within 12 yd
+                        if (!owner && airborne && ride.guid && streamerObjFloorOf(ride.guid, pl[0], pl[1], pl[2], 12.0f, &fz)) owner = ride.guid;
+                        // standing still on the floor we ride: the carried position may be a hair above it this frame
+                        if (!owner && ride.guid && streamerObjFloorOf(ride.guid, pl[0], pl[1], pl[2], 2.0f, &fz)) owner = ride.guid;
+                        if (owner)
+                            if (const w3n::TransportPose* tp = game->objects.transportPose(owner)) { on = owner; onPose = tp; }
+                    }
+                    if (!on)
                     for (auto& [guid, pose] : game->objects.transportPoses()) {
                         const w3n::WorldObject* go = game->objects.find(guid);
                         const w3n::DeckInfo* dk = go ? game->objects.transports.deck(go->displayId()) : nullptr;
-                        if (!dk) continue;
+                        if (!dk) {   // 7.03: perf log, once per display - nobody can stand on it (no M line in transports.txt)
+                            static std::vector<uint32_t> told;
+                            const float ddx = pose.x - pl[0], ddy = pose.y - pl[1];
+                            if (go && ddx * ddx + ddy * ddy < 900.0f &&
+                                std::find(told.begin(), told.end(), go->displayId()) == told.end()) {
+                                told.push_back(go->displayId());
+                                perf::event("ride: transport %llx display %u entry %u has NO DECK in transports.txt", (unsigned long long)guid,
+                                            (unsigned)go->displayId(), (unsigned)go->entry());
+                            }
+                            continue;
+                        }
                         float l[3];
                         w3n::worldToTransport(pose, pl[0], pl[1], pl[2], 0, l, nullptr);
-                        if (!dk->contains(l[0], l[1])) continue;
+                        // 6.95: the ship we ride keeps us while we stay near it (1.5 yd past the deck's edge, up to 4 yd above the plane
+                        // on foot): a cabin, stairs or a rail a little off the flat deck, or a lurch as it casts off, no longer drops us
+                        const bool mine = ride.guid == guid;
+                        // 7.03: boarding is as lenient as the floor that holds us (floorQ: within 1.6 yd of the deck, in its rectangle):
+                        // a walker the deck carried but this test did not take on board stood still while the zeppelin left -
+                        // slid across its deck and fell off when it started moving
+                        const float m = mine ? 1.5f : 0.0f;
                         const float above = pl[2] - (pose.z + dk->z);
-                        if ((!airborne && std::fabs(above) < 0.6f) || (airborne && ride.guid == guid && above > -1.0f && above < 12.0f)) {
+                        {   // 7.03: perf log - a walker within 30 yd of a moving transport and not on it: where is it on its deck?
+                            static uint32_t lastNear = 0;
+                            const float ddx = pose.x - pl[0], ddy = pose.y - pl[1];
+                            if (!mine && pose.moving && ddx * ddx + ddy * ddy < 900.0f && netMs - lastNear > 1000) {
+                                lastNear = netMs;
+                                perf::event("ride: transport %llx display %u moving, not on it: local %.1f %.1f, deck x %.1f..%.1f y %.1f..%.1f, "
+                                            "feet %.2f above the deck, airborne %d, riding %llx",
+                                            (unsigned long long)guid, (unsigned)go->displayId(), l[0], l[1], dk->x0, dk->x1, dk->y0, dk->y1,
+                                            above, (int)airborne, (unsigned long long)ride.guid);
+                            }
+                        }
+                        if (!(l[0] >= dk->x0 - m && l[0] <= dk->x1 + m && l[1] >= dk->y0 - m && l[1] <= dk->y1 + m)) continue;
+                        if ((!airborne && std::fabs(above) < 1.6f) ||
+                            (mine && !airborne && above > -2.0f && above < 4.0f) ||
+                            (airborne && mine && above > -2.0f && above < 12.0f)) {
                             on = guid;
                             onPose = &pose;
                             break;
@@ -1617,9 +2011,13 @@ int main() {
                         if (on) {
                             float l[3], lo;
                             w3n::worldToTransport(*onPose, pl[0], pl[1], pl[2], charYaw, l, &lo);
+                            perf::event("ride: on transport %llx (moving %d) at local %.1f %.1f %.1f", (unsigned long long)on,
+                                        (int)onPose->moving, l[0], l[1], l[2]);
                             ride = Ride{on, l[0], l[1], l[2], lo, onPose->o};
                             game->mover.setTransport(on, l[0], l[1], l[2], lo, netMs);
                         } else {
+                            perf::event("ride: off transport %llx at %.1f %.1f %.1f (local %.1f %.1f %.1f), airborne %d",
+                                        (unsigned long long)ride.guid, pl[0], pl[1], pl[2], ride.lx, ride.ly, ride.lz, (int)airborne);
                             ride.guid = 0;
                             game->mover.clearTransport(netMs);
                         }
@@ -1643,11 +2041,13 @@ int main() {
                 perf::lap(perf::kMove);
                 if (rs.effects > 0) spellView.update(*game, netMs, cam.pos, spellModels);   // before the sounds take the events
                 else spellModels.clear();
+                addObjectBuildings(*game, netMs, cam.pos, cam.drawDist, spellModels);   // 6.59: game objects that are buildings
                 perf::lap(perf::kSpells);
                 soundWorld.update(*game, pl, dir != 0, !airborne, po.walk, netMs, soundReqs, inWater);
                 voices.update(*game, soundWorld.tables(), netMs, soundReqs);   // UI stage 8: NPC greetings, our error lines, emotes
                 for (const SoundReq& q : soundReqs) {
                     if (q.stop) audio::stopTag(q.tag);
+                    else if (q.event) audio::play(q.event);
                     else audio::playAt(q.sound, q.x, q.y, q.z, q.self, q.tag, q.gain, q.loopMs);
                 }
                 perf::lap(perf::kSound);
@@ -1710,15 +2110,30 @@ int main() {
                 }
             }
         }
+        if (cinPlay.s) {   // 7.04: the intro's camera (the streamer loads around it: cam.pos)
+            float p[3], tg[3];
+            cinPlay.s->at(netMs - cinPlay.startMs, p, tg);
+            memcpy(cam.pos, p, sizeof p);
+            cine::lookAngles(p, tg, &cam.yaw, &cam.pitch);
+        }
         perf::lap(perf::kMove);
         perf::mark("game update / units");
+        static double gameSplit[4] = {0, 0, 0, 0};   // 7.05: where the game phase goes (perf.csv g_update / g_collect / g_view / g_markers)
         if (online) {
+            u64 gs0 = svcGetSystemTick();
             game->update(netMs);   // movement packets, name/creature queries
+            u64 gs1 = svcGetSystemTick();
+            gameSplit[0] = ticksToMs(gs1 - gs0);
             const bool selfVisible = !walk || camDist >= 0.8f;   // free camera or third person
             g_farRange = std::max(kCreatureRange, std::min(cam.drawDist, kFarRange));   // stage 6.12
             creatureView.fadeIn = padCfg.fadeIn;
             collectCreatures(*game, netMs, cam.pos, true, seen);   // ourselves always: the portrait needs the model
+            gs0 = svcGetSystemTick();
+            gameSplit[1] = ticksToMs(gs0 - gs1);
             creatureView.update(seen, netMs, creatures);
+            gs1 = svcGetSystemTick();
+            gameSplit[2] = ticksToMs(gs1 - gs0);
+            for (const std::string& d : creatureView.takeDiag()) perf::event("%s", d.c_str());   // 6.36: models that cannot move
             {   // UI stage 8: the units of the two portraits (copies: the list is cut below), then ourselves out of the
                 // world in first person
                 const uint64_t want[2] = {game->selfGuid(), game->target()};
@@ -1757,6 +2172,7 @@ int main() {
                 }
             }
             buildMarkers(*game, netMs, cam.pos, selfVisible, std::min(cam.drawDist, 200.0f), creatureView, markers);
+            gameSplit[3] = ticksToMs(svcGetSystemTick() - gs1);   // (the crowd limit and the markers)
             if (walk && uiOut.placing) {   // UI stage 10: where the ground spell will land - a ring of its radius
                 Marker rg;
                 rg.pos[0] = uiOut.placePos[0]; rg.pos[1] = uiOut.placePos[1]; rg.pos[2] = uiOut.placePos[2] + 0.15f;
@@ -1785,6 +2201,11 @@ int main() {
         }
 
         perf::lap(perf::kGame);
+        if (online && !loginUi && !bench.running) {   // 7.05: the units' poses on core 2 while the HUD, the touch screen and the streamer run here
+            RenderSettings prs = rs;
+            prs.nowMs = streamerNowMs();
+            rendererPosesStart(cam, prs, &creatures);
+        }
         perf::mark("HUD lists");
         // --- top-screen HUD: unit frames, minimap, name plates, cast bar, chat
         if (online && !bench.running) {
@@ -1823,8 +2244,7 @@ int main() {
                         c.cdTotalMs = game->itemCooldownTotalMs(a.id);
                     }
                     if (a.type == ActionSlot::Spell) {
-                        c.icon = ui::assets().spellIcon(a.id);
-                        if (!c.icon.ok() && a.id == w3n::kSpellAttack) c.icon = ui::assets().namedIcon("attack");
+                        c.icon = gameUi.shownSpellIcon(a.id);   // 6.99: Attack / Shoot show the weapon in hand
                         c.cdKey = a.id;
                     } else if (a.type == ActionSlot::PetCmd) {
                         c.icon = ui::assets().namedIcon(petCmdIcon(a.id));
@@ -1858,7 +2278,7 @@ int main() {
                             if (a.type == ActionSlot::Spell) {
                                 hc.ms = game->cooldownLeftMs(a.id, netMs);
                                 hc.totalMs = game->cooldownTotalMs(a.id);
-                                hc.icon = ui::assets().spellIcon(a.id);
+                                hc.icon = gameUi.shownSpellIcon(a.id);
                                 hc.name = game->spellNames.name(a.id);
                             } else {
                                 hc.ms = game->itemCooldownLeftMs(a.id, netMs);
@@ -1876,11 +2296,16 @@ int main() {
             }
             hi.pad = &pv;
             hi.questTracker = padCfg.questTracker;
+            hi.followed = &gameUi.followedQuests();   // 6.63
             hi.dim = padCfg.dimHud;
+            hi.chatBubbles = padCfg.chatBubbles;   // 6.67
+            hi.selfVisible = !walk || camDist >= 0.8f;   // 6.89: our own bubble over our head, or at the top in first person
             hi.showStats = padCfg.showStats;
             hi.fps = fps;
             hi.pingMs = g_login.latencyMs();
-            hi.fading = (int)fc.fading;   // stage 6.12: the last frame's (fc is reset after the HUD is built)
+            hi.fading = (int)fc.fading;
+            hi.drawDistYd = autoDetail.level() > 0 ? (int)lroundf(cam.drawDist) : 0;   // 6.72: shown with the FPS while trimmed
+            hi.detailPct = (int)lroundf(100.0f * (1.0f - autoDetail.level()));   // stage 6.12: the last frame's (fc is reset after the HUD is built)
             if (uiOut.placing) {   // UI stage 10: how to cast the ground spell
                 static std::string placeHint;
                 placeHint = uiOut.placeName;
@@ -1929,6 +2354,71 @@ int main() {
             if (rs.underwater) {
                 memcpy(rs.waterFog, lc.look.fog, 3);
                 rs.waterFogEnd = lc.look.fogEnd;
+            }
+        }
+        // --- 6.62: the spirit world: the sky and the fog go grey while we are a ghost (a little for the body before the spirit is released)
+        float ghostAmt = 0.0f;
+        if (online && !loginUi) {
+            const w3n::Life lf = game->life();
+            ghostAmt = lf == w3n::Life::Ghost ? 1.0f : lf == w3n::Life::Dead ? 0.35f : 0.0f;
+        }
+        rendererSetGhostFog(padCfg.ghostFog);   // 6.80
+        rendererSetGhost(ghostAmt);
+        // --- 6.60: the sky's and the fog's colours for this place and the SERVER's time of day (sky.txt from w3dconv; without it the
+        // fixed sky stays). A few times a second: the dome is coloured again only when a colour moved.
+        {
+            static sky::SkyTable skyTab;
+            static bool skyOpened = false;
+            static uint32_t skyNextMs = 0, skyMap = 0xFFFFFFFFu;
+            static float skyHourShown = -2.0f;
+            static uint32_t skyBoxId = 0;
+            static Model* skyBoxModel = nullptr;
+            const uint32_t nowS = streamerNowMs();
+            if (online && !loginUi && !rs.underwater && (int32_t)(nowS - skyNextMs) >= 0) {
+                skyNextMs = nowS + 500;
+                if (!skyOpened) {
+                    skyOpened = true;
+                    const bool ok = skyTab.open("sdmc:/3ds/w3dproto/sky.txt");
+                    perf::event("sky: %s", ok ? "sky.txt found" : "no sky.txt (the fixed sky; run w3dconv again)");
+                }
+                {   // 6.61: the sun and the moon follow the same hour whether or not there is a sky.txt
+                    float h = padCfg.skyHour >= 0.0f ? padCfg.skyHour : game->gameHour(netMs);
+                    if (h < 0.0f) h = 12.0f;
+                    const sky::Body sn = sky::sun(h), mn = sky::moon(h);
+                    rendererSetCelestial(sn.dir, sn.strength * (1.0f - 0.85f * ghostAmt), mn.dir, mn.strength * (1.0f - 0.5f * ghostAmt));
+                }
+                if (skyTab.opened()) {
+                    if (game->mapId() != skyMap) {
+                        skyMap = game->mapId();
+                        const bool ok = skyTab.setMap(skyMap);
+                        perf::event("sky: map %lu, %lu light volumes%s", (unsigned long)skyMap, (unsigned long)skyTab.volumes(),
+                                    ok ? "" : " (none: the fixed sky)");
+                    }
+                    {   // 6.61: the sky model of the place (SKYB in the pool), kept acquired while it is the one in use
+                        const uint32_t want = skyTab.skyboxAt(cam.pos[0], cam.pos[1]);
+                        if (want != skyBoxId) {
+                            rendererSetSkyModel(nullptr);
+                            if (skyBoxModel) streamerReleaseItemModel(skyBoxModel);
+                            skyBoxModel = nullptr;
+                            skyBoxId = want;
+                            W3dSkybox e{};
+                            if (want && streamerReadEntry(W3D_ENTRY_SKYBOX, want, &e, sizeof e) && e.modelId) skyBoxModel = streamerAcquireItemModel(e.modelId);
+                            perf::event("sky: model %lu %s", (unsigned long)want, skyBoxModel ? "(read)" : want ? "(not in the pack)" : "(none)");
+                        }
+                        rendererSetSkyModel(skyBoxModel);
+                    }
+                    float hour = padCfg.skyHour >= 0.0f ? padCfg.skyHour : game->gameHour(netMs);
+                    const bool serverClock = hour >= 0.0f;
+                    if (!serverClock) hour = 12.0f;   // the server has not said yet
+                    sky::Colors sc;
+                    if (skyTab.colors(cam.pos[0], cam.pos[1], hour, &sc)) {
+                        rendererSetSky(&sc.top.r, &sc.mid.r, &sc.band1.r, &sc.band2.r, &sc.fog.r);
+                        if (std::fabs(hour - skyHourShown) > 1.0f || skyHourShown < -1.0f) {
+                            skyHourShown = hour;
+                            perf::event("sky: hour %.1f (%s)", hour, padCfg.skyHour >= 0.0f ? "pad.txt skyhour" : serverClock ? "server clock" : "no server clock yet");
+                        }
+                    }
+                }
             }
         }
         // --- the login screens' scene (stage 5.29): the backdrop of the screen (the Dark Portal, a racial home) seen through
@@ -2020,13 +2510,168 @@ int main() {
         perf::mark("streamerUpdate");
         streamerSetView(cam.yaw);
         streamerSetBoost(loadingWorld || portal.active());
-        streamerUpdate(cam.pos, cam.drawDist, true);   // (texture uploads: below, inside the frame)
+        streamerSetWorldWanted(!loginUi || loadingWorld);   // 6.37: the login screens read nothing of the world
+        float streamDist = cam.drawDist;
+        {   // 6.72: the automatic draw distance (autodetail.hpp): aims at the pacer's frame time (30 FPS with the pacer off); the
+            // streamer keeps the chosen distance, the renderer gets the shortened one (fog, buildings, ground; doodads below)
+            const float chosen = kDrawDists[distIdx];
+            const bool on = padCfg.autoDetail && !loginUi && !bench.running && !g_gpuTest.running && !loadingWorld && !portal.active();
+            const float target = pacer.active() ? (float)pacer.interval() * FramePacer::kPeriodMs : 2.0f * FramePacer::kPeriodMs;
+            const float cost = pacer.active() ? pacer.busyMs() : frameMs;
+            const bool wasTrimming = autoDetail.level() > 0;
+            autoDetail.update(cost, target, on);
+            const float want = on ? std::max(std::min(chosen, 120.0f), chosen * autoDetail.distMul()) : chosen;
+            if (std::fabs(want - cam.drawDist) > 0.5f || (want == chosen && cam.drawDist != chosen)) {
+                cam.drawDist = want;
+                rendererSetProjection(cam.drawDist);
+            }
+            if (wasTrimming != (autoDetail.level() > 0))
+                perf::event("auto detail: %s (frame %.1f ms against %.1f)", autoDetail.level() > 0 ? "trimming starts" : "full detail again", autoDetail.cost(), target);
+            streamDist = chosen;
+        }
+        streamerUpdate(cam.pos, streamDist, true);   // (texture uploads: below, inside the frame)
+        if (!camPlaced && !loginUi && !walk) {   // 6.37: the offline flight starts 25 yd over the ground, once that tile is in
+            float gz0 = 0;
+            if (streamerGroundHeight(cam.pos[0], cam.pos[1], &gz0)) {
+                cam.pos[2] = gz0 + 25.0f;
+                camPlaced = true;
+                g_report.firstFrameMs = ticksToMs(svcGetSystemTick() - t0);
+            }
+        }
         fc = FrameCounters();
+        for (int k = 0; k < 4; ++k) fc.gameSplitMs[k] = online ? gameSplit[k] : 0.0;   // 7.05 (measured before the reset)
         perf::lap(perf::kStream);
         // Stage 6.4: what is visible, decided while the GPU still draws the previous frame (before the wait below)
         perf::mark("rendererPrepare");
+        float gtRangeMul = 1.0f;   // 6.51: the GPU test's doodad distance phase
+        {   // 6.46: the GPU test - start / stop, this phase's switches
+            GpuTest& gt = g_gpuTest;
+            if (gameUiTakeGpuTest()) {
+                if (gt.running) {
+                    gt.running = false;
+                    perf::event("GPU test stopped by the player");
+                    if (game) game->notice("GPU test stopped", netMs);
+                } else if (online && !loginUi) {
+                    const bool keepDood = rs.doodads, keepCre = rs.creatures, keepFog = rs.fog;
+                    const int keepLod = rs.forceLod, keepFx = rs.effects;
+                    gt = GpuTest();
+                    gt.running = true;
+                    gt.phaseStart = frameStart;
+                    memcpy(gt.cam0, cam.pos, sizeof gt.cam0);
+                    gt.yaw0 = cam.yaw;
+                    gt.baseDoodads = keepDood; gt.baseCreatures = keepCre; gt.baseFog = keepFog; gt.baseLod = keepLod; gt.baseEffects = keepFx;
+                    perf::event("GPU test started: %d phases, %.0f s, top screen %s, draw distance %.0f", kGpuTestCount, gtTotalSec(),
+                                topModeNow == 1 ? "800x240" : "400x240", cam.drawDist);
+                    if (game) { char gm[64]; snprintf(gm, sizeof gm, "GPU test: stand still for %d s (results: gputest.txt)", (int)(gtTotalSec() + 0.5f)); game->notice(gm, netMs); }
+                }
+            }
+            if (gt.running && (!online || loginUi)) gt.running = false;
+            // restore what the test changed, then this phase's switches
+            rs.gpuTestOff = 0;
+            if (gt.running || gt.phase > 0) {
+                rs.doodads = gt.baseDoodads; rs.creatures = gt.baseCreatures; rs.fog = gt.baseFog;
+                rs.forceLod = gt.baseLod; rs.effects = gt.baseEffects;
+                if (!gt.running) gt.phase = 0;
+            }
+            if (gt.running) {
+                const float tPh = (float)ticksToMs(frameStart - gt.phaseStart) / 1000.0f;
+                if (tPh >= gtSettle(gt.phase) + kGtMeasure) {
+                    const GpuTest::Acc& a = gt.acc[gt.phase];
+                    const double n = a.n ? a.n : 1;
+                    perf::event("GPU test %2d %-36s GPU %5.2f ms  frame %5.2f  CPU %5.2f  draws %5.0f  tris %6.0f (VRAM %6.0f)%s", gt.phase,
+                                kGpuTestPhases[gt.phase].name, a.gpu / n, a.frame / n, a.cpu / n, a.draws / n, a.tris / n, a.vramTris / n,
+                                a.moved ? "  (moved!)" : "");
+                    if (kGpuTestPhases[gt.phase].vram) {   // 6.52
+                        gt.vram = streamerGtVramStats();
+                        perf::event("GPU test VRAM: reserve %lu KB (textures moved out %lu KB), %lu buffers %lu KB copied, %lu did not fit",
+                                    (unsigned long)(gt.vram.reserveBytes / 1024), (unsigned long)(gt.vram.movedTexBytes / 1024),
+                                    (unsigned long)gt.vram.buffers, (unsigned long)(gt.vram.bytesUsed / 1024), (unsigned long)gt.vram.misses);
+                    }
+                    ++gt.phase;
+                    gt.phaseStart = frameStart;
+                    if (gt.phase >= kGpuTestCount) {   // done: the table
+                        gt.running = false;
+                        char path[96];
+                        snprintf(path, sizeof path, "%s/gputest.txt", kOutDir);
+                        if (FILE* f = fopen(path, "w")) {
+                            const GpuTest::Acc& b = gt.acc[0];
+                            const double bg = b.n ? b.gpu / b.n : 0;
+                            fprintf(f, "GPU test (6.46): top screen %s, draw distance %.0f, at %.1f %.1f %.1f map %lu, camera yaw %.0f pitch %.0f deg\n",
+                                    topModeNow == 1 ? "800x240" : "400x240", cam.drawDist, gt.cam0[0], gt.cam0[1], gt.cam0[2], (unsigned long)curMap,
+                                    cam.yaw * 57.29578f, cam.pitch * 57.29578f);   // (6.48: two runs compare only with the same view)
+                            fprintf(f, "GPU ms = what the GPU needs a frame (C3D drawing time + the early kick's lead); saved = baseline - this\n\n");
+                            fprintf(f, "%-40s %8s %8s %8s %8s %7s %8s %8s\n", "phase", "GPU ms", "saved", "frame", "CPU", "draws", "tris", "VRAM tri");
+                            for (int k = 0; k < kGpuTestCount; ++k) {
+                                const GpuTest::Acc& a = gt.acc[k];
+                                const double n = a.n ? a.n : 1;
+                                fprintf(f, "%-40s %8.2f %8.2f %8.2f %8.2f %7.0f %8.0f %8.0f%s\n", kGpuTestPhases[k].name, a.gpu / n, bg - a.gpu / n,
+                                        a.frame / n, a.cpu / n, a.draws / n, a.tris / n, a.vramTris / n, a.moved ? "  (camera moved: not comparable)" : "");
+                            }
+                            {   // 6.52: the two VRAM phases against each other
+                                const GpuTest::Acc* c = nullptr; const GpuTest::Acc* v = nullptr;
+                                for (int k = 0; k < kGpuTestCount; ++k) {
+                                    if (kGpuTestPhases[k].vram == 1) c = &gt.acc[k];
+                                    if (kGpuTestPhases[k].vram == 2) v = &gt.acc[k];
+                                }
+                                if (c && v && c->n && v->n) {
+                                    const double gc = c->gpu / c->n, gv = v->gpu / v->n, tv = v->tris / v->n, vt = v->vramTris / v->n;
+                                    fprintf(f, "\nVRAM vertices (6.52): GPU %.2f -> %.2f ms (%+.2f) with %.0f of %.0f triangles (%.0f%%) drawn from VRAM\n",
+                                            gc, gv, gv - gc, vt, tv, tv > 0 ? 100.0 * vt / tv : 0.0);
+                                    fprintf(f, "  reserve %lu KB (textures moved out for it %lu KB), %lu buffers %lu KB copied, %lu did not fit\n",
+                                            (unsigned long)(gt.vram.reserveBytes / 1024), (unsigned long)(gt.vram.movedTexBytes / 1024),
+                                            (unsigned long)gt.vram.buffers, (unsigned long)(gt.vram.bytesUsed / 1024), (unsigned long)gt.vram.misses);
+                                    fprintf(f, "  the control phase vs the baseline: %+.2f ms - what the textures moved out cost\n", gc - bg);
+                                }
+                            }
+                            fclose(f);
+                        }
+                        perf::event("GPU test finished (gputest.txt)");
+                        if (game) game->notice("GPU test finished: gputest.txt", netMs);
+                    }
+                }
+            }
+            if (gt.running) {
+                const GpuTestPhase& ph = kGpuTestPhases[gt.phase];
+                rs.gpuTestOff = ph.off;
+                if (ph.doodads >= 0) rs.doodads = ph.doodads != 0;
+                if (ph.creatures >= 0) rs.creatures = ph.creatures != 0;
+                if (ph.fog >= 0) rs.fog = ph.fog != 0;
+                if (ph.forceLod >= 0) rs.forceLod = ph.forceLod;
+                if (ph.effects >= 0) rs.effects = ph.effects;
+                if (ph.rangeMul > 0) gtRangeMul = ph.rangeMul;
+            }
+            streamerGtVram(gt.running ? kGpuTestPhases[gt.phase].vram : 0);   // 6.52 (outside a frame: the eviction waits for the GPU)
+        }
+        {   // 6.51: the doodad distance: pad.txt, less in the wide mode, the debug key's near / normal / far, the GPU test's phase
+            static const float kDetailMul[3] = {25.0f / 45.0f, 1.0f, 80.0f / 45.0f};
+            rs.doodadRange = padCfg.doodadRange * (topModeNow == 1 ? padCfg.doodadWide : 1.0f) * kDetailMul[detailIdx] * gtRangeMul;
+            // 6.72: shortened in heavy scenes, but not under the PVS file's limit when it held before (the PVS would switch off)
+            const float trimmed = rs.doodadRange * autoDetail.doodadMul(), occ = pvs::occRange();
+            rs.doodadRange = (occ > 0 && rs.doodadRange >= occ) ? std::max(trimmed, occ) : trimmed;
+        }
         rs.fadeIn = padCfg.fadeIn;   // stage 6.11
+        rs.staticBatch = padCfg.staticBatch;   // 6.44
+        rs.interiorFar = padCfg.interiorFar && !(rs.gpuTestOff & kGtInteriorNear);   // 6.56
+        rs.dbgBldg = padCfg.dbgBldg;   // 6.57e
+        rs.lodPixels = padCfg.lodPixels;       // 6.47
+        rs.wide = topModeNow == 1;
         rs.nowMs = streamerNowMs();
+        {   // 6.54: the PVS of the camera's cell (pad.txt 'pvs'; the GPU test's "PVS off" phase)
+            const pvs::FrameInfo pf = pvs::frame(cam.pos, cam.drawDist, streamerReadyTiles(),
+                                                 padCfg.pvs && !(rs.gpuTestOff & kGtPvsOff) && !loginUi, rs);
+            fc.pvsOn = pf.on ? 1 : 0;
+            fc.pvsRead = pf.read ? 1 : 0;   // (pvsBldg / pvsFar: counted by the renderer)
+        }
+        {   // 6.57: the horizon (pad.txt 'hlod': the switch distance; the GPU test's "horizon meshes off" phase) - after the PVS (its stamps)
+            const float reach = std::max(cam.drawDist, kHorizons[std::clamp(padCfg.horizon, 0, 2)]);
+            const float sw = (loginUi || (rs.gpuTestOff & kGtHlodOff)) ? 0.0f : (float)padCfg.hlod;
+            const hlod::FrameInfo hf = hlod::frame(cam.pos, reach, sw, streamerReadyTiles(), rs);
+            fc.hlodBlocks = hf.blocks; fc.hlodHidden = hf.hidden; fc.hlodTris = hf.tris; fc.hlodTiles = hf.tiles; fc.hlodKB = hf.bytes / 1024;
+        }
+        {   // 6.42: the character's room (a yard above the feet) seeds the portal walk too
+            const float viewer[3] = {pl[0], pl[1], pl[2] + 1.0f};
+            rendererSetViewer(loginUi ? nullptr : viewer);
+        }
         if (!loginUi) rendererPrepare(cam, rs, fc, &spellModels, &creatures);
         perf::mark("C3D_FrameBegin (waiting for the GPU)");
         perf::lap(perf::kPrepare);
@@ -2035,7 +2680,25 @@ int main() {
         // took 33.3 ms (perf log: p50 exactly 33.4 ms for seconds, 30 FPS). Without it only the GPU is waited for; a frame
         // shorter than ~16 ms still waits for the blank (no more than 60 FPS: the screen would get two frames between blanks).
         static u64 lastBegin = 0;
-        if (padCfg.vsync || (lastBegin && ticksToMs(svcGetSystemTick() - lastBegin) < 15.5)) C3D_FrameSync();
+        if (pacer.active()) {
+            // 6.71: the frame pacer - begin on a vertical blank, a fixed number of blanks after the last frame began (pacer.hpp)
+            const u64 t0 = svcGetSystemTick();
+            const float busy = pacedAt ? (float)ticksToMs(t0 - pacedAt) : 0.0f;
+            int k = 0;
+            u64 t = t0;
+            for (int guard = 0; guard < 8; ++guard) {
+                gspWaitForVBlank();
+                t = svcGetSystemTick();
+                k = pacedAt ? (int)lroundf((float)ticksToMs(t - pacedAt) / FramePacer::kPeriodMs) : pacer.interval();
+                if (k >= pacer.interval()) break;
+            }
+            if (pacedAt && pacer.frameDone(k, busy, padCfg.autoDetail && autoDetail.canTrim()))
+                perf::event("frame pacer: %s (%.1f ms of work before the wait)", pacer.blanks() == 1 ? "60 FPS" : "30 FPS", busy);
+            pacedAt = t;
+        } else {
+            pacedAt = 0;
+            if (padCfg.vsync || (lastBegin && ticksToMs(svcGetSystemTick() - lastBegin) < 15.5)) C3D_FrameSync();
+        }
         // Stage 6.7: the wait for the GPU, watched. 6f/6g froze here (perf_stall.txt: "C3D_FrameBegin (waiting for the GPU)")
         // with the early GPU kick on. After 1 s the queue's state goes into the watchdog's mark (how many commands, how many
         // sent to the GPU, how many reported done, which kind is outstanding); after 2.5 s the missing "done" is faked once:
@@ -2096,8 +2759,9 @@ int main() {
             rs.gpuKick = padCfg.gpuKick && !stereo && !g_kickBroken;   // stage 6.3 (two eyes share the passes' buffers: no early kick)
             for (int eye = 0; eye < (stereo ? 2 : 1); ++eye) {
                 C3D_RenderTarget* t = eye == 0 ? left : topRight;
+                if (!t) continue;   // (6.49b: no top target after a failed mode switch)
                 if (stereo) rendererSetEye(eye == 0 ? -iod : iod);
-                C3D_RenderTargetClear(t, C3D_CLEAR_ALL, loginUi ? 0x05080CFF : rendererClearColor(rs), 0);
+                C3D_RenderTargetClear(t, C3D_CLEAR_ALL, topClearColor(loginUi ? 0x05080CFF : rendererClearColor(rs)), 0);
                 C3D_FrameDrawOn(t);
                 if (loginUi) {   // the login screens: their scene, then their frames
                     perf::mark("glue: scene draw");
@@ -2110,7 +2774,13 @@ int main() {
                     rendererDraw(t, cam, rs, fc, &markers, &creatures, &spellModels);
                     perf::mark("HUD draw");
                     perf::lap(perf::kWorld);
-                    uiDraw(hud, kHudW);
+                    if (cinPlay.s) {   // 7.04: no HUD over the intro, only how to skip it
+                        cineHud.clear();
+                        cineHud.textRight(kHudW - 6, kHudH - 16, "A / B: skip", hudRgba(255, 255, 255, 170), true);
+                        uiDraw(cineHud, kHudW);
+                    } else {
+                        uiDraw(hud, kHudW);
+                    }
                 }
                 perf::lap(perf::kHudDraw);
             }
@@ -2148,6 +2818,23 @@ int main() {
             }
         }
 
+        if (g_gpuTest.running) {   // 6.46: the GPU test - this frame into its phase (after the settling second)
+            GpuTest& gt = g_gpuTest;
+            const float tPh = (float)ticksToMs(frameStart - gt.phaseStart) / 1000.0f;
+            const float dx = cam.pos[0] - gt.cam0[0], dy = cam.pos[1] - gt.cam0[1], dz = cam.pos[2] - gt.cam0[2];
+            const bool movedNow = dx * dx + dy * dy + dz * dz > 0.25f || fabsf(cam.yaw - gt.yaw0) > 0.05f;
+            if (gt.phase < kGpuTestCount && tPh >= gtSettle(gt.phase)) {
+                GpuTest::Acc& a = gt.acc[gt.phase];
+                a.vramTris += fc.vramTris;   // 6.52
+                a.gpu += C3D_GetDrawingTime() + (fc.kicks ? fc.kickLeadMs : 0.0f);
+                a.frame += frameMs;
+                a.cpu += cpuMsLast;
+                a.draws += fc.drawCalls;
+                a.tris += fc.tris;
+                ++a.n;
+                a.moved |= movedNow;
+            }
+        }
         if (bench.running && ++bench.warmup > 3) {
             bench.frameMs.push_back(frameMs);
             bench.cpuMs.push_back((float)cpuMsLast);
@@ -2320,9 +3007,10 @@ int main() {
             }
             // VRAM the main loop holds: the top target (colour + depth), the touch screen's, 800x240 / the right eye, the
             // reserve for the other modes, the two portraits (colour + depth24)
-            pc.vramTargets = 240 * 400 * 8 + (bottomT ? 240 * 320 * 4 : 0) + (topWide ? 240 * 800 * 8 : 0) + (topRight ? 240 * 400 * 8 : 0);
+            pc.vramTargets = (top ? 240 * 400 * TOP_BYTES_PER_PIXEL : 0) + (bottomT ? 240 * 320 * 4 : 0) + (topWide ? 240 * 800 * TOP_BYTES_PER_PIXEL : 0) +
+                             (topRight ? 240 * 400 * TOP_BYTES_PER_PIXEL : 0);
             pc.vramReserve = 0;   // (stage 6.5: no reserve any more)
-            pc.vramPortraits = (2 * ui::kPortraitSize * ui::kPortraitSize + ui::kDollSize * ui::kDollSize) * 7;
+            pc.vramPortraits = portrait::vramBytes();   // 6.98: what is really held (was the full size even when off)
             pc.cmdBufBytes = C3D_DEFAULT_CMDBUF_SIZE * 8;
             perf::second(pc);
         }

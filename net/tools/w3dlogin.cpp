@@ -3,7 +3,7 @@
 // character and (stage 5) walks, tracks world objects and records packets.
 //
 //   w3dlogin <server[:3724]> <account> [password] [--realm N] [--char N] [--stay SEC]
-//            [--protocol 3|8] [--ping SEC] [--walk] [--log FILE] [--objects N] [--out FILE]
+//            [--protocol 3|8] [--turtle] [--ping SEC] [--walk] [--log FILE] [--objects N] [--out FILE]
 //   w3dlogin --replay FILE [--objects N]     parse a recorded session offline
 //   --walk     walk a closed ~10 yd route at server speed (watch it from a second client)
 //   --fight N  target the nearest living unit whose name contains N, walk up to it, auto-attack until it
@@ -849,7 +849,7 @@ int main(int argc, char** argv) {
     }
     if (argc < 3) {
         sayLine("usage: w3dlogin <server[:port]> <account> [password] [--realm N] [--char N] [--stay SEC]\n"
-                  "                [--protocol 3|8] [--ping SEC] [--walk] [--fight NAME] [--say TEXT]... [--cast ID]... [--spells FILE] [--log FILE]\n"
+                  "                [--protocol 3|8] [--turtle] [--ping SEC] [--walk] [--fight NAME] [--say TEXT]... [--cast ID]... [--spells FILE] [--log FILE]\n"
                   "                [--factions FILE] [--life] [--trade] [--party] [--survey]\n"
                   "                [--objects N] [--out FILE]\n"
                   "       w3dlogin --replay FILE [--objects N] [--out FILE]");
@@ -875,6 +875,7 @@ int main(int argc, char** argv) {
         else if (a == "--stay") stay = atoi(next().c_str());
         else if (a == "--ping") pingSec = atoi(next().c_str());
         else if (a == "--protocol") ver.authProtocol = (uint8_t)atoi(next().c_str());
+        else if (a == "--turtle") { const uint8_t pr = ver.authProtocol; ver = ClientVersion::turtle(); ver.authProtocol = pr; }   // 6.58
         else if (a == "--walk") walk = true;
         else if (a == "--fight") { fight = true; fightName = next(); }
         else if (a == "--life") { lifeTest = true; autoLoot = false; }

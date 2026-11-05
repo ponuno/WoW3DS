@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <chrono>
+static unsigned g_gtvSeen = 0, g_gtvBad = 0, g_gtvReserve = 0, g_gtvBuffers = 0;   // 6.52
 #include <fstream>
 #include <map>
 #include <regex>
@@ -48,6 +49,8 @@ static int g_maxRingTiles = 0;   // 6.31
 static size_t g_farLoadedFar = 0, g_farLoadedWrong = 0;   // 6.34c
 static std::map<int, int> g_ownMax;   // 6.33: owned doodads per tile (most seen)
 static size_t g_ownWrong = 0;
+static int g_worldOffProblems = 0;   // 6.37
+
 int main(int argc, char** argv) {
     if (argc < 2) return 2;
     PackIndex index;
@@ -119,8 +122,32 @@ int main(int argc, char** argv) {
             cam[0] = cx; cam[1] = cy + f * std::atof(std::getenv("CAM_WALK")); cam[2] = 60.0f;
         }
         float dist = std::getenv("CAM_WALK") ? 250.0f : (f / 500) % 2 ? 800.0f : 250.0f;   // switches the 3x3 / 5x5 radius too
+        // 6.37: WORLD_OFF=a,b - the login screens between frames a and b: no world tile is read, the loaded ones go
+        static int offA = -1, offB = -1;
+        static bool offParsed = false;
+        if (!offParsed) { offParsed = true; if (const char* wo = std::getenv("WORLD_OFF")) std::sscanf(wo, "%d,%d", &offA, &offB); }
+        const bool worldOff = f >= offA && f < offB;
+        streamerSetWorldWanted(!worldOff);
         if (inFrame) { streamerUpdate(cam, dist, true); streamerUploadTextures(); }   // stage 6: the main loop's way
         else streamerUpdate(cam, dist);
+        if (offA >= 0) {
+            static uint32_t loadsAtOff = 0, requestedInOff = 0, readyAtEnd = 0, loadsAfter = 0;
+            static bool reported = false;
+            const StreamStats& ws = streamerStats();
+            if (f == offA + 60) loadsAtOff = ws.tileLoads;   // (tiles already in flight may still land in the first frames)
+            if (worldOff && f > offA + 60) {
+                if (ws.tilesReady > 0) ++requestedInOff;
+                if (f == offB - 1) readyAtEnd = (uint32_t)ws.tilesReady + (uint32_t)ws.tilesLoading;
+            }
+            if (f == offB + 400) loadsAfter = ws.tileLoads;
+            if (!reported && f == offB + 400) {
+                reported = true;
+                const bool good = requestedInOff == 0 && readyAtEnd == 0 && loadsAfter > loadsAtOff;
+                std::printf("WORLD OFF (login screens): frames with world tiles %u, tiles left at the end %u, loads after %u -> %u: %s\n",
+                            requestedInOff, readyAtEnd, loadsAtOff, loadsAfter, good ? "PASS" : "FAIL");
+                if (!good) ++g_worldOffProblems;
+            }
+        }
         {   // 6.24: the far ground - drawn only for tiles without their detailed ground, its buffers always valid
             static std::vector<FarDraw> far;
             GpuTex* atlas = nullptr;
@@ -441,6 +468,31 @@ int main(int argc, char** argv) {
             }
             memWalks++;
         }
+        if (std::getenv("GTV") && inFrame) {   // 6.52: the GPU test's vertex copies in VRAM - reserve, copies equal to their source, release
+            if (f == 300) streamerGtVram(1);
+            if (f == 400) streamerGtVram(2);
+            if (f >= 400 && f < 900)
+                for (Tile* t : streamerReadyTiles()) {
+                    for (const Instance& in : t->instances) {
+                        const Model* m = in.model;
+                        if (!m || !m->drawable || !m->blob) continue;
+                        if (const uint8_t* c = streamerGtVramCopy(m->blob, m->size)) {
+                            ++g_gtvSeen;
+                            if (memcmp(c, m->blob, m->size) != 0) { if (!g_gtvBad++) std::printf("gtv: a copy differs from its model\n"); }
+                        }
+                    }
+                    for (const Tile::StaticBatch& b : t->sbatches) {
+                        const uint8_t* cv = streamerGtVramCopy(b.v, b.vBytes);
+                        if (cv && memcmp(cv, b.v, b.vBytes) != 0) ++g_gtvBad;
+                    }
+                }
+            if (f == 900) {
+                const GtVramStats& gs = streamerGtVramStats();
+                g_gtvReserve = gs.reserveBytes;
+                g_gtvBuffers = gs.copiesTotal;
+                streamerGtVram(0);
+            }
+        }
         streamerEndFrame();
         std::this_thread::sleep_for(std::chrono::microseconds(pace));
     }
@@ -711,6 +763,13 @@ int main(int argc, char** argv) {
             std::printf("HEAP RESERVE (%s): %s\n", he, good ? "PASS" : "FAIL");
             if (!good) ++problems;
         }
+    }
+    problems += g_worldOffProblems;
+    if (std::getenv("GTV") && inFrame) {   // 6.52
+        const bool good = g_gtvReserve > 0 && g_gtvBad == 0 && (g_gtvBuffers > 0) == (g_gtvSeen > 0) && vramSpaceFree() > 0;
+        std::printf("gtv (6.52): reserve %u KB, %u buffers copied, %u draws seen from copies, %u differing: %s\n", g_gtvReserve / 1024,
+                    g_gtvBuffers, g_gtvSeen, g_gtvBad, good ? "PASS" : "FAIL");
+        if (!good) ++problems;
     }
     bool ok = problems == 0 && leakLin == 0 && leakTex == 0 && s.tileLoads > 0 && walkBad == 0 && chunkProblems == 0 && chunksSeen > 0 && bldgProblems == 0 && bldgCompleteClosed == 0;
     std::printf("STREAMER: %s\n", ok ? "PASS" : "FAIL");

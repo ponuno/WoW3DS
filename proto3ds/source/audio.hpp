@@ -21,6 +21,10 @@ void stopTag(uint64_t tag);
 const char* soundsTxt();                            // sounds.txt next to world.w3ds (for SoundWorld::load)
 const char* status();                               // one line for the debug page
 uint32_t area();                                    // the area id the player is in (0 unknown)
+// 7.04: an intro cinematic's narration (a file of sound/music/, from cinematics.txt) on the music voice, at once and once;
+// nullptr / "" stops it (the zone music comes back). cinematicSoundDone: it played out (or none is playing).
+void playCinematic(const char* musicFile, int volume100 = 100);
+bool cinematicSoundDone();
 
 // Stage 6 (perf log): where the sound's memory and time go.
 struct Stats {

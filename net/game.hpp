@@ -85,8 +85,40 @@ public:
     void addCooldown(uint32_t id, const Cooldown& c) { cd_[id] = c; }
     size_t cooldownCount() const { return cd_.size(); }
     size_t groundCount() const { return ground_.size(); }
+    // 6.40: school of magic of a spell (1 holy, 2 fire, 3 nature, 4 frost, 5 shadow, 6 arcane; 0 physical / unknown; spells.txt "@school id n")
+    uint8_t school(uint32_t id) const { auto it = school_.find(id); return it == school_.end() ? 0 : it->second; }
+    void addSchool(uint32_t id, uint8_t s) { school_[id] = s; }
+    // 6.64: cast time of a spell in ms (spells.txt "@cast id ms"; 0 = instant / unknown): our cast bar and animation start on send
+    uint32_t castMs(uint32_t id) const { auto it = castMs_.find(id); return it == castMs_.end() ? 0 : it->second; }
+    void addCastMs(uint32_t id, uint32_t ms) { castMs_[id] = ms; }
+    size_t castMsCount() const { return castMs_.size(); }
+    // 6.87: how a spell takes part in auto-attack (spells.txt "@combat id kind", Spell.dbc DmgClass / Attributes):
+    // kCombatMelee - a melee ability at an enemy: the original client starts auto-attack with it (Sinister Strike,
+    // Heroic Strike, Hamstring ...); kCombatRanged - fired with the ranged weapon (Auto Shot, Shoot, Arcane Shot ...: the
+    // shooting animation); kCombatStops - SPELL_ATTR_STOP_ATTACK_TARGET (Gouge, Sap ...): auto-attack ends.
+    enum : uint8_t { kCombatMelee = 1, kCombatRanged = 2, kCombatStops = 4 };
+    uint8_t combat(uint32_t id) const { auto it = combat_.find(id); return it == combat_.end() ? 0 : it->second; }
+    void addCombat(uint32_t id, uint8_t k) { combat_[id] = k; }
+    size_t combatCount() const { return combat_.size(); }
+    // 6.87: range of a spell at a unit (spells.txt "@range id min max", yards): nullptr = not known / self / melee reach
+    struct Range { float min = 0, max = 0; };
+    const Range* range(uint32_t id) const { auto it = range_.find(id); return it == range_.end() ? nullptr : &it->second; }
+    void addRange(uint32_t id, float mn, float mx) { range_[id] = Range{mn, mx}; }
+    // 6.95: passive spells (spells.txt "@passive id"): shown in the book, never bound to a button
+    bool passive(uint32_t id) const { return passive_.count(id) != 0; }
+    void addPassive(uint32_t id) { passive_.insert(id); }
+    // 6.99: spells the game's book never lists (spells.txt "@hidden id": do-not-display, proficiencies, languages)
+    bool hidden(uint32_t id) const { return hidden_.count(id) != 0; }
+    void addHidden(uint32_t id) { hidden_.insert(id); }
+    size_t passiveCount() const { return passive_.size(); }
     SpellNames();
 private:
+    std::unordered_set<uint32_t> passive_;
+    std::unordered_set<uint32_t> hidden_;
+    std::unordered_map<uint32_t, Range> range_;
+    std::unordered_map<uint32_t, uint8_t> combat_;
+    std::unordered_map<uint32_t, uint8_t> school_;
+    std::unordered_map<uint32_t, uint32_t> castMs_;
     std::unordered_map<uint32_t, std::pair<std::string, std::string>> names_;
     std::unordered_map<uint32_t, Ground> ground_;
     std::unordered_set<uint32_t> selfCast_;
@@ -111,6 +143,7 @@ struct CastState {
     bool active = false;
     uint32_t spell = 0, startMs = 0, durMs = 0;   // durMs 0 = instant / unknown
     uint64_t target = 0;                           // SpellCastTargets unit / object (0 = itself / the ground)
+    bool predicted = false;                        // 6.64: started by us on send (cast time from spells.txt), not yet confirmed by SMSG_SPELL_START
 };
 
 // ---------------------------------------------------------------- items (stage 5.10)
@@ -162,6 +195,18 @@ struct LootWindow {
     uint32_t money = 0;
     std::vector<LootSlot> items;        // what is still there (removed slots disappear)
 };
+
+// ---------------------------------------------------------------- group loot rolls (6.88)
+// SMSG_LOOT_START_ROLL (vMaNGOS Group::SendLootStartRoll): an item of a group's loot over the threshold is rolled for; each
+// member answers CMSG_LOOT_ROLL (pass / need / greed) before the countdown ends (the server passes for the silent ones).
+struct LootRoll {
+    uint64_t looted = 0;          // the corpse / chest
+    uint32_t slot = 0, itemId = 0, randomProp = 0;
+    uint32_t startMs = 0, countdownMs = 60000;
+    uint8_t voteMask = 0x7;       // 1 pass, 2 need, 4 greed (1.12 sends none: all three)
+    uint32_t leftMs(uint32_t nowMs) const { const uint32_t e = nowMs - startMs; return e >= countdownMs ? 0 : countdownMs - e; }
+};
+enum : uint8_t { kRollPass = 0, kRollNeed = 1, kRollGreed = 2 };
 
 // ---------------------------------------------------------------- gossip (stage 5.10)
 struct GossipOption { uint32_t index = 0; uint8_t icon = 0; bool coded = false; std::string text; };
@@ -468,6 +513,16 @@ public:
     // continent). True once per notice; the new position follows with SMSG_NEW_WORLD (takeTeleport).
     bool takeTransferPending(uint32_t* map);
     uint32_t mapId() const { return map_; }
+    // 6.60: the server's game clock (SMSG_LOGIN_SETTIMESPEED / GAMETIME_*): the realm's time of day, which the sky follows.
+    struct GameClock {
+        bool set = false;
+        float baseMinutes = 0;          // minutes since midnight at the packet
+        uint32_t atMs = 0;              // when it came
+        float minutesPerSec = 1.0f / 60.0f;
+        uint32_t updates = 0;
+    } clock;
+    // Hour of the server's day now (0..24), -1 until the server has said.
+    float gameHour(uint32_t nowMs) const;
     uint64_t selfGuid() const { return self_; }
     std::string selfName;               // from the character list (NPC texts say $N)
     // Our own player object: by GUID once attached, else the object the server flagged as SELF (replays).
@@ -478,6 +533,7 @@ public:
 
     struct Stats {
         uint32_t teleports = 0, newWorlds = 0, speedChanges = 0, roots = 0, queries = 0, packetsOut = 0, flagAcks = 0, areaTriggers = 0;
+        uint32_t addonMessages = 0;   // 6.99: SMSG_MESSAGECHAT in LANG_ADDON (not shown)
     } stats;
 
     // Packet tap (both directions) for recording sessions: dir 0 = server->client, 1 = client->server.
@@ -539,6 +595,7 @@ public:
     uint64_t targetOf(uint64_t guid) const;            // UNIT_TARGET of a unit (assist)
     void startAttack(uint32_t nowMs);                  // CMSG_ATTACKSWING at the target
     void stopAttack(uint32_t nowMs);                   // CMSG_ATTACKSTOP
+    void combatAfterCast(uint32_t spell, uint32_t nowMs);   // 6.87: a melee ability starts auto-attack (spells.txt @combat)
     bool attackWanted() const { return attackWanted_; }   // we asked to auto-attack
     bool attacking() const { return attackOn_; }          // the server confirmed (SMSG_ATTACKSTART)
     uint16_t lastAttackError() const { return attackError_; }   // SMSG_ATTACKSWING_* opcode, 0 = none
@@ -592,6 +649,9 @@ public:
     uint64_t lootOpen() const { return lootGuid_; }
     bool autoLoot = false;
     LootWindow lootWindow;
+    // 6.88: group loot rolls waiting for our answer (oldest first); answered / won / all passed / timed out ones leave
+    std::vector<LootRoll> lootRolls;
+    void rollLoot(size_t index, uint8_t vote, uint32_t nowMs);   // CMSG_LOOT_ROLL: kRollPass / kRollNeed / kRollGreed
     void takeLoot(size_t index, uint32_t nowMs);       // index into lootWindow.items (CMSG_AUTOSTORE_LOOT_ITEM)
     void takeLootMoney(uint32_t nowMs);                // CMSG_LOOT_MONEY
     void takeAllLoot(uint32_t nowMs);                  // money + every item, then release
@@ -610,8 +670,9 @@ public:
     std::vector<InvItem> inventory() const;
     uint32_t money() const;                            // PLAYER_FIELD_COINAGE (copper)
     uint32_t freeBagSlots() const;
-    void useItem(const InvItem& it, uint32_t nowMs);   // CMSG_USE_ITEM on self, or on the selected unit / object when its spell needs a target
+    void useItem(const InvItem& it, uint32_t nowMs, const WorldObject* forced = nullptr);   // forced: the object a quest item goes on (6.75)   // CMSG_USE_ITEM on self, or on the selected unit / object when its spell needs a target
     uint32_t itemTargetSpell(uint32_t entry) const;    // the on-use spell when it needs a target (quest items used on a creature), else 0
+    const WorldObject* objectForItem() const;          // 6.59b: the nearest usable object within 10 yd (an item's target when none is selected)
     // UI stage 10: an item whose spell is placed on the ground (grenades, bombs, target dummies): its on-use spell, or 0
     uint32_t itemGroundSpell(uint32_t entry) const;
     void useItemAt(const InvItem& it, const float pos[3], uint32_t nowMs);
@@ -632,7 +693,7 @@ public:
     void useGameObject(uint64_t guid, uint32_t nowMs);   // CMSG_GAMEOBJ_USE
     // How a game object is used (chests, herbs and ore are opened by casting the OPEN_LOCK spell that matches their
     // lock, locks.txt): the prompt verb, the spell (0 = CMSG_GAMEOBJ_USE) and, when we cannot, why not.
-    struct ObjectAction { const char* verb = nullptr; uint32_t spell = 0; std::string why; };
+    struct ObjectAction { const char* verb = nullptr; uint32_t spell = 0; std::string why; bool weak = false; };   // weak: not flagged usable for our quest
     ObjectAction objectAction(const WorldObject& o) const;
     LockTable locks;                                     // locks.txt
     // Stage 5.28: areatriggers.txt. Call every frame with our feet position while in the world (not during a load, not on a
@@ -657,7 +718,9 @@ public:
     // Sounds in the world (proto3ds/source/sound_world.cpp turns them into positioned sounds): melee swings,
     // casts starting / going off (with up to 4 hit targets) / failing.
     struct WorldSound {
-        enum Kind : uint8_t { Melee, SpellStart, SpellGo, SpellFail };
+        // 6.95: SpellDamage - a spell / periodic tick hurt dst (victimState = the school mask, hitInfo 1 = periodic);
+        // Environment - dst took environmental damage (victimState = SMSG_ENVIRONMENTALDAMAGELOG type: fall, lava, drowning ...)
+        enum Kind : uint8_t { Melee, SpellStart, SpellGo, SpellFail, SpellDamage, Environment };
         Kind kind = Melee;
         uint64_t src = 0, dst = 0;
         uint32_t spell = 0, hitInfo = 0, victimState = 0, castMs = 0;
@@ -698,6 +761,11 @@ public:
     Life life() const;                                  // from our health and PLAYER_FLAGS_GHOST
     void releaseSpirit(uint32_t nowMs);                // CMSG_REPOP_REQUEST
     CorpseInfo corpse;                                  // where our body lies (MSG_CORPSE_QUERY / the corpse object)
+    // 6.82: the nearest spirit healer seen while a ghost (kept when it leaves the range, so we can run back to it)
+    struct HealerSpot { bool known = false; uint32_t map = 0; float x = 0, y = 0, z = 0; uint64_t guid = 0; };
+    HealerSpot healer;
+    float healerDistance(const float pos[3]) const;    // yards (2D), -1 when none seen or on another map
+    std::string talkToHealer(const float pos[3], uint32_t nowMs);   // the spirit healer's menu (the server answers SPIRIT_HEALER_CONFIRM); "" or why not
     void queryCorpse(uint32_t nowMs);                  // MSG_CORPSE_QUERY
     uint32_t reclaimDelayLeftMs(uint32_t nowMs) const { return nowMs < reclaimAt_ ? reclaimAt_ - nowMs : 0; }
     float corpseDistance(const float pos[3]) const;    // yards (2D), -1 when unknown or on another map
@@ -735,6 +803,8 @@ public:
     // Casts at the current target (or self when there is none). "Attack" toggles auto-attack instead.
     // Returns false and adds a local line when it cannot be sent (unknown spell, cooldown, busy casting).
     bool castSpell(uint32_t spell, uint32_t nowMs);
+    // 6.64: our own cast starts on send, not when the server answers (rolled back by SMSG_CAST_FAILED / SPELL_FAILURE)
+    void predictCast(uint32_t spell, uint64_t target, uint32_t nowMs);
     void cancelCast(uint32_t nowMs);                  // CMSG_CANCEL_CAST
     // UI stage 10: a spell at a point on the ground (TARGET_FLAG_DEST_LOCATION 0x40 + x, y, z); same checks as castSpell.
     bool castSpellAt(uint32_t spell, const float pos[3], uint32_t nowMs);
@@ -885,6 +955,12 @@ public:
     uint32_t classId() const;                            // UNIT_BYTES_0 byte 1
     // ---- skills (stage 6.19): the skill page - weapon skills, professions, languages ... with their progress
     SkillTable skills;                                   // skills.txt
+    RecipeTable recipes;                                 // recipes.txt (6.38): the profession window
+    // 6.38: the recipes of a skill that the spell book knows (several ranks of one recipe do not exist in the professions)
+    std::vector<const Recipe*> knownRecipes(uint32_t skill) const;
+    uint32_t itemCount(uint32_t entry) const;            // how many of an item the bags hold (the backpack and the bags, not worn)
+    // An enchant: CMSG_CAST_SPELL with TARGET_FLAG_ITEM and the item's guid; same checks as castSpell.
+    bool castSpellOnItem(uint32_t spell, uint64_t itemGuid, uint32_t nowMs);
     SpellDescTable spellDesc;                            // spelldesc.bin (6.20): descriptions of spells, numbers filled in
     struct SkillState { uint32_t id = 0; uint16_t value = 0, max = 0; int16_t tempBonus = 0, permBonus = 0; };
     std::vector<SkillState> playerSkills() const;        // the 128 skill slots of the player's fields, empty ones left out
@@ -939,6 +1015,11 @@ public:
     uint32_t petCooldownLeftMs(uint32_t spell, uint32_t nowMs) const;
     uint32_t petCooldownTotalMs(uint32_t spell) const;
     void petDismiss(uint32_t nowMs);                    // CMSG_PET_ABANDON: a warlock's demon goes away; a hunter's pet is gone for good
+    // 7.07: a hunter's pet sent away the way the original does it - the Dismiss Pet spell (2641); Call Pet brings it back.
+    // False + a line when the spell is not known (the pet window then offers only Abandon).
+    bool petDismissHunter(uint32_t nowMs);
+    bool petCanDismissHunter() const;                   // a hunter's pet and Dismiss Pet in the book
+    static constexpr uint32_t kSpellDismissPet = 2641;
     bool petCanRename() const;                          // UNIT_FLAG_PET_RENAME on the pet (hunter pets, once)
     bool petCanAbandon() const;                         // a hunter's pet
     bool petRename(const std::string& name, uint32_t nowMs);   // CMSG_PET_RENAME
@@ -965,6 +1046,8 @@ private:
     void updatePet(uint32_t nowMs);
     std::unordered_map<uint32_t, uint32_t> petCdEnd_, petCdLen_;   // spell -> local time / length (ms)
     uint32_t petGoneMs_ = 0;
+    int petMoodSeen_ = 0;          // 7.07: the happiness last seen (0 unknown): a warning when it drops to unhappy
+    uint32_t petMoodWarnMs_ = 0;   // the last unhappy warning (repeated every 90 s while it lasts)
     std::unordered_map<uint32_t, std::string> guildNames_;   // guild id -> name (SMSG_GUILD_QUERY_RESPONSE)
     std::unordered_map<uint32_t, uint32_t> guildAskMs_;      // guild id -> when we last asked
     uint32_t guildScanMs_ = 0;
@@ -1000,6 +1083,9 @@ private:
     bool bindPending_ = false;
     bool handleSpells(uint16_t opcode, const Bytes& data, uint32_t nowMs);
     bool handleItems(uint16_t opcode, const Bytes& data, uint32_t nowMs);
+    void dropRoll(uint64_t looted, uint32_t slot);           // 6.88
+    void expireRolls(uint32_t nowMs);
+    void lootLine(const std::string& text, uint32_t entry, uint32_t nowMs);
     bool handleLife(uint16_t opcode, const Bytes& data, uint32_t nowMs);
     void updateLife(uint32_t nowMs);                   // life-state transitions (died, released, alive again)
     void sendItemQueries(uint32_t nowMs);

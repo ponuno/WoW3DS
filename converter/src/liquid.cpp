@@ -586,66 +586,82 @@ void emitLiquids(const Options& o, const DataDir* data, PackWriter& pack, ConvSt
             for (const auto& q : tl.quads) used[q.kind & 3] = true;
             for (int k = 0; k < 4; ++k) if (used[k]) tint[k] = liquidFrames(o, data, pack, k, st).tint;
         }
-        for (auto& [ci, c] : tl.chunks) {
-            const int cy = ci / 16, cx = ci % 16, region = (cy / 4) * 4 + cx / 4;
-            // corner colours per cell, then greedy rectangles over cells of one liquid, flat at one height, one colour
-            uint8_t col[64][4][4];
-            for (int cell = 0; cell < 64; ++cell) {
-                if (c.cell[cell] == W3D_LIQ_DRY) continue;
-                const int kind = c.cell[cell] & W3D_LIQ_KIND;
-                for (int q = 0; q < 4; ++q) shade(look[kind], kind, c.depth[cell][q], tint[kind], col[cell][q]);
-            }
-            bool done[64] = {};
-            auto uniform = [&](int cell) -> bool {   // flat, one colour: it can merge with its like
-                if (c.cell[cell] == W3D_LIQ_DRY) return false;
-                for (int q = 1; q < 4; ++q)
-                    if (c.h[cell][q] != c.h[cell][0] || std::memcmp(col[cell][q], col[cell][0], 4)) return false;
-                return true;
-            };
-            for (int r = 0; r < 8; ++r)
-                for (int k = 0; k < 8; ++k) {
-                    const int cell = r * 8 + k;
-                    if (done[cell] || c.cell[cell] == W3D_LIQ_DRY) continue;
+        // 6.59c: the draw from the terrain's chunks plus every building cell as its own quad; when that passes 65535 vertices (16-bit
+        // indices: Turtle WoW's maps lay big or stacked building waters, 400 000 vertices in a tile) from the query grid instead - the
+        // same 4-yd cells the swimming uses, buildings rasterised in, topmost surface per cell, merged like the terrain's
+        auto draw = [&](const std::map<int, ConvStats::LiquidChunk>& chunks, bool quadsToo) {
+            verts.clear();
+            lists.clear();
+            for (auto& [ci, c] : chunks) {
+                if (ci < 0 || ci >= 256) continue;
+                const int cy = ci / 16, cx = ci % 16, region = (cy / 4) * 4 + cx / 4;
+                // corner colours per cell, then greedy rectangles over cells of one liquid, flat at one height, one colour
+                uint8_t col[64][4][4];
+                for (int cell = 0; cell < 64; ++cell) {
+                    if (c.cell[cell] == W3D_LIQ_DRY) continue;
                     const int kind = c.cell[cell] & W3D_LIQ_KIND;
-                    int r1 = r + 1, k1 = k + 1;
-                    if (uniform(cell)) {
-                        auto same = [&](int rr, int kk) {
-                            const int o2 = rr * 8 + kk;
-                            return !done[o2] && uniform(o2) && (c.cell[o2] & W3D_LIQ_KIND) == kind && c.h[o2][0] == c.h[cell][0] &&
-                                   !std::memcmp(col[o2][0], col[cell][0], 4);
-                        };
-                        while (k1 < 8 && same(r, k1)) ++k1;
-                        bool grow = true;
-                        while (grow && r1 < 8) {
-                            for (int kk = k; kk < k1 && grow; ++kk) grow = same(r1, kk);
-                            if (grow) ++r1;
-                        }
-                    }
-                    for (int rr = r; rr < r1; ++rr)
-                        for (int kk = k; kk < k1; ++kk) done[rr * 8 + kk] = true;
-                    // corners of the rectangle (r,k) (r,k1) (r1,k1) (r1,k), each from the cell it belongs to
-                    const int vr[4] = {r, r, r1, r1}, vk[4] = {k, k1, k1, k};
-                    const int fromCell[4] = {r * 8 + k, r * 8 + k1 - 1, (r1 - 1) * 8 + k1 - 1, (r1 - 1) * 8 + k};
-                    const int fromQ[4] = {0, 1, 3, 2};
-                    float p[4][3];
-                    uint8_t cc[4][4];
-                    for (int q = 0; q < 4; ++q) {
-                        p[q][0] = maxX - (cy * 8 + vr[q]) * kCell;
-                        p[q][1] = maxY - (cx * 8 + vk[q]) * kCell;
-                        p[q][2] = c.h[fromCell[q]][fromQ[q]];
-                        std::memcpy(cc[q], col[fromCell[q]][fromQ[q]], 4);
-                    }
-                    quad(region, kind, p, cc);
+                    for (int q = 0; q < 4; ++q) shade(look[kind], kind, c.depth[cell][q], tint[kind], col[cell][q]);
                 }
-        }
-        for (const auto& q : tl.quads) {
-            float mx = 0, my = 0;
-            for (auto& p : q.p) { mx += 0.25f * p[0]; my += 0.25f * p[1]; }
-            const int gx = std::clamp((int)((maxX - mx) / kCell), 0, 127), gy = std::clamp((int)((maxY - my) / kCell), 0, 127);
-            const int region = (gx / 32) * 4 + gy / 32;
-            uint8_t cc[4][4];
-            for (int k = 0; k < 4; ++k) shade(look[q.kind], q.kind, 3.5f, tint[q.kind], cc[k]);
-            quad(region, q.kind, q.p, cc);
+                bool done[64] = {};
+                auto uniform = [&](int cell) -> bool {   // flat, one colour: it can merge with its like
+                    if (c.cell[cell] == W3D_LIQ_DRY) return false;
+                    for (int q = 1; q < 4; ++q)
+                        if (c.h[cell][q] != c.h[cell][0] || std::memcmp(col[cell][q], col[cell][0], 4)) return false;
+                    return true;
+                };
+                for (int r = 0; r < 8; ++r)
+                    for (int k = 0; k < 8; ++k) {
+                        const int cell = r * 8 + k;
+                        if (done[cell] || c.cell[cell] == W3D_LIQ_DRY) continue;
+                        const int kind = c.cell[cell] & W3D_LIQ_KIND;
+                        int r1 = r + 1, k1 = k + 1;
+                        if (uniform(cell)) {
+                            auto same = [&](int rr, int kk) {
+                                const int o2 = rr * 8 + kk;
+                                return !done[o2] && uniform(o2) && (c.cell[o2] & W3D_LIQ_KIND) == kind && c.h[o2][0] == c.h[cell][0] &&
+                                       !std::memcmp(col[o2][0], col[cell][0], 4);
+                            };
+                            while (k1 < 8 && same(r, k1)) ++k1;
+                            bool grow = true;
+                            while (grow && r1 < 8) {
+                                for (int kk = k; kk < k1 && grow; ++kk) grow = same(r1, kk);
+                                if (grow) ++r1;
+                            }
+                        }
+                        for (int rr = r; rr < r1; ++rr)
+                            for (int kk = k; kk < k1; ++kk) done[rr * 8 + kk] = true;
+                        // corners of the rectangle (r,k) (r,k1) (r1,k1) (r1,k), each from the cell it belongs to
+                        const int vr[4] = {r, r, r1, r1}, vk[4] = {k, k1, k1, k};
+                        const int fromCell[4] = {r * 8 + k, r * 8 + k1 - 1, (r1 - 1) * 8 + k1 - 1, (r1 - 1) * 8 + k};
+                        const int fromQ[4] = {0, 1, 3, 2};
+                        float p[4][3];
+                        uint8_t cc[4][4];
+                        for (int q = 0; q < 4; ++q) {
+                            p[q][0] = maxX - (cy * 8 + vr[q]) * kCell;
+                            p[q][1] = maxY - (cx * 8 + vk[q]) * kCell;
+                            p[q][2] = c.h[fromCell[q]][fromQ[q]];
+                            std::memcpy(cc[q], col[fromCell[q]][fromQ[q]], 4);
+                        }
+                        quad(region, kind, p, cc);
+                    }
+            }
+            if (quadsToo) for (const auto& q : tl.quads) {
+                float mx = 0, my = 0;
+                for (auto& p : q.p) { mx += 0.25f * p[0]; my += 0.25f * p[1]; }
+                const int gx = std::clamp((int)((maxX - mx) / kCell), 0, 127), gy = std::clamp((int)((maxY - my) / kCell), 0, 127);
+                const int region = (gx / 32) * 4 + gy / 32;
+                uint8_t cc[4][4];
+                for (int k = 0; k < 4; ++k) shade(look[q.kind], q.kind, 3.5f, tint[q.kind], cc[k]);
+                quad(region, q.kind, q.p, cc);
+            }
+        };
+        draw(tl.chunks, true);
+        if (verts.size() > 65535) {
+            const size_t first = verts.size();
+            draw(grid, false);
+            ++st.liquidTilesFromGrid;
+            std::fprintf(stderr, "  liquids of tile %d_%d: %zu vertices, too many - drawn from the 4-yd grid (%zu vertices)\n", tx, ty,
+                         first, verts.size());
         }
         if (verts.empty() || verts.size() > 65535) {
             if (verts.size() > 65535) std::fprintf(stderr, "  liquids of tile %d_%d: %zu vertices, too many (skipped)\n", tx, ty, verts.size());

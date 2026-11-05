@@ -2,6 +2,11 @@
 // release, long press, drag), automatic tabs, confirmations, and every action a button or pad intent stands for.
 // Drawing: game_ui_widgets.cpp (frame, header, tab bar, widgets), game_ui_tabs.cpp, game_ui_windows.cpp.
 #include "game_ui.hpp"
+#include "ui_render.hpp"
+
+// 6.46: "/gputest" typed in the chat (main.cpp asks with gameUiTakeGpuTest)
+static bool g_gpuTestAsk = false;
+bool gameUiTakeGpuTest() { const bool r = g_gpuTestAsk; g_gpuTestAsk = false; return r; }
 
 #include <math.h>
 #include <stdio.h>
@@ -51,11 +56,11 @@ void GameUi::reset() {
     vendorMode_ = 0; vendorSel_ = -1; vendorPage_ = 0; vendorNpc_ = 0;
     trainerSel_ = -1;
     questScroll_ = 0; rewardPick_ = -1; questKey_ = 0;
-    logView_ = 0; logSel_ = 0; tracked_ = 0;
+    logView_ = 0; logSel_ = 0; watch_.clear(); watchLoaded_ = false; watchReadyMs_ = 0; logIds_.clear();
     subBags_ = subSpells_ = subSocial_ = subSettings_ = 0;
     chatChannel_ = chatScroll_ = 0;
     phrases_ = false;
-    mapMode_ = 0; mapZoom_ = 1;
+    mapMode_ = 0; mapZoom_ = 1; mapPanned_ = false; mapPickMap_ = mapPickArea_ = 0; mapUnits_ = false; mapQuests_ = true;
     talentTree_ = 0; talentSel_ = -1; socialSel_ = -1;
     press_ = Press();
     drag_ = Drag();
@@ -70,10 +75,12 @@ void GameUi::reset() {
 }
 
 GameUi::Panel GameUi::panel(const w3n::GameSession& g) const {
-    if (g.life() != w3n::Life::Alive || g.resurrectOffer.active || g.spiritHealerConfirm) return Panel::Death;
+    // 6.82: the death page is the Combat tab's content; the other tabs work as always (it used to cover the whole screen)
+    if (tab_ == Tab::Combat && (g.life() != w3n::Life::Alive || g.resurrectOffer.active || g.spiritHealerConfirm)) return Panel::Death;
     if (kb_.on) return Panel::Keyboard;
     if (open_ == Panel::Confirm) return Panel::Confirm;
     if (!g.groupInviteFrom.empty() || !g.guildInviteFrom.empty() || g.duel.challenged || g.duel.asked) return Panel::Invite;
+    if (!g.lootRolls.empty()) return Panel::Roll;   // 6.88: a group loot roll waits for our choice (touch only: a key could roll by mistake)
     if (g.trade.phase != w3n::TradeState::Phase::None) return Panel::Trade;
     if (g.lootWindow.open) return Panel::Loot;
     if (open_ == Panel::ItemInfo || open_ == Panel::SpellInfo) return open_;   // a tooltip over any window
@@ -101,6 +108,8 @@ void GameUi::setTab(Tab t) {
         chatScroll_ = 0;
         phrases_ = false;
         socialSel_ = -1;
+        bindArmed_ = false;   // 6.57g: a "Bind" begun in the bags must not stay over the next tab (its item's name on the crafting window)
+        drag_ = Drag();
     }
     if (t == Tab::Gear) { tab_ = Tab::Bags; subBags_ = 1; }
     else {
@@ -109,6 +118,14 @@ void GameUi::setTab(Tab t) {
     }
     if (open_ == Panel::Menu || open_ == Panel::Context || open_ == Panel::Buffs || open_ == Panel::Pet) open_ = Panel::Tabs;
     dirty_ = true;
+}
+
+void GameUi::deathTab(w3n::GameSession& g, const Input& in) {
+    (void)in;
+    const uint8_t key = (uint8_t)((g.life() == w3n::Life::Dead ? 1 : 0) | (g.resurrectOffer.active ? 2 : 0) | (g.spiritHealerConfirm ? 4 : 0));
+    const uint8_t fresh = (uint8_t)(key & ~deathKey_);
+    deathKey_ = key;
+    if (fresh && !pinned_ && tab_ != Tab::Combat) setTab(Tab::Combat);   // a death, an offer, a question: where they are answered
 }
 
 void GameUi::autoTabs(w3n::GameSession& g, const Input& in) {
@@ -135,9 +152,48 @@ std::vector<w3n::InvItem> GameUi::listed(const w3n::GameSession& g) const {
     const bool gear = tab_ == Tab::Gear || (tab_ == Tab::Bags && subBags_ == 1);
     for (const w3n::InvItem& it : g.inventory()) {
         bool eq = it.bag == w3n::kBagSelf && it.slot < w3n::kSlotBackpackFirst;   // equipped + the bags themselves
-        if (gear == eq) out.push_back(it);
+        if (gear != eq) continue;
+        if (!gear && bagFilter_ >= 0) {   // 6.95: one bag only
+            const int home = it.bag == w3n::kBagSelf ? 0 : it.bag - (w3n::kSlotBagFirst - 1);
+            if (home != bagFilter_) continue;
+        }
+        out.push_back(it);
     }
     return out;
+}
+
+// "All", "Pack", or the kind of the bag in that slot: Bag, Quiver, Ammo, Soul, Leather, Herb, Enchant, Engineer
+std::string GameUi::bagLabel(const w3n::GameSession& g, int f) const {
+    if (f < 0) return tr("All bags", "Все сумки");
+    if (f == 0) return tr("Backpack", "Рюкзак");
+    for (const w3n::InvItem& it : g.inventory()) {
+        if (it.bag != w3n::kBagSelf || it.slot != w3n::kSlotBagFirst + f - 1) continue;
+        const w3n::ItemInfo* info = g.itemInfoIfKnown(it.entry);
+        const uint32_t sub = info && info->cls == 1 ? info->subclass : 0;
+        switch (sub) {
+            case 1: return tr("Quiver", "Колчан");
+            case 2: return tr("Ammo pouch", "Подсумок");
+            case 3: return tr("Soul bag", "Сумка душ");
+            case 4: return tr("Leatherwork", "Кожевник.");
+            case 6: return tr("Herb bag", "Травы");
+            case 7: return tr("Enchanting", "Зачарован.");
+            case 8: return tr("Engineering", "Инженер.");
+            case 9: return tr("Keyring", "Ключи");
+            default: return std::string(tr("Bag", "Сумка")) + " " + std::to_string(f);
+        }
+    }
+    return std::string(tr("Bag", "Сумка")) + " " + std::to_string(f);
+}
+
+void GameUi::cycleBagFilter(const w3n::GameSession& g) {
+    for (int n = 0; n < 6; ++n) {
+        bagFilter_ = bagFilter_ >= 4 ? -1 : bagFilter_ + 1;
+        if (bagFilter_ <= 0) break;
+        bool have = false;
+        for (const w3n::InvItem& it : g.inventory()) have = have || (it.bag == w3n::kBagSelf && it.slot == w3n::kSlotBagFirst + bagFilter_ - 1);
+        if (have) break;
+    }
+    selected_ = page_ = 0;
 }
 
 std::vector<w3n::InvItem> GameUi::sellable(const w3n::GameSession& g) const {
@@ -149,8 +205,12 @@ std::vector<w3n::InvItem> GameUi::sellable(const w3n::GameSession& g) const {
 
 std::vector<uint32_t> GameUi::bookSpells(const w3n::GameSession& g) const {
     std::vector<uint32_t> out{w3n::kSpellAttack};
+    // 6.95: spells without an icon are internal (triggers, effects, ranks the game never shows): hidden, except those drawn
+    // with the weapon in hand; only judged when the pack has the icons at all
+    const bool judge = ui::assets().iconCount() > 0;
     for (uint32_t s : g.spells)
-        if (g.spellNames.known(s) && s != w3n::kSpellAttack) out.push_back(s);
+        if (g.spellNames.known(s) && s != w3n::kSpellAttack && !g.spellNames.hidden(s) && (!judge || ui::assets().spellIcon(s).ok() || weaponSpell(g, s, nullptr)))
+            out.push_back(s);
     std::sort(out.begin() + 1, out.end(), [&](uint32_t a, uint32_t b) {
         std::string na = g.spellNames.name(a), nb = g.spellNames.name(b);
         return na != nb ? na < nb : g.spellNames.rank(a) < g.spellNames.rank(b);
@@ -409,6 +469,7 @@ void GameUi::cancelAction(w3n::GameSession& g, const Input& in) {
     if (drag_.active) { drag_ = Drag(); dirty_ = true; return; }
     if (bindArmed_) { bindArmed_ = false; hint("Binding cancelled", in.nowMs); return; }
     if (place_.on) { place_.on = false; dirty_ = true; return; }   // UI stage 10: the ground spell is not cast
+    if (card_) { card_ = false; dirty_ = true; return; }   // 6.91: the item's mini window
     const Panel p = panel(g);
     if (p == Panel::Confirm) { open_ = confirmReturn_; return; }
     if (p == Panel::Menu || p == Panel::Context || p == Panel::ItemInfo || p == Panel::SpellInfo || p == Panel::Buffs ||
@@ -445,16 +506,25 @@ void GameUi::cancelAction(w3n::GameSession& g, const Input& in) {
     if (g.target()) g.setTarget(0, in.nowMs);
 }
 
-void GameUi::openChat(w3n::GameSession& g, const Input& in, Output& out, const std::string& prefix) {
+void GameUi::openChat(w3n::GameSession& g, const Input& in, Output& out, const std::string& prefix, const std::string& link) {
     (void)out;
     // the destination of the Write button decides the prefix (an explicit prefix wins); a typed "/command" is never prefixed
     const std::string pre = prefix.empty() ? chatDestPrefix(g, chatDest_) : prefix;
     const std::string dest = prefix.empty() ? chatDestLabel(g, chatDest_) : std::string();
     g.mover.stopAll(in.nowMs);
-    askText(in, dest.empty() ? std::string(tr("Type a message or /command", "Сообщение или /команда")) : dest + ":", "", false,
-            [pre](w3n::GameSession& gg, uint32_t now, const std::string& text) {
-                if (text.empty()) return;
-                gg.sendTyped(text[0] == '/' ? text : pre + text, now);
+    // 6.94: an item link from the item's card starts the message (the keyboard shows its [Name] in the hint; what is typed follows it);
+    // with a link the text is never taken for a command
+    std::string hint = dest.empty() ? std::string(tr("Type a message or /command", "Сообщение или /команда")) : dest + ":";
+    if (!link.empty()) {
+        const std::vector<w3n::ItemLink> ls = w3n::itemLinks(link);
+        hint = (dest.empty() ? std::string(tr("Message", "Сообщение")) + ":" : hint) + " " + (ls.empty() ? std::string() : ls[0].shown);
+    }
+    askText(in, hint, "", false,
+            [pre, link](w3n::GameSession& gg, uint32_t now, const std::string& text) {
+                if (text.empty() && link.empty()) return;
+                if (link.empty() && text == "/gputest") { g_gpuTestAsk = true; return; }   // 6.46: the GPU test (main.cpp), never sent
+                if (!link.empty()) gg.sendTyped(pre + link + (text.empty() ? std::string() : " " + text), now);
+                else gg.sendTyped(text[0] == '/' ? text : pre + text, now);
             });
 }
 
@@ -465,6 +535,15 @@ const GameUi::Button* GameUi::hit(int x, int y) const {
         if (x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + b.h) return &b;
     }
     return nullptr;
+}
+
+// 6.91: the item's mini window - over whatever is open (a quest, the loot, a roll, the chat ...), closed by a tap or B
+void GameUi::openCard(uint32_t entry, const w3n::InvItem* inst) {
+    if (!entry) return;
+    infoEntry_ = entry;
+    infoItem_ = inst ? *inst : w3n::InvItem();
+    card_ = true;
+    dirty_ = true;
 }
 
 void GameUi::showInfo(w3n::GameSession& g, const Button& b) {
@@ -478,7 +557,7 @@ void GameUi::showInfo(w3n::GameSession& g, const Button& b) {
             for (const w3n::InvItem& it : g.bankItems())
                 if (it.guid == b.guid) { infoItem_ = it; infoEntry_ = it.entry; }
         }
-        if (infoEntry_) open_ = Panel::ItemInfo;
+        if (infoEntry_) { infoReturn_ = Panel::Tabs; card_ = true; }   // 6.91: the mini window over the open one
     } else if (b.infoKind == 2 || b.infoKind == 3) {
         infoSpell_ = b.infoId;
         open_ = Panel::SpellInfo;
@@ -494,14 +573,40 @@ void GameUi::touch(w3n::GameSession& g, const Input& in, Output& out) {
         press_.x0 = press_.x = in.touchX;
         press_.y0 = press_.y = in.touchY;
         press_.startMs = in.nowMs;
-        if (const Button* b = hit(in.touchX, in.touchY)) { press_.button = *b; press_.onButton = true; }
+        const Button* b = hit(in.touchX, in.touchY);
+        // 6.91: the item's mini window goes away with any tap; one outside it also reaches what it touched
+        if (card_ && (!b || (b->act != Act::CardClose && b->act != Act::CardLink))) card_ = false;
+        if (b) { press_.button = *b; press_.onButton = true; }
+        press_.inScroll = qsOn_ && in.touchX >= qsX_ && in.touchX < qsX_ + qsW_ && in.touchY >= qsY_ && in.touchY < qsY_ + qsH_;   // 6.94
+        qsAcc_ = 0;
         dirty_ = true;
     } else if (press_.active && in.touchHeld && !in.touchUp) {
+        const int prevX = press_.x, prevY = press_.y;
+        const bool wasMoved = press_.moved;
         press_.x = in.touchX;
         press_.y = in.touchY;
         if (abs(press_.x - press_.x0) + abs(press_.y - press_.y0) > 8) press_.moved = true;
+        if (press_.onButton && press_.button.act == Act::MapTap && press_.moved && mapSpan_ < 0.999f) {   // 6.69, 6.74: the stylus drags the map
+            // 6.74: the picture follows the stylus one to one. The step is added to the centre kept here (before, it was taken from the
+            // last drawn picture, and the window is redrawn only when marked - so most of the movement was lost), the first step
+            // counts from where the stylus went down, and every step asks for a redraw.
+            const int fx = wasMoved ? prevX : press_.x0, fy = wasMoved ? prevY : press_.y0;
+            const float cu = mapPanned_ ? mapCu_ : mapU0_ + mapSpan_ / 2, cv = mapPanned_ ? mapCv_ : mapV0_ + mapSpan_ / 2;
+            mapCu_ = std::clamp(cu - (float)(press_.x - fx) / (float)mapRectW_ * mapSpan_, mapSpan_ / 2, 1 - mapSpan_ / 2);
+            mapCv_ = std::clamp(cv - (float)(press_.y - fy) / (float)mapRectH_ * mapSpan_, mapSpan_ / 2, 1 - mapSpan_ / 2);
+            mapPanned_ = true;
+            dirty_ = true;
+        }
+        if (press_.inScroll && press_.moved && !drag_.active) {   // 6.94: the quest text follows the finger (a line per 13 px)
+            const int fy = (wasMoved || press_.scrolling) ? prevY : press_.y0;
+            qsAcc_ -= press_.y - fy;
+            press_.scrolling = true;
+            const int step = 13;
+            while (qsAcc_ >= step) { ++questScroll_; qsAcc_ -= step; dirty_ = true; }
+            while (qsAcc_ <= -step) { questScroll_ = std::max(0, questScroll_ - 1); qsAcc_ += step; dirty_ = true; }
+        }
         const Button& b = press_.button;
-        if (press_.onButton && press_.moved && b.dragKind && !drag_.active && !press_.longFired) {
+        if (press_.onButton && press_.moved && b.dragKind && !drag_.active && !press_.longFired && !press_.scrolling) {
             drag_ = Drag();
             drag_.active = true;
             drag_.kind = b.dragKind;
@@ -525,10 +630,11 @@ void GameUi::touch(w3n::GameSession& g, const Input& in, Output& out) {
         if (drag_.active) {
             if (drag_.hoverSlot >= 0) dropOnSlot(in, drag_.hoverSlot, out);
             drag_ = Drag();
-        } else if (press_.onButton && !press_.longFired) {
+        } else if (press_.onButton && !press_.longFired && !press_.scrolling) {   // (6.94: a scroll of the text is not a tap)
             const Button b = press_.button;
             const int slop = 6;
-            if (press_.x >= b.x - slop && press_.x < b.x + b.w + slop && press_.y >= b.y - slop && press_.y < b.y + b.h + slop)
+            if (b.act == Act::MapTap && press_.moved) {}   // 6.69: a drag of the map is not a tap
+            else if (press_.x >= b.x - slop && press_.x < b.x + b.w + slop && press_.y >= b.y - slop && press_.y < b.y + b.h + slop)
                 doAction(g, in, b.act, b.arg, out);
         }
         press_ = Press();
@@ -538,10 +644,86 @@ void GameUi::touch(w3n::GameSession& g, const Input& in, Output& out) {
 
 GameUi::Output GameUi::update(w3n::GameSession& g, const Input& in, bool walking) {
     clicked_ = false;
+    syncWatch(g, in);
     Output out = updateInner(g, in, walking);
     updatePlace(g, in, out);   // UI stage 10: the ground spell's ring follows the C-Stick
     soundEvents(g, in, out);
     return out;
+}
+
+// 6.63: the quest watch: loaded once from the card, kept to the quests in the log (new ones followed while there is room, as the
+// original does on accepting), saved when it changes.
+static const char* kWatchFile = "sdmc:/3ds/w3dproto/quests_followed.txt";
+void GameUi::syncWatch(w3n::GameSession& g, const Input& in) {
+    if (!watchLoaded_) {
+        watchLoaded_ = true;
+        if (FILE* f = fopen(kWatchFile, "rb")) {
+            char buf[256];
+            const size_t n = fread(buf, 1, sizeof buf - 1, f);
+            fclose(f);
+            buf[n] = 0;
+            watch_.parse(buf);
+        }
+        watchReadyMs_ = in.nowMs ? in.nowMs : 1;
+    }
+    std::vector<w3n::QuestLogEntry> log = g.questLog();
+    logIds_.clear();
+    for (const w3n::QuestLogEntry& e : log) logIds_.push_back(e.id);
+    // the log has arrived when it has a quest, or the world has been ours for a while (a really empty log)
+    const bool ready = !logIds_.empty() || (watchReadyMs_ && in.nowMs - watchReadyMs_ > 20000);
+    if (watch_.sync(logIds_, ready)) dirty_ = true;
+    if (watch_.changedSinceSave()) {
+        uiWriteFileAsync(kWatchFile, watch_.serialize());
+        watch_.saved();
+    }
+}
+
+// 6.69: a tap on the map: on the world picture the left half is Kalimdor, the right Eastern Kingdoms; on a continent the zone whose
+// rectangle holds the tapped point (the smallest, as the zone map of our own position is chosen) opens.
+ui::MapView GameUi::zoneUnder(const Input& in, uint32_t mapId, float wx, float wy, uint32_t* shape) const {
+    if (shape) *shape = 0;
+    if (in.zoneAtPoint) {
+        const uint32_t z = in.zoneAtPoint(mapId, wx, wy);
+        if (z) {
+            ui::MapView v = ui::assets().zoneByArea(z);
+            if (v.ok() && v.m->mapId == mapId) {
+                if (shape) *shape = z;
+                return v;
+            }
+        }
+    }
+    return ui::assets().zoneAt(mapId, wx, wy);
+}
+
+void GameUi::mapTap(const Input& in) {
+    const float u = mapU0_ + (float)(press_.x - mapRectX_) / (float)mapRectW_ * mapSpan_;
+    const float v = mapV0_ + (float)(press_.y - mapRectY_) / (float)mapRectH_ * mapSpan_;
+    if (!mapShown_ || mapShown_->mapId == 0xFFFFFFFFu) {   // the world (or its stand-in)
+        mapPickMap_ = u < 0.5f ? 1 : 0;
+        mapPickArea_ = 0;
+        mapMode_ = 3;
+        mapPanned_ = false;
+        return;
+    }
+    if (mapShown_->areaId) return;   // a zone: nothing below it
+    const float wy = mapShown_->left - u * (mapShown_->left - mapShown_->right);
+    const float wx = mapShown_->top - v * (mapShown_->top - mapShown_->bottom);
+    ui::MapView z = zoneUnder(in, mapShown_->mapId, wx, wy, nullptr);   // 7.04: by the zone's shape
+    if (!z.ok() || !z.m->areaId) return;
+    mapPickMap_ = z.m->mapId;
+    mapPickArea_ = z.m->areaId;
+    mapMode_ = 3;
+    mapPanned_ = false;
+}
+
+const questdb::Quest* GameUi::questAreas(uint32_t id) {
+    for (const QuestAreas& c : qareas_) if (c.id == id) return c.ok ? &c.q : nullptr;
+    if (qareas_.size() >= 16) qareas_.erase(qareas_.begin());
+    QuestAreas c;
+    c.id = id;
+    c.ok = qdb_.opened() && qdb_.find(id, &c.q);
+    qareas_.push_back(std::move(c));
+    return qareas_.back().ok ? &qareas_.back().q : nullptr;
 }
 
 // Sounds of the frame: the session's events (loot money, quests, whispers, mail, invites), a level gained, a new
@@ -601,6 +783,7 @@ GameUi::Output GameUi::updateInner(w3n::GameSession& g, const Input& in, bool wa
     out.blockMove = life == w3n::Life::Dead;
     if (in.cfg) { ui::g_lang = in.cfg->lang; bigText_ = in.cfg->bigText; }
     barsView_ = in.bars;
+    craftTick(g, in);   // 6.38: Create All
     if (!gamePage_) {   // the debug page (console): the top-right corner comes back
         if (in.touched && in.touchY < 16 && in.touchX >= 260) { gamePage_ = true; dirty_ = true; }
         return out;
@@ -627,6 +810,7 @@ GameUi::Output GameUi::updateInner(w3n::GameSession& g, const Input& in, bool wa
     if (const w3n::WorldObject* t = g.objects.find(g.target()))
         if (g.enemyLike(*t)) lastHostile_ = g.target();
     touch(g, in, out);
+    deathTab(g, in);
     autoTabs(g, in);
     if (kb_.on) {   // the on-screen keyboard: the character stands still, B closes it
         out.blockMove = out.blockJump = true;
@@ -757,8 +941,10 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
         case Act::Pin: pinned_ = !pinned_; hint(pinned_ ? tr("Tab pinned: no automatic switching", "Вкладка закреплена: без автопереключения")
                                                      : tr("Tabs switch with combat again", "Вкладки снова переключаются по бою"), now); break;
         case Act::SubView:
-            if (tab_ == Tab::Bags) { subBags_ = arg; selected_ = page_ = 0; }
-            else if (tab_ == Tab::Spells) { subSpells_ = arg; page_ = 0; talentSel_ = -1; skillSel_ = 0; }
+            bindArmed_ = false;
+            if (tab_ == Tab::Bags && arg == 10) cycleBagFilter(g);   // 6.95: the bag chip
+            else if (tab_ == Tab::Bags) { subBags_ = arg; selected_ = page_ = 0; }
+            else if (tab_ == Tab::Spells) { subSpells_ = arg; page_ = 0; talentSel_ = -1; skillSel_ = 0; craftPick_ = false; }
             else if (tab_ == Tab::Social) {
                 subSocial_ = arg; socialSel_ = -1; page_ = 0;
                 if (arg == 1) g.requestGuildRoster(now);
@@ -786,6 +972,11 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
         }
         case Act::ResAccept: g.answerResurrect(true, now); break;
         case Act::ResDecline: g.answerResurrect(false, now); break;
+        case Act::HealerTalk: {   // 6.82
+            std::string why = g.talkToHealer(in.pos, now);
+            if (!why.empty()) refuse(g, why, now);
+            break;
+        }
         case Act::HealerYes: g.acceptSpiritHealer(now); break;
         case Act::HealerNo: g.spiritHealerConfirm = 0; break;
         case Act::LootItem: g.takeLoot((size_t)arg, now); break;
@@ -815,6 +1006,26 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
             vendorSel_ = -1;
             break;
         }
+        case Act::VendorSellJunk: {   // 6.95: all grey items of the bags
+            std::vector<w3n::InvItem> items = sellable(g);
+            std::vector<w3n::InvItem> junk;
+            uint32_t total = 0;
+            for (const w3n::InvItem& it : items) {
+                const w3n::ItemInfo* ji = g.itemInfoIfKnown(it.entry);
+                if (ji && !ji->missing && ji->quality == 0 && g.sellValue(it)) { junk.push_back(it); total += g.sellValue(it); }
+            }
+            if (junk.empty()) break;
+            if (!confirmed_ && junk.size() > 1) {
+                char b[96];
+                snprintf(b, sizeof b, "%s %u (%u%s %u%s %u%s)?", tr("Sell grey items:", "Продать хлам:"), (unsigned)junk.size(),
+                         (unsigned)(total / 10000), "g", (unsigned)(total / 100 % 100), "s", (unsigned)(total % 100), "c");
+                confirm(b, Act::VendorSellJunk, 0);
+                break;
+            }
+            for (const w3n::InvItem& it : junk) g.sellItem(it, now);
+            vendorSel_ = -1;
+            break;
+        }
         case Act::VendorBuyback: {
             std::vector<w3n::BuybackItem> bb = g.buybackItems();
             if (vendorSel_ >= 0 && vendorSel_ < (int)bb.size()) { g.buybackItem(bb[vendorSel_], now); vendorSel_ = -1; }
@@ -834,6 +1045,7 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
             if (panel(g) != Panel::Buffs) { infoReturn_ = open_; infoSpell_ = (uint32_t)arg; open_ = Panel::SpellInfo; }
             break;
         case Act::BuffCancel: if (buffSel_ && g.cancelAura(buffSel_, now)) buffSel_ = 0; break;
+        case Act::RollVote: g.rollLoot(0, (uint8_t)arg, now); break;   // 6.88
         case Act::InviteYes:
             if (g.duel.challenged) g.answerDuel(true, now);
             else if (!g.groupInviteFrom.empty()) g.answerGroupInvite(true, now);
@@ -865,8 +1077,25 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
                 if (vendorSel_ >= 0 && vendorSel_ < (int)items.size()) { infoItem_ = items[vendorSel_]; infoEntry_ = infoItem_.entry; }
             } else if (arg >= 100 && arg - 100 < (int)g.questDialog.choices.size()) {
                 infoEntry_ = g.questDialog.choices[arg - 100].item;
+            } else if (arg == 999 && press_.button.infoId) {   // a quest's fixed reward / wanted item: its line
+                infoEntry_ = press_.button.infoId;
             }
-            if (infoEntry_) open_ = Panel::ItemInfo;
+            infoReturn_ = Panel::Tabs;
+            if (infoEntry_) card_ = true;   // 6.91: the mini window, not a page of its own
+            break;
+        }
+        case Act::ItemCard: openCard((uint32_t)arg); break;   // 6.91
+        case Act::CardClose: card_ = false; break;
+        case Act::CardLink: {   // 6.94: "|cffRRGGBB|Hitem:ENTRY:0:0:0|h[Name]|h|r" (the 1.12 form) at the start of a chat message
+            const uint32_t entry = infoEntry_;
+            card_ = false;
+            if (!entry) break;
+            const w3n::ItemInfo* info = g.itemInfo(entry);
+            static const char* kQ[] = {"9d9d9d", "ffffff", "1eff00", "0070dd", "a335ee", "ff8000", "e5cc80"};
+            const unsigned q = info && info->quality < 7 ? (unsigned)info->quality : 1u;
+            const std::string name = g.itemName(entry);
+            const std::string link = std::string("|cff") + kQ[q] + "|Hitem:" + std::to_string(entry) + ":0:0:0|h[" + name + "]|h|r";
+            openChat(g, in, out, "", link);
             break;
         }
         case Act::SpellPick:
@@ -883,7 +1112,10 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
             if (!g.questDialog.choices.empty() && rewardPick_ < 0) refuse(g, "Choose a reward first.", now);
             else g.completeQuest((size_t)std::max(0, rewardPick_), now);
             break;
-        case Act::QuestReward: rewardPick_ = arg; break;
+        case Act::QuestReward:   // 6.91: choosing a reward shows it too
+            rewardPick_ = arg;
+            if (arg >= 0 && arg < (int)g.questDialog.choices.size()) openCard(g.questDialog.choices[arg].item);
+            break;
         case Act::QuestClose: g.closeQuestDialog(now); break;
         case Act::QuestScroll: questScroll_ = std::max(0, questScroll_ + arg); break;
         case Act::LogSelect: logSel_ = arg; logView_ = 1; questScroll_ = 0; break;
@@ -905,7 +1137,9 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
         case Act::LogReputation: logView_ = 2; page_ = 0; break;
         case Act::TrackQuest: {
             std::vector<w3n::QuestLogEntry> log = g.questLog();
-            if (logSel_ >= 0 && logSel_ < (int)log.size()) tracked_ = tracked_ == log[logSel_].id ? 0 : log[logSel_].id;
+            if (logSel_ >= 0 && logSel_ < (int)log.size()) {
+                if (!watch_.toggle(log[logSel_].id)) hint(tr("Only 5 quests can be followed.", "Следить можно за 5 заданиями."), now);
+            }
             break;
         }
         case Act::LogAbandon: {
@@ -917,7 +1151,7 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
                 break;
             }
             g.abandonQuest(e.slot, now);
-            if (tracked_ == e.id) tracked_ = 0;
+            watch_.remove(e.id);
             logView_ = 0;
             break;
         }
@@ -936,6 +1170,10 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
             break;
         case Act::BarCell: useSlot(g, in, arg, out); break;
         case Act::BindSpell:
+            if (g.spellNames.passive((uint32_t)arg)) {   // 6.95: passives are never bound
+                hint(tr("Passive: cannot be put on a bar", "Пассивное: нельзя поставить на панель"), now);
+                break;
+            }
             bindArmed_ = true;
             bindWhat_ = {ActionSlot::Spell, (uint32_t)arg};
             hint("Press a button (or tap a bar cell) for " + g.spellNames.name((uint32_t)arg), now);
@@ -1051,9 +1289,10 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
                 case 201: in.cfg->perfLog = false; break;
                 case 202: in.cfg->perfLog = !in.cfg->perfLog; break;
                 case 203: in.cfg->gpuKick = !in.cfg->gpuKick; break;   // stage 6.3
-                case 204: in.cfg->vsync = !in.cfg->vsync; break;       // stage 6.4
+                case 204: in.cfg->pace = (in.cfg->pace + 1) % 3; break;   // 6.71: the frame pacer: off -> 30 -> auto (was VSync, stage 6.4)
                 case 205: in.cfg->fadeIn = !in.cfg->fadeIn; break;     // stage 6.11 (the renderer reads it every frame)
                 case 70: case 71: case 72: case 73: in.cfg->drawDist = arg - 70; out.graphicsChanged = true; break;
+                case 75: in.cfg->autoDetail = !in.cfg->autoDetail; break;   // 6.72 (main.cpp reads it every frame)
                 case 210: case 211: case 212: in.cfg->horizon = arg - 210; out.graphicsChanged = true; break;   // 6.34b
                 case 80: case 81: case 82: case 83: in.cfg->crowd = arg - 80; out.graphicsChanged = true; break;
                 case 95: case 96: case 97: in.cfg->topMode = arg - 95; out.graphicsChanged = true; break;
@@ -1062,6 +1301,7 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
                 case 100: case 101: in.cfg->lang = arg - 100; ui::g_lang = in.cfg->lang; break;
                 case 110: in.cfg->bigText = !in.cfg->bigText; break;
                 case 120: in.cfg->dimHud = !in.cfg->dimHud; break;
+                case 121: in.cfg->chatBubbles = !in.cfg->chatBubbles; break;
                 case 130: in.cfg->autoTabs = !in.cfg->autoTabs; break;
                 case 140: case 141: case 150: case 151: case 160: case 161: {
                     int& v = arg < 150 ? in.cfg->musicVol : arg < 160 ? in.cfg->sfxVol : in.cfg->ambVol;
@@ -1159,8 +1399,19 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
             break;
         }
         // ---- map (UI stage 3)
-        case Act::MapMode: mapMode_ = arg; break;
-        case Act::MapZoom: mapZoom_ = std::clamp(arg, 1, 4); break;
+        case Act::MapMode:
+            mapPanned_ = false;
+            if (arg == 1 && mapMode_ == 3) {   // "Continent" from a picked zone: its continent
+                mapPickArea_ = 0;
+                if (mapPickMap_ == in.mapId) mapMode_ = 1;
+            } else {
+                mapMode_ = arg;
+            }
+            break;
+        case Act::MapTap: mapTap(in); break;
+        case Act::MapZoom: mapZoom_ = std::clamp(arg, 1, 4); if (mapZoom_ == 1) mapPanned_ = false; break;
+        case Act::MapUnits: mapUnits_ = arg != 0; break;
+        case Act::MapQuests: mapQuests_ = arg != 0; break;
         // ---- talents (UI stage 4)
         case Act::TalentTree: talentTree_ = arg; talentSel_ = -1; break;
         case Act::TalentPick: talentSel_ = arg; break;
@@ -1277,12 +1528,16 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
         case Act::PetDismiss:
             if (!g.pet.active) break;
             if (!confirmed_) {
-                confirm(g.petCanAbandon() ? tr("Abandon the pet for good?", "Бросить питомца навсегда?") : tr("Dismiss the pet?", "Отпустить питомца?"),
+                confirm(g.petCanAbandon() ? tr("Abandon the pet FOR GOOD? It cannot be called back.", "Бросить питомца НАВСЕГДА? Его не вернуть.")
+                                          : tr("Dismiss the pet?", "Отпустить питомца?"),
                         Act::PetDismiss, 0);
                 break;
             }
             g.petDismiss(now);
             open_ = Panel::Tabs;
+            break;
+        case Act::PetSendAway:   // 7.07: a hunter's pet sent away with Dismiss Pet (Call Pet brings it back) - not abandoned
+            if (g.pet.active && g.petDismissHunter(now)) open_ = Panel::Tabs;
             break;
         case Act::PetFeed: petFeedList_ = arg != 0; page_ = 0; break;
         case Act::PetFeedPick: {
@@ -1291,6 +1546,41 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
             break;
         }
         case Act::StablePick: stableSel_ = arg; break;
+        case Act::CraftSkill: craftSkill_ = (uint32_t)arg; craftSel_ = 0; craftPick_ = false; craftLeft_ = 0; page_ = 0; break;
+        case Act::CraftPick:
+            if (arg == 0) { craftPick_ = false; page_ = 0; }
+            else { craftSel_ = (uint32_t)arg; craftLeft_ = 0; }
+            break;
+        case Act::CraftMake: {
+            const w3n::Recipe* r = g.recipes.find(craftSel_);
+            if (!r) break;
+            if (r->kind == 1) { craftPick_ = true; page_ = 0; break; }
+            craftLeft_ = 0;
+            for (const w3n::Recipe::Part& p : r->reagents)
+                if (g.itemCount(p.entry) < p.count) { refuse(g, tr("You do not have the reagents", "Не хватает реагентов"), now); return; }
+            craftCast(g, in, r->spell, 0);   // (a refusal prints its own line)
+            break;
+        }
+        case Act::CraftAll: {
+            const w3n::Recipe* r = g.recipes.find(craftSel_);
+            if (!r || r->kind != 0) break;
+            uint32_t most = 9999;
+            for (const w3n::Recipe::Part& p : r->reagents) most = std::min<uint32_t>(most, g.itemCount(p.entry) / p.count);
+            if (r->reagents.empty()) most = 1;
+            if (most == 0) break;
+            if (craftCast(g, in, r->spell, 0)) craftLeft_ = (int)most - 1;
+            break;
+        }
+        case Act::CraftStop: craftLeft_ = 0; g.cancelCast(now); break;
+        case Act::CraftHaveMats: craftHaveMats_ = !craftHaveMats_; page_ = 0; break;   // 6.90
+        case Act::CraftItem: {
+            const std::vector<w3n::InvItem> items = enchantTargets(g, g.recipes.find(craftSel_));   // the picker's own list
+            if (arg >= 0 && arg < (int)items.size()) {
+                craftPick_ = false;
+                craftCast(g, in, craftSel_, items[arg].guid);
+            }
+            break;
+        }
         case Act::StableStable: g.stableCurrentPet(now); stableSel_ = -1; break;
         case Act::StableUnstable:
             for (const w3n::StabledPet& p : g.stable.pets)

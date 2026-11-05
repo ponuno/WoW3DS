@@ -26,4 +26,6 @@ void dollForget();
 // The picture of slot k when it shows 'guid' (ok() false: not yet / not possible).
 ui::Image image(int k, uint64_t guid);
 const char* status();   // one line for the debug page / report
+// 6.98: the VRAM the portraits and the doll really hold now (colour RGBA8 + depth24 each), 0 when they are off
+uint32_t vramBytes();
 }  // namespace portrait

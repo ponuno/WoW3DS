@@ -63,9 +63,14 @@ public:
     Image itemIcon(uint32_t displayId) const { return displayId ? icon(W3D_UI_KEY(W3D_UIKEY_ITEM, displayId)) : Image(); }
     Image namedIcon(const char* name) const { return icon(W3D_UI_KEY(W3D_UIKEY_NAMED, w3dUiHash(name))); }
 
-    // The smallest zone map of 'mapId' that contains (x, y); the continent map when no zone does.
-    MapView zoneAt(uint32_t mapId, float x, float y) const;
+    // The zone map of 'mapId' for the zone 'zone' (an AreaTable zone id, 0 = unknown) when the pack has one, else the smallest
+    // zone map that contains (x, y); the continent map when no zone does (6.94: the zone first - rectangles overlap).
+    MapView zoneAt(uint32_t mapId, float x, float y, uint32_t zone = 0) const;
     MapView continent(uint32_t mapId) const;
+    // 6.69: the picture of the whole world (both continents; the converter's "World" entry, mapId all ones); !ok() in older packs
+    MapView world() const;
+    // 6.63: the zone map of an AreaTable zone (Questie's zone ids); !ok() when the pack has none
+    MapView zoneByArea(uint32_t areaId) const;
     size_t mapCount() const { return maps_.size(); }
     // The in-game loading screen of a map (the picture 512x256, stretch it); !ok() when the pack has none.
     Image loadingScreen(uint32_t mapId) const;

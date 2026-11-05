@@ -28,9 +28,18 @@
 #include "game.hpp"
 #include "hud.hpp"
 #include "pad.hpp"
+#include "questdb.hpp"
+
+// 6.90: the items an enchant can be cast on - worn ones first (slot order), then the bags - and whether a recipe's reagents and
+// tools are at hand (game_ui_tabs.cpp)
+std::vector<w3n::InvItem> enchantTargets(w3n::GameSession& g, const w3n::Recipe* r);
+bool craftHasMaterials(w3n::GameSession& g, const w3n::Recipe& r);
+#include "questwatch.hpp"
 
 class GameUi {
 public:
+    // 6.99: a spell's icon as the book shows it - Attack / Shoot with the weapon in hand (for the top screen's bars too)
+    ui::Image shownSpellIcon(uint32_t spell) const { return spellIcon(spell); }
     struct Input {
         u32 down;                     // raw keys (only the touch bit is read here)
         bool touched;                 // the finger came down this frame (touchX/Y = where)
@@ -45,6 +54,10 @@ public:
         bool touchHeld = false;       // the finger is on the screen (touchX/Y = where it is now)
         bool touchUp = false;         // the finger left the screen this frame (touchX/Y unused)
         uint32_t mapId = 0;           // the map we are on (Map tab)
+        uint32_t zone = 0;            // 6.94: the zone we stand in (AreaTable top parent of the terrain's area; 0 = not known)
+        // 7.04: the zone (AreaTable top parent) of the terrain at a world point of a map, from the terrain's own area grid
+        // (areas_<map>.bin) - the continent map picks and lights a zone by its real shape; nullptr / 0: not known
+        uint32_t (*zoneAtPoint)(uint32_t mapId, float x, float y) = nullptr;
         // UI stage 10, ground spells: the C-Stick (dead zone applied, -1..1), the camera's yaw (the stick moves the ring
         // the way the camera looks) and the height of the ground / floor under a point (nullptr: keep the height)
         float stickX = 0, stickY = 0, camYaw = 0;
@@ -71,6 +84,8 @@ public:
 
     // Call every frame while online.
     Output update(w3n::GameSession& g, const Input& in, bool walking);
+    // 6.63: the followed quests (the top screen's tracker reads them)
+    const std::vector<uint32_t>& followedQuests() const { return watch_.ids(); }
     // Rebuilds the touch screen's draw list when something changed (or every 250 ms); true when it did (draw it).
     bool draw(w3n::GameSession& g, const Input& in, float fps, uint32_t latencyMs);
     const HudList& screen() const { return list_; }
@@ -84,6 +99,7 @@ public:
         Inspect,   // UI stage 9: another player's gear and honour
         Pet,       // UI stage 13: the pet's bar, mood, auto-cast, rename, feeding
         Stable,    // UI stage 13: the stable master (hunters)
+        Roll,      // 6.88: a group loot roll (Need / Greed / Pass)
     };
     Panel panel(const w3n::GameSession& g) const;   // what the centre area shows now
     Tab tab() const { return tab_; }
@@ -96,18 +112,18 @@ public:
     bool dragging() const { return drag_.active; }
 
     enum class Act : uint8_t {
-        Tab, Release, Reclaim, ResAccept, ResDecline, HealerYes, HealerNo, LootItem, LootMoney, LootAll, LootClose,
+        Tab, Release, Reclaim, ResAccept, ResDecline, HealerYes, HealerNo, HealerTalk, LootItem, LootMoney, LootAll, LootClose,
         GossipOption, GossipClose, SelectItem, Use, Equip, Unequip, Destroy, BindItem, PagePrev, PageNext,
         BarCell, BindSpell, ClearSlot, MenuItem, ContextItem, Setting, ClosePanel,
         // stages 5.12-5.14
-        GossipQuest, VendorMode, VendorPick, VendorBuy, VendorSell, VendorBuyback, VendorRepair, VendorClose,
+        GossipQuest, VendorMode, VendorPick, VendorBuy, VendorSell, VendorSellJunk, VendorBuyback, VendorRepair, VendorClose,
         QuestPick, QuestAccept, QuestContinue, QuestComplete, QuestReward, QuestClose, QuestScroll,
         LogSelect, LogBack, LogAbandon, LogReputation,
         TrainerPick, TrainerTrain, TrainerClose, TrainerFilter, BinderYes, BinderNo,
         ItemInfo, InfoBack, BuffPick, BuffCancel, InviteYes, InviteNo, OpenItem,
         // UI stages 1-6
         Pin, SubView, TargetUnit, CancelCast, ConfirmYes, ConfirmNo, TrackQuest, SpellPick,
-        MapMode, MapZoom, ChatChannel, ChatWrite, ChatScroll, ChatPhrases, PhrasePick,
+        MapMode, MapZoom, MapTap, MapUnits, MapQuests, ChatChannel, ChatWrite, ChatScroll, ChatPhrases, PhrasePick,
         TalentTree, TalentPick, TalentLearn,
         SkillPick, SkillHeader, SkillAbandon,   // 6.19: the skills page
         SocialPick, FriendAdd, FriendRemove, IgnoreAdd, IgnoreRemove, Whisper, GroupInvite, GroupLeave, GroupKick,
@@ -128,8 +144,15 @@ public:
         PetCast,     // arg = spell of the pet's book
         PetAuto,     // arg = spell: auto-cast on / off
         PetBind,     // arg = PetCmdId (< 100) or 100000 + spell: arm the hotbar binding
-        PetRename, PetDismiss, PetFeed, PetFeedPick,
+        PetRename, PetDismiss, PetSendAway, PetFeed, PetFeedPick,
         StablePick, StableStable, StableUnstable, StableBuy, StableClose,
+        // 6.38: the profession window (Spells tab, Craft)
+        CraftSkill, CraftPick, CraftMake, CraftAll, CraftStop, CraftItem,
+        CraftHaveMats,   // 6.90: the "have materials" filter
+        RollVote,    // 6.88: arg = kRollPass / kRollNeed / kRollGreed for the first roll waiting
+        ItemCard,    // 6.91: arg = item entry: the item's mini window over whatever is open
+        CardClose,   // 6.91: a tap anywhere closes it
+        CardLink,    // 6.94: the card's "To chat": the chat keyboard opens with the item's link at the start of the message
     };
     // A tap region of the last draw (pixels). Long press shows info (kind 1 item entry / inventory index, 2 spell,
     // 3 aura spell); drag carries a spell (dragKind 1) or an item entry (2) to a hotbar slot.
@@ -170,6 +193,10 @@ private:
     void hintStrip(const Input& in);
     void crossbarPicker(w3n::GameSession& g, const Input& in);   // the drop / bind targets over the content
     ui::Image spellIcon(uint32_t spell) const;
+    // 6.95: spells shown with the icon of the weapon in hand (Attack: main hand; Auto Shot, Shoot, Throw ...: the ranged slot)
+    ui::Image weaponIcon_[2];
+    const w3n::GameSession* gameSess_ = nullptr;
+    static bool weaponSpell(const w3n::GameSession& g, uint32_t spell, int* which);
     ui::Image itemIcon(w3n::GameSession& g, uint32_t entry);
     std::string spellLabel(const w3n::GameSession& g, uint32_t spell) const;
     ui::Font listFont() const;
@@ -198,7 +225,7 @@ private:
     void confirmPlace(w3n::GameSession& g, const Input& in, Output& out);
     void interactAction(w3n::GameSession& g, const Input& in, Output& out);
     void cancelAction(w3n::GameSession& g, const Input& in);
-    void openChat(w3n::GameSession& g, const Input& in, Output& out, const std::string& prefix = "");
+    void openChat(w3n::GameSession& g, const Input& in, Output& out, const std::string& prefix = "", const std::string& link = "");   // 6.94: link = |Hitem:..| text put before what is typed
     // The on-screen English keyboard (stage 5.46, game_ui_keyboard.cpp): replaces the system applet, which blocked the
     // game for seconds. askText() opens it; 'done' runs on OK (Cancel / B drop the text). Key codes (Act::KeyboardKey
     // arg): 32..126 a character (lower case; Shift / Caps make it upper), kKbBack .. kKbCancel the function keys.
@@ -242,22 +269,33 @@ private:
     void drawPanel(w3n::GameSession& g, const Input& in);
     void drawCombat(w3n::GameSession& g, const Input& in);
     void drawMap(w3n::GameSession& g, const Input& in);
+    void mapTap(const Input& in);   // 6.69: a tap on the map picture: the world -> a continent, a continent -> the zone under the finger
     void drawChat(w3n::GameSession& g, const Input& in);
     void drawItems(w3n::GameSession& g, const Input& in);
     void drawPaperDoll(w3n::GameSession& g, const Input& in);
     void drawSpells(w3n::GameSession& g, const Input& in);
     void drawTalents(w3n::GameSession& g, const Input& in);
     void drawSkills(w3n::GameSession& g, const Input& in);   // 6.19
+    void drawCraft(w3n::GameSession& g, const Input& in);    // 6.38: professions - recipes, reagents, Create / Create All
+    void craftTick(w3n::GameSession& g, const Input& in);    // 6.38: the next piece of a Create All
+    bool craftCast(w3n::GameSession& g, const Input& in, uint32_t spell, uint64_t itemGuid);
     void spellTabs(int active);                               // the Book / Talents / Skills buttons
     void drawQuestLog(w3n::GameSession& g, const Input& in);
     void drawSocial(w3n::GameSession& g, const Input& in);
     void drawSettings(const Input& in);
     void drawDeath(w3n::GameSession& g, const Input& in);
     void drawLoot(w3n::GameSession& g);
+    void drawRoll(w3n::GameSession& g, const Input& in);   // 6.88
     void drawGossip(w3n::GameSession& g);
     void drawVendor(w3n::GameSession& g, const Input& in);
     void drawTrainer(w3n::GameSession& g);
     void drawItemInfo(w3n::GameSession& g);
+    void drawItemCard(w3n::GameSession& g);           // 6.91: the item's mini window (over any panel)
+    void openCard(uint32_t entry, const w3n::InvItem* inst = nullptr);
+public:
+    bool cardOpen() const { return card_; }       // 6.91 (tests)
+    uint32_t cardItem() const { return card_ ? infoEntry_ : 0; }
+private:
     void drawSpellInfo(w3n::GameSession& g, const Input& in);
     void drawBuffs(w3n::GameSession& g, const Input& in);
     void drawQuest(w3n::GameSession& g);
@@ -288,6 +326,8 @@ private:
     Tab tab_ = Tab::Map;
     bool pinned_ = false;
     bool wasInCombat_ = false;
+    uint8_t deathKey_ = 0;   // 6.82: what of the death UI was up last frame (dead / a resurrection offer / the spirit healer's question)
+    void deathTab(w3n::GameSession& g, const Input& in);   // 6.82: shows the Combat tab when one of them appears
     Panel open_ = Panel::Tabs;        // Menu / Context / Settings / tooltips when one is open
     int selected_ = 0, page_ = 0;     // bag/gear/spell list: selected index (absolute) and page
     bool selTapped_ = false;          // the selection came from a tap (a second tap shows the tooltip)
@@ -304,24 +344,56 @@ private:
     Panel infoReturn_ = Panel::Tabs;   // where a tooltip goes back to
     uint32_t buffSel_ = 0;             // Panel::Buffs: the selected aura's spell
     w3n::InvItem infoItem_;            // its instance in the bags (guid 0 = a vendor's / reward item)
+    bool card_ = false;                // 6.91: the item's mini window is up (infoEntry_ / infoItem_)
     bool trainerAll_ = false;          // also show what we already know
     // quest windows (stage 5.14): text scroll, chosen reward (-1 none), which window they belong to
     int questScroll_ = 0, rewardPick_ = -1;
+    // 6.94: the quest text scrolls by a finger drag: the area of the text as last drawn (reset with every redraw)
+    bool qsOn_ = false;
+    int qsX_ = 0, qsY_ = 0, qsW_ = 0, qsH_ = 0, qsAcc_ = 0;
     uint32_t questKey_ = 0;
     // Quests tab: 0 log, 1 one quest, 2 reputation
     int logView_ = 0, logSel_ = 0;
-    uint32_t tracked_ = 0;             // the tracked quest (Map tab, top HUD option)
+    questwatch::Watch watch_;          // 6.63: the followed quests (up to five): the Map tab's areas, the top screen's tracker
+    questdb::Db qdb_;                  // 6.63: where the objectives are (questdb.bin), opened on first use
+    bool qdbTried_ = false, watchLoaded_ = false;
+    uint32_t watchReadyMs_ = 0;
+    std::vector<uint32_t> logIds_;
+    void syncWatch(w3n::GameSession& g, const Input& in);
+    struct QuestAreas { uint32_t id; bool ok; questdb::Quest q; };
+    std::vector<QuestAreas> qareas_;
+    const questdb::Quest* questAreas(uint32_t id);
+    // 7.04: the zone map under a world point of a continent: by the terrain's areas (its shape) when the client knows them,
+    // else the smallest WorldMapArea rectangle; *shape = the zone id the terrain gave (0: the rectangle decided)
+    ui::MapView zoneUnder(const Input& in, uint32_t mapId, float wx, float wy, uint32_t* shape) const;   // the quest's places from qdb_ (cached); nullptr: not in the database
     std::string hint_;                // the last "why not" (too far, no target ...), 4 s
     uint32_t hintMs_ = 0;
     // sub views: Bags 0 bags / 1 paper doll; Spells 0 book / 1 talents; Social 0 group 1 guild 2 friends 3 ignore;
     // Settings 0 controls / 1 graphics + interface; Chat channel filter; Map 0 zone / 1 continent, zoom 1/2/4
+    // 6.95: which bag the grid shows: -1 all, 0 the backpack, 1..4 the bag in slot 19..22 (a quiver, an ammo pouch, a herb bag ...)
+    int bagFilter_ = -1;
+    std::string bagLabel(const w3n::GameSession& g, int f) const;
+    void cycleBagFilter(const w3n::GameSession& g);
     int subBags_ = 0, subSpells_ = 0, subSocial_ = 0, subSettings_ = 0;
     int chatChannel_ = 0, chatScroll_ = 0;
     bool phrases_ = false;
-    int mapMode_ = 0, mapZoom_ = 1;
+    int mapMode_ = 0, mapZoom_ = 1;   // mapMode_: 0 our zone, 1 our continent, 2 the world, 3 the picked zone / continent (mapPick*_)
+    uint32_t mapPickMap_ = 0, mapPickArea_ = 0;   // 6.69: what a tap on the world / continent picture chose
+    float mapCu_ = 0.5f, mapCv_ = 0.5f;           // the centre of the shown part (0..1 of the picture) once the stylus has moved it
+    bool mapPanned_ = false;
+    // what drawMap showed last (the tap and the drag read it): the picture, its window and where it is on the screen
+    const W3dUiMap* mapShown_ = nullptr;
+    float mapU0_ = 0, mapV0_ = 0, mapSpan_ = 1;
+    int mapRectX_ = 0, mapRectY_ = 0, mapRectW_ = 1, mapRectH_ = 1;
+    bool mapUnits_ = false, mapQuests_ = true;   // 6.63: the creatures' dots on the map (off), the followed quests' areas (on)
     int talentTree_ = 0, talentSel_ = -1;
     uint32_t skillSel_ = 0;          // 6.19: the selected skill line; skillFolded_: bit per category (5..11) folded away
     uint32_t skillFolded_ = 0;
+    // 6.38: the profession window - the chosen skill line and recipe, the pieces still to make, the item picker of an enchant
+    uint32_t craftSkill_ = 0, craftSel_ = 0, craftCastMs_ = 0, craftLastMs_ = 0;
+    int craftLeft_ = 0;
+    bool craftPick_ = false;
+    bool craftHaveMats_ = false;   // 6.90: only the recipes whose reagents (and tools) are in the bags
     int socialSel_ = -1;
     // confirmation dialog
     std::string confirmText_;
@@ -331,7 +403,7 @@ private:
     bool confirmed_ = false;           // doAction runs the confirmed action (no second question)
     // touch: the button under the finger, long press, drag
     struct Press {
-        bool active = false, moved = false, longFired = false, onButton = false;
+        bool active = false, moved = false, longFired = false, onButton = false, scrolling = false, inScroll = false;
         int x0 = 0, y0 = 0, x = 0, y = 0;
         uint32_t startMs = 0;
         Button button{};
@@ -363,3 +435,6 @@ private:
     uint64_t inspect_ = 0;             // UI stage 9: the player Panel::Inspect shows
     static constexpr int kTop = 20, kTabY = 196, kTabH = 44, kContentH = kTabY - kTop;
 };
+
+// 6.46: true once after the player typed /gputest in the chat (the GPU test in main.cpp)
+bool gameUiTakeGpuTest();

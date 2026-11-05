@@ -2,8 +2,9 @@
 //
 // Stage 5.0 scope: every group becomes its own static model (MODL), with
 // vertices relative to the group's centre so the 3DS gets a tight bounding
-// sphere per group (culling and draw distance work per room/section). No
-// portals yet: all groups of a building are drawn when visible. The WMO's
+// sphere per group (culling and draw distance work per room/section). Portals
+// (6.42) go into each group's model: the client draws an interior group only when
+// the walk through the portals from the camera's room reaches it. The WMO's
 // doodads (doodad set 0 + the placement's set) become ordinary doodad
 // placements. Placement maths follows WoWee terrain_manager.cpp:
 //   wmoMatrix = T(pos) * Rz * Ry * Rx (placementEuler), doodad = wmoMatrix * T * R(quat) * S.
@@ -22,6 +23,7 @@
 #include <array>
 #include <cstring>
 #include <map>
+#include <set>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -63,6 +65,52 @@ void rootHeader(const std::vector<uint8_t>& b, uint32_t* flags, uint32_t* id) {
         if (len > b.size() - p - 8) return;
         p += 8 + len;
     }
+}
+
+// 6.42: the root file's portals: MOPV (vertices, 12 bytes), MOPT (portal: first vertex u16, count u16, plane normal + distance,
+// 20 bytes), MOPR (reference: portal u16, group u16 on the other side, side i16, filler u16; 8 bytes). Group g's references are
+// MOPR[portalStart .. +portalCount] (its MOGP header).
+struct RootPortals {
+    struct P { uint16_t first, count; glm::vec3 n; float d; };
+    struct Ref { uint16_t portal, group; int16_t side; };
+    std::vector<glm::vec3> verts;
+    std::vector<P> portals;
+    std::vector<Ref> refs;
+};
+RootPortals rootPortals(const std::vector<uint8_t>& b) {
+    RootPortals r;
+    for (size_t p = 0; p + 8 <= b.size();) {
+        uint32_t len;
+        std::memcpy(&len, &b[p + 4], 4);
+        if (len > b.size() - p - 8) break;
+        const uint8_t* d = &b[p + 8];
+        if (!std::memcmp(&b[p], "VPOM", 4)) {
+            for (uint32_t i = 0; i + 12 <= len; i += 12) {
+                glm::vec3 v;
+                std::memcpy(&v, d + i, 12);
+                r.verts.push_back(v);
+            }
+        } else if (!std::memcmp(&b[p], "TPOM", 4)) {
+            for (uint32_t i = 0; i + 20 <= len; i += 20) {
+                RootPortals::P q;
+                std::memcpy(&q.first, d + i, 2);
+                std::memcpy(&q.count, d + i + 2, 2);
+                std::memcpy(&q.n, d + i + 4, 12);
+                std::memcpy(&q.d, d + i + 16, 4);
+                r.portals.push_back(q);
+            }
+        } else if (!std::memcmp(&b[p], "RPOM", 4)) {
+            for (uint32_t i = 0; i + 8 <= len; i += 8) {
+                RootPortals::Ref q;
+                std::memcpy(&q.portal, d + i, 2);
+                std::memcpy(&q.group, d + i + 2, 2);
+                std::memcpy(&q.side, d + i + 4, 2);
+                r.refs.push_back(q);
+            }
+        }
+        p += 8 + len;
+    }
+    return r;
 }
 
 std::map<std::string, WmoAsset> g_wmoCache;    // normalized path -> converted asset
@@ -225,6 +273,77 @@ static const WmoAsset& loadWmoImpl(PackWriter& pack, const DataDir& data, const 
         }
     }
 
+    // 6.42: the portals between the groups. A group's centre is the middle of the vertices its render batches use (below); the
+    // neighbour's is needed to tell which side of a portal it lies on and to carry the portal's polygon over to the group's frame.
+    const RootPortals rp = o.noPortals ? RootPortals{} : rootPortals(bytes);
+    auto centerOfGroup = [&](const wowee::pipeline::WMOGroup& g, glm::vec3* out) {
+        glm::vec3 lo(1e30f), hi(-1e30f);
+        for (const auto& b : g.batches) {
+            if (b.materialId == 0xFF) continue;
+            for (uint32_t k = b.startIndex; k < b.startIndex + b.indexCount && k < g.indices.size(); ++k) {
+                uint16_t vi = g.indices[k];
+                if (vi >= g.vertices.size()) continue;
+                lo = glm::min(lo, g.vertices[vi].position);
+                hi = glm::max(hi, g.vertices[vi].position);
+            }
+        }
+        if (lo.x > hi.x) return false;
+        *out = 0.5f * (lo + hi);
+        return true;
+    };
+    auto portalsOfGroup = [&](uint32_t gi, const glm::vec3& center) {
+        std::vector<W3dPortal> out;
+        const auto& g = w.groups[gi];
+        for (uint32_t k = g.portalStart; k < (uint32_t)g.portalStart + g.portalCount && k < rp.refs.size() && out.size() < W3D_PORTAL_MAX; ++k) {
+            const RootPortals::Ref& ref = rp.refs[k];
+            if (ref.portal >= rp.portals.size() || ref.group >= w.groups.size() || ref.group == gi) continue;
+            const RootPortals::P& pt = rp.portals[ref.portal];
+            if (pt.count < 3 || (size_t)pt.first + pt.count > rp.verts.size()) continue;
+            const auto& og = w.groups[ref.group];
+            if (og.vertices.empty() || og.indices.empty()) continue;
+            glm::vec3 oc;
+            if (!centerOfGroup(og, &oc)) continue;
+            // the polygon's plane (Newell) and bounding sphere
+            glm::vec3 n(0.0f), mid(0.0f);
+            for (uint32_t i = 0; i < pt.count; ++i) {
+                const glm::vec3& a = rp.verts[pt.first + i];
+                const glm::vec3& b2 = rp.verts[pt.first + (i + 1) % pt.count];
+                n.x += (a.y - b2.y) * (a.z + b2.z);
+                n.y += (a.z - b2.z) * (a.x + b2.x);
+                n.z += (a.x - b2.x) * (a.y + b2.y);
+                mid += a;
+            }
+            mid /= (float)pt.count;
+            float nl = glm::length(n);
+            if (!(nl > 1e-6f)) { n = pt.n; nl = glm::length(n); }
+            if (!(nl > 1e-6f)) continue;
+            n /= nl;
+            float rad = 0;
+            for (uint32_t i = 0; i < pt.count; ++i) rad = std::max(rad, glm::length(rp.verts[pt.first + i] - mid));
+            // out of this group, into the other: this group's centre is on the negative side, the other's on the positive
+            const float d = glm::dot(n, mid);
+            const float sThis = glm::dot(n, center) - d, sOther = glm::dot(n, oc) - d;
+            uint32_t flags = 0;
+            if (sThis > 0 && sOther < 0) { n = -n; }
+            else if (!(sThis < 0 && sOther > 0)) flags |= W3D_PORTAL_NOFACE;   // both centres on one side: the plane says nothing
+            W3dPortal wp{};
+            char idKey[600];
+            std::snprintf(idKey, sizeof idKey, "%s#%u", key.c_str(), (unsigned)ref.group);
+            wp.toModel = pack.keyId(W3D_ENTRY_MODEL, idKey);
+            const glm::vec3 dl = oc - center, cl = mid - center;
+            wp.delta[0] = dl.x; wp.delta[1] = dl.y; wp.delta[2] = dl.z;
+            wp.plane[0] = n.x; wp.plane[1] = n.y; wp.plane[2] = n.z;
+            wp.plane[3] = glm::dot(n, mid - center);
+            wp.center[0] = cl.x; wp.center[1] = cl.y; wp.center[2] = cl.z;
+            wp.radius = rad;
+            wp.flags = flags;
+            out.push_back(wp);
+        }
+        return out;
+    };
+
+    std::set<uint32_t> portalTarget;   // 6.48: groups some portal leads to (their model id must stay one model)
+    for (const auto& ref : rp.refs) portalTarget.insert(ref.group);
     size_t groupsOk = 0;
     for (uint32_t gi = 0; gi < w.groups.size(); ++gi) {
         const auto& g = w.groups[gi];
@@ -292,18 +411,70 @@ static const WmoAsset& loadWmoImpl(PackWriter& pack, const DataDir& data, const 
         }
         if (src.subs.empty()) continue;
         size_t tris = 0;
-        int flipped = 0;
-        auto blob = buildModelBlob(src, o.wmoGroupTris, &tris, &flipped, o.drawMaxError);
-        st.wmoSubsFlipped += flipped;
-        if (src.dropped && o.verbose)
-            std::printf("    group %u of %s: %zu bad indices dropped (partial triangle or index out of range)\n", gi, path.c_str(),
-                        src.dropped);
-        if (blob.empty()) { ++st.wmoGroupsFailed; continue; }
-        char idKey[600];
-        std::snprintf(idKey, sizeof idKey, "%s#%u", key.c_str(), gi);
-        uint32_t id = pack.keyId(W3D_ENTRY_MODEL, idKey);
-        pack.add(W3D_ENTRY_MODEL, id, std::move(blob));
-        a.groups.push_back({id, center});
+        if (!rp.refs.empty()) { src.portals = portalsOfGroup(gi, center); st.wmoPortals += src.portals.size(); if (!src.portals.empty()) ++st.wmoPortalGroups; }
+        if (!o.dumpWmo.empty()) {   // 6.47d
+            char dk[600];
+            std::snprintf(dk, sizeof dk, "%s#%u", key.c_str(), gi);
+            if (dumpWmoWanted(o.dumpWmo, dk)) {
+                std::string dir = o.out;
+                const size_t sl = dir.find_last_of("/\\");
+                if (dir.size() > 5 && dir.compare(dir.size() - 5, 5, ".w3dp") == 0) dir = sl == std::string::npos ? "." : dir.substr(0, sl);
+                dumpWmoGroup(src, dk, dir + "/wmo_dump");
+            }
+        }
+        // 6.48: a big outside group (Stormwind #46: 260 x 340 yd in one mesh, whole triangles - nothing to simplify) is cut into
+        // pieces of about o.wmoChunk yards, each its own model and placement: what is out of view / out of range is not drawn and
+        // a piece far from the camera takes its LOD by its own distance. Not a group with portals (they name the group's model),
+        // not an interior one; piece 0 keeps the group's id (far objects find the building by it).
+        const bool outside = !(g.flags & 0x2000) || (g.flags & 0x8);
+        const bool canCut = o.wmoChunk > 0 && outside && src.portals.empty() && !portalTarget.count(gi) && src.uvTracks.empty();
+        std::vector<ModelChunk> chunks;
+        size_t cutIn = 0;   // (the group's triangles before its budget pass, for the report)
+        if (canCut && std::max(hi.x - lo.x, hi.y - lo.y) > 1.5f * o.wmoChunk) {
+            // the whole group simplified first (pieces simplified alone kept more: their cut edges locked), then cut
+            for (const auto& sb : src.subs) cutIn += sb.idx.size() / 3;
+            simplifyModelSource(src, o.wmoGroupTris, o.drawMaxError, o.drawWallError);
+            chunks = splitModelSource(src, o.wmoChunk, (size_t)o.wmoChunkMinTris);
+            if (chunks.size() <= 1) chunks.clear();
+        }
+        if (chunks.empty()) chunks.push_back({std::move(src), {0, 0, 0}});
+        size_t srcTris = 0;
+        for (const auto& c : chunks) for (const auto& sb : c.src.subs) srcTris += sb.idx.size() / 3;
+        if (chunks.size() > 1) { ++st.wmoGroupsCut; st.wmoChunks += chunks.size(); }
+        size_t groupTris = 0, lod1 = 0, lod2 = 0;
+        for (size_t ci = 0; ci < chunks.size(); ++ci) {
+            ModelSource& cs = chunks[ci].src;
+            size_t ctris = 0;
+            for (const auto& sb : cs.subs) ctris += sb.idx.size() / 3;
+            // (the group's budget shared by triangle count: cutting does not make a group heavier)
+            const int budget = chunks.size() == 1 ? o.wmoGroupTris : 0;   // (a cut group had its budget pass whole)
+            (void)ctris;
+            size_t ptris = 0;
+            int pflipped = 0;
+            auto blob = buildModelBlob(cs, budget, &ptris, &pflipped, o.drawMaxError, o.drawWallError,
+                                       o.wmoLodError[0] > 0 ? o.wmoLodError : nullptr, o.wmoLodLockBorder);
+            st.wmoSubsFlipped += pflipped;
+            if (cs.dropped && o.verbose)
+                std::printf("    group %u of %s: %zu bad indices dropped (partial triangle or index out of range)\n", gi, path.c_str(),
+                            cs.dropped);
+            if (blob.empty()) { ++st.wmoGroupsFailed; continue; }
+            char idKey[600];
+            if (ci == 0) std::snprintf(idKey, sizeof idKey, "%s#%u", key.c_str(), gi);
+            else std::snprintf(idKey, sizeof idKey, "%s#%u.%zu", key.c_str(), gi, ci);
+            uint32_t id = pack.keyId(W3D_ENTRY_MODEL, idKey);
+            pack.add(W3D_ENTRY_MODEL, id, std::move(blob));
+            const glm::vec3 pc = center + glm::vec3(chunks[ci].offset[0], chunks[ci].offset[1], chunks[ci].offset[2]);
+            a.groups.push_back({id, pc});
+            groupTris += ptris;
+            lod1 += cs.statLod[0]; lod2 += cs.statLod[1];
+            if (chunks.size() == 1 && outside) noteHeavyGroup(idKey, cs.statIn, ptris, cs.statLod[0], cs.statLod[1]);   // 6.47: report
+        }
+        if (chunks.size() > 1 && outside) {   // (a cut group listed whole under its own name)
+            char gk[600];
+            std::snprintf(gk, sizeof gk, "%s#%u (%zu pieces)", key.c_str(), gi, chunks.size());
+            noteHeavyGroup(gk, cutIn, groupTris, lod1, lod2);
+        }
+        tris = groupTris;
         st.wmoTris += tris;
         ++st.wmoGroups;
         ++groupsOk;
@@ -616,6 +787,73 @@ void placeWmo(PackWriter& pack, const DataDir& data, const std::string& path, co
             ++st.wmoDoodads;
         }
     }
+}
+
+// 6.59: a WMO as a game object's model (GameObjectDisplayInfo -> .wmo): its groups and doodad set 0 as placements in the WMO's own
+// space (as placeWmo with no turn at the origin), and its collision triangles in the same space. Nothing goes into the tiles (no
+// collision cells, liquids or far shells): the client places the parts where the server puts the object.
+bool wmoObjectParts(PackWriter& pack, const DataDir& data, const std::string& path, const Options& o, ConvStats& st,
+                    const std::function<uint32_t(const std::string&)>& modelFor, std::vector<W3dPlacement>& parts,
+                    std::vector<float>& coll, bool* tooBig) {
+    parts.clear();
+    coll.clear();
+    if (tooBig) *tooBig = false;
+    {   // 6.59c: the root's box (MOHD +36: min, +48: max) first - a city or a dungeon is refused before its groups are converted
+        // (the box may hold doodads or a sky past the walls: a quarter of slack, the collision box decides below)
+        std::vector<uint8_t> b;
+        if (data.read(path, b))
+            for (size_t p = 0; p + 8 <= b.size();) {
+                uint32_t len;
+                std::memcpy(&len, &b[p + 4], 4);
+                if (!std::memcmp(&b[p], "DHOM", 4) && len >= 60 && p + 8 + 60 <= b.size()) {
+                    float bb[6];
+                    std::memcpy(bb, &b[p + 8 + 36], sizeof bb);
+                    const float ex = std::max(bb[3] - bb[0], bb[4] - bb[1]);
+                    if (std::isfinite(ex) && ex > 1.25f * W3D_OBJWMO_MAX_EXTENT) {
+                        if (tooBig) *tooBig = true;
+                        return false;
+                    }
+                    break;
+                }
+                p += 8 + (size_t)len;
+            }
+    }
+    const WmoAsset& a = loadWmo(pack, data, path, o, st);
+    if (!a.ok || a.groups.empty()) return false;
+    for (const auto& g : a.groups) {
+        W3dPlacement p{};
+        p.modelId = g.modelId;
+        p.pos[0] = g.center.x; p.pos[1] = g.center.y; p.pos[2] = g.center.z;
+        p.scale = 1.0f;
+        parts.push_back(p);
+    }
+    if (!o.noWmoDoodads && !a.sets.empty())
+        for (const auto& d : a.sets[0]) {
+            const uint32_t mid = modelFor(d.path);
+            if (!mid) continue;
+            W3dPlacement p{};
+            p.modelId = mid;
+            p.pos[0] = d.local[3][0]; p.pos[1] = d.local[3][1]; p.pos[2] = d.local[3][2];
+            glm::mat4 M = d.local;
+            p.scale = matrixToPlacement(&M[0][0], p.rot);
+            parts.push_back(p);
+        }
+    coll.reserve(a.coll.size() * 3);
+    float mn[2] = {1e30f, 1e30f}, mx[2] = {-1e30f, -1e30f};
+    for (const glm::vec3& v : a.coll) {
+        coll.push_back(v.x); coll.push_back(v.y); coll.push_back(v.z);
+        mn[0] = std::min(mn[0], v.x); mx[0] = std::max(mx[0], v.x);
+        mn[1] = std::min(mn[1], v.y); mx[1] = std::max(mx[1], v.y);
+    }
+    // 6.59c: what the client refuses (w3d_objwmo_valid, objcoll::build) is not written
+    if (parts.size() > W3D_OBJWMO_MAX_PARTS || coll.size() / 9 > W3D_OBJWMO_MAX_COLL ||
+        (!a.coll.empty() && (mx[0] - mn[0] > W3D_OBJWMO_MAX_EXTENT || mx[1] - mn[1] > W3D_OBJWMO_MAX_EXTENT))) {
+        if (tooBig) *tooBig = true;
+        parts.clear();
+        coll.clear();
+        return false;
+    }
+    return true;
 }
 
 }  // namespace w3d

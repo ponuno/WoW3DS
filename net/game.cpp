@@ -1,5 +1,6 @@
 #include "game.hpp"
 
+#include <cmath>
 #include <cstring>
 
 namespace w3n {
@@ -7,6 +8,7 @@ namespace w3n {
 namespace {
 enum : uint16_t {
     SMSG_NEW_WORLD = 0x03E, SMSG_TRANSFER_PENDING = 0x03F,
+    SMSG_LOGIN_SETTIMESPEED = 0x042, SMSG_GAMETIME_UPDATE = 0x043, SMSG_GAMETIME_SET = 0x045, SMSG_GAMESPEED_SET = 0x047,
     SMSG_FORCE_RUN_SPEED_CHANGE = 0x0E2, CMSG_FORCE_RUN_SPEED_CHANGE_ACK = 0x0E3,
     SMSG_FORCE_RUN_BACK_SPEED_CHANGE = 0x0E4, CMSG_FORCE_RUN_BACK_SPEED_CHANGE_ACK = 0x0E5,
     SMSG_FORCE_SWIM_SPEED_CHANGE = 0x0E6, CMSG_FORCE_SWIM_SPEED_CHANGE_ACK = 0x0E7,
@@ -38,6 +40,7 @@ void GameSession::attach(WorldClient& wc, uint32_t nowMs) {
     now_ = nowMs;
     objects.clear();
     objects.setSelf(self_);
+    objects.turtle = wc.version().minor >= 13;   // 6.58: a Turtle WoW clone's server (1.18.1 login): its movement layouts
     askedNames_.clear();
     askedCreatures_.clear();
     askedGos_.clear();
@@ -49,6 +52,13 @@ void GameSession::attach(WorldClient& wc, uint32_t nowMs) {
     lootGuid_ = 0;
     lootWindow = LootWindow();
     lastLoot.clear();
+    pet = PetState();     // 7.07: another character (or the same one again) - its pet comes with SMSG_PET_SPELLS
+    stable = StableWindow();
+    petCdEnd_.clear();
+    petCdLen_.clear();
+    petGoneMs_ = 0;
+    petMoodSeen_ = 0;
+    petMoodWarnMs_ = 0;
     gossip = GossipMenu();
     corpse = CorpseInfo();
     resurrectOffer = ResurrectOffer();
@@ -156,6 +166,14 @@ void GameSession::update(uint32_t nowMs) {
     updatePet(nowMs);
     updateGuildNames(nowMs);
     sendItemQueries(nowMs);
+    // 6.87: the fight is over when what we were hitting is dead or gone. vMaNGOS sends SMSG_ATTACKSTOP when the victim dies,
+    // before the update that says it is dead: the check at ATTACKSTOP saw it alive and the wish to attack stayed on, which
+    // kept the player in combat mode (ready stance, strafing camera) after every kill.
+    if (attackWanted_ || attackOn_) {
+        const WorldObject* t = target_ ? objects.find(target_) : nullptr;
+        if (!t || (t->isUnitLike() && t->dead())) attackWanted_ = attackOn_ = false;
+    }
+    expireRolls(nowMs);   // 6.88
     // A cast whose SPELL_GO / failure never arrived must not block the bar for ever.
     if (cast.active && nowMs - cast.startMs > cast.durMs + 2000) cast = CastState();
 }
@@ -211,6 +229,14 @@ void GameSession::sendQueries(uint32_t nowMs) {
     }
 }
 
+float GameSession::gameHour(uint32_t nowMs) const {
+    if (!clock.set) return -1.0f;
+    double m = (double)clock.baseMinutes + (double)(uint32_t)(nowMs - clock.atMs) / 1000.0 * (double)clock.minutesPerSec;
+    m = std::fmod(m, 1440.0);
+    if (m < 0) m += 1440.0;
+    return (float)(m / 60.0);
+}
+
 bool GameSession::handle(uint16_t op, const Bytes& data, uint32_t nowMs) {
     if (tap) tap(nowMs, 0, op, data);
     if (objects.handle(op, data, nowMs)) {
@@ -255,6 +281,26 @@ bool GameSession::handle(uint16_t op, const Bytes& data, uint32_t nowMs) {
             sendActiveMover(nowMs);
             teleported_ = true;
             ++stats.newWorlds;
+            return true;
+        }
+        // 6.60: the server's clock (the sky's time of day): a packed time (minute 0-5, hour 6-10, weekday 11-13, day 14-19, month 20-23,
+        // year 24-28 - the realm's real time of day, vMaNGOS sends the wall clock) and, in two of them, the speed in game minutes per
+        // second (1/60: the clock keeps realm time)
+        case SMSG_LOGIN_SETTIMESPEED:
+        case SMSG_GAMESPEED_SET:
+        case SMSG_GAMETIME_UPDATE:
+        case SMSG_GAMETIME_SET: {
+            const uint32_t packed = r.u32();
+            const bool hasSpeed = op == SMSG_LOGIN_SETTIMESPEED || op == SMSG_GAMESPEED_SET;
+            const float speed = hasSpeed ? r.f32() : clock.minutesPerSec;
+            if (r.bad) return true;
+            const uint32_t minute = packed & 0x3F, hour = (packed >> 6) & 0x1F;
+            if (minute > 59 || hour > 23) return true;
+            clock.set = true;
+            clock.baseMinutes = (float)(hour * 60 + minute);
+            clock.atMs = nowMs;
+            if (hasSpeed && speed > 0.0f && speed < 100.0f) clock.minutesPerSec = speed;
+            ++clock.updates;
             return true;
         }
         case SMSG_TRANSFER_PENDING: {   // u32 map [, u32 transport entry, u32 transport map]: a new map is being loaded

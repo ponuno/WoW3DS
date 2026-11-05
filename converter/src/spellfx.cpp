@@ -202,6 +202,18 @@ bool convertSpellEffects(const Options& oIn, const DataDir& data, PackWriter& pa
     };
     const uint16_t levelUp = special("Spells\\LevelUp\\LevelUp.m2");
     const uint16_t loot = special("Particles\\LootFX.m2");
+    // 6.95: what a bow / gun shot looks like in flight (the first path the game has)
+    auto firstOf = [&](std::initializer_list<const char*> paths, const char* what) {
+        for (const char* p : paths) {
+            const uint16_t e = special(p);
+            if (e != W3D_SFX_NONE) { std::printf("  %s model: %s\n", what, p); return e; }
+        }
+        std::printf("  %s model: none found\n", what);
+        return (uint16_t)W3D_SFX_NONE;
+    };
+    const uint16_t arrow = firstOf({"Item\\ObjectComponents\\Ammo\\ArrowFlight_01.m2", "Item\\ObjectComponents\\Ammo\\Arrow_01.m2",
+                                   "Item\\ObjectComponents\\Ammo\\Arrow_02.m2"}, "arrow");
+    const uint16_t bullet = firstOf({"Item\\ObjectComponents\\Ammo\\BulletFlight_01.m2", "Item\\ObjectComponents\\Ammo\\Bullet_01.m2"}, "bullet");
     // ---- the table
     std::vector<W3dSpellVisual> outVis;
     std::map<uint32_t, uint16_t> visIndex;
@@ -253,6 +265,8 @@ bool convertSpellEffects(const Options& oIn, const DataDir& data, PackWriter& pa
     hp->offSpells = (uint32_t)os;
     hp->levelUp = levelUp;
     hp->loot = loot;
+    hp->arrow = arrow;
+    hp->bullet = bullet;
     pack.add(W3D_ENTRY_SPELLFX, 0, std::move(b.data));
     std::printf("  spell effects: kit columns used:");
     for (const Col& c : cols) if (c.c < 64 && colOk[c.c]) std::printf(" %u", c.c);
@@ -296,7 +310,7 @@ int explainSpells(const DataDir& data, const std::vector<uint32_t>& ids) {
         const std::string m2 = wowee::pipeline::modelPathToM2(fxn.str((uint32_t)r, 2));
         std::vector<uint8_t> bytes;
         if (!data.read(m2, bytes)) { std::printf("        %s: not in the data\n", m2.c_str()); return; }
-        wowee::pipeline::M2Model mdl = wowee::pipeline::M2Loader::load(bytes);
+        wowee::pipeline::M2Model mdl = loadM2(bytes);
         uint32_t ver = 0;
         if (bytes.size() >= 8) std::memcpy(&ver, bytes.data() + 4, 4);
         std::printf("        %s: version %u, %zu vertices, %zu batches, %zu bones, %zu sequences, %zu particle emitters, %zu ribbons\n",

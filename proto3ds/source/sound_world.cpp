@@ -1,5 +1,7 @@
 #include "sound_world.hpp"
 
+#include <cstring>
+
 #include <algorithm>
 #include <cmath>
 
@@ -34,6 +36,35 @@ uint32_t SoundWorld::weaponSubclass(GameSession& g, const WorldObject& o) const 
     const uint32_t info = o.field(UF::UNIT_VIRTUAL_ITEM_INFO);
     if ((info & 0xFF) == 2) return (info >> 8) & 0xFF;
     return ~0u;
+}
+
+// 7.03: our ranged weapon going off. Auto Shot, Shoot and Throw carry no sound in their spell data (the original plays the
+// weapon's), so they had the built-in placeholder blip. Returns the sfx event of the weapon in the ranged slot, null when
+// 'spell' is not a shot.
+const char* SoundWorld::shotEvent(GameSession& g, const WorldObject& o, uint32_t spell) const {
+    switch (spell) {
+        case 75: case 3018: case 2480: case 7918: case 7919: case 2764: case 3137: case 10277: case 5019: break;
+        default:
+            if (!spell || !(g.spellNames.combat(spell) & SpellNames::kCombatRanged)) return nullptr;
+    }
+    if (spell == 2764 || spell == 3137 || spell == 10277) return "shoot_throw";
+    if (spell == 5019) return "shoot_wand";
+    if (spell == 2480) return "shoot_bow";
+    if (spell == 7918) return "shoot_gun";
+    if (spell == 7919) return "shoot_crossbow";
+    uint32_t sub = 2;   // (not known yet: a bow)
+    if (o.type == ObjType::Player) {
+        const uint32_t entry = o.field((uint16_t)(UF::PLAYER_VISIBLE_ITEM_1_0 + 17 * UF::PLAYER_VISIBLE_ITEM_STRIDE));
+        const ItemInfo* it = entry ? g.itemInfoIfKnown(entry) : nullptr;
+        if (it && it->cls == 2) sub = it->subclass;
+    }
+    switch (sub) {
+        case 3: return "shoot_gun";
+        case 18: return "shoot_crossbow";
+        case 19: return "shoot_wand";
+        case 16: return "shoot_throw";
+        default: return "shoot_bow";
+    }
 }
 
 void SoundWorld::at(const GameSession& g, uint64_t guid, uint32_t sound, const char* what, std::vector<SoundReq>& out, uint64_t tag, uint32_t loopMs) {
@@ -79,7 +110,14 @@ void SoundWorld::update(GameSession& g, const float pos[3], bool moving, bool on
                     }
                     if (!s && cs) s = crit && cs->attackCrit ? cs->attackCrit : cs->attack;
                     if (!s) { auto [imp, cr] = tables_.weapon(7); s = crit && cr ? cr : imp; }
-                    at(g, w.dst, s, "impact", out);
+                    if (s) at(g, w.dst, s, "impact", out);
+                    else if (w.src == me || w.dst == me) {   // 6.95: the data gave nothing: a built-in thud (centred) for blows we deal or take
+                        SoundReq r;
+                        r.event = crit ? "hitcrit" : "hit";
+                        r.self = true;
+                        r.what = "impact";
+                        out.push_back(r);
+                    }
                     // the victim's cry: always on a crit, one blow in three otherwise
                     if (dst) {
                         const snd::CreatureSounds* vs = soundsOf(*dst);
@@ -87,7 +125,51 @@ void SoundWorld::update(GameSession& g, const float pos[3], bool moving, bool on
                     }
                 } else if (cs && cs->attack && sub == ~0u && rng_() % 2 == 0) {
                     at(g, w.src, cs->attack, "swing", out);   // a creature missing still growls
+                } else if (w.src == me || w.dst == me) {      // 6.95: a miss / dodge / parry still whooshes
+                    SoundReq r;
+                    r.event = "swing";
+                    r.self = true;
+                    r.what = "swing";
+                    out.push_back(r);
                 }
+                break;
+            }
+            case GameSession::WorldSound::SpellDamage: {
+                // 6.95: fire, frost, ... hurting someone: the victim's wound cry now and then; for us a built-in sound of the school.
+                // A damage-over-time tick is quiet and not more often than every 0.7 s.
+                const bool periodic = w.hitInfo == 1;
+                const bool involvesMe = me != 0 && (w.dst == me || w.src == me);
+                if (periodic && nowMs - dotMs_ < 700) break;
+                if (periodic) dotMs_ = nowMs;
+                const WorldObject* dst = g.objects.find(w.dst);
+                if (dst && w.dst != me && !periodic && rng_() % 3 == 0) {
+                    const snd::CreatureSounds* vs = soundsOf(*dst);
+                    if (vs) at(g, w.dst, vs->wound, "wound", out);
+                }
+                if (!involvesMe) break;
+                // 7.07: a spell with sounds of its own was heard at SPELL_GO (its impact on the target): no second sound on top. And
+                // the school comes as 1.12's index (SpellSchools: 1 holy, 2 fire, 3 nature, 4 frost, 5 shadow, 6 arcane), not as a
+                // mask - Arcane Missiles sounded as fire, Fireball as holy.
+                if (const snd::SpellSounds* own = tables_.spell(w.spell); own && (own->impact || own->cast || own->missile)) break;
+                const uint32_t m = w.victimState < 7 ? 1u << w.victimState : w.victimState;
+                const char* ev = (m & 4) ? "hitfire" : (m & 16) ? "hitfrost" : (m & 8) ? "hitnature" : (m & 32) ? "hitshadow" : (m & 64) ? "hitarcane"
+                                 : (m & 2) ? "hitholy" : nullptr;
+                if (!ev) break;
+                SoundReq r;
+                r.event = ev;
+                r.self = true;
+                r.what = "spelldamage";
+                if (periodic) r.gain = 0.6f;
+                out.push_back(r);
+                break;
+            }
+            case GameSession::WorldSound::Environment: {
+                if (w.dst != me || !me) break;
+                SoundReq r;   // fall, drowning / exhaustion, lava / slime / fire
+                r.event = w.victimState == 2 ? "hitfall" : w.victimState <= 1 ? "hitdrown" : "hitburn";
+                r.self = true;
+                r.what = "envdamage";
+                out.push_back(r);
                 break;
             }
             case GameSession::WorldSound::SpellStart: {
@@ -101,7 +183,33 @@ void SoundWorld::update(GameSession& g, const float pos[3], bool moving, bool on
                 stop.tag = w.src | 1;
                 out.push_back(stop);
                 const snd::SpellSounds* ss = tables_.spell(w.spell);
-                if (!ss) break;
+                // 6.39: our own spell without a sound of its own (this client's data gave none) still goes off with a built-in one
+                const bool mine = w.src == me && me != 0;
+                const bool noData = !ss || (!ss->cast && !ss->missile && !ss->impact);
+                if (mine && src) {   // 7.03: our shot: the weapon's sound (a wand only when its spell has none of its own)
+                    const char* shot = shotEvent(g, *src, w.spell);
+                    if (shot && (noData || std::strcmp(shot, "shoot_wand") != 0)) {
+                        SoundReq r;
+                        r.event = shot;
+                        r.self = true;
+                        r.what = "shot";
+                        out.push_back(r);
+                        if (noData) break;   // (no placeholder blip for it)
+                    }
+                }
+                if (noData) {
+                    if (mine && w.spell != w3n::kSpellAttack && nowMs - castBlipMs_ > 250) {
+                        castBlipMs_ = nowMs;
+                        SoundReq r;
+                        static const char* kBySchool[7] = {"spellcast", "spellcast_holy", "spellcast_fire", "spellcast_nature", "spellcast_frost",
+                                                           "spellcast_shadow", "spellcast_arcane"};
+                        r.event = kBySchool[g.spellNames.school(w.spell) % 7];
+                        r.self = true;
+                        r.what = "spellcast";
+                        out.push_back(r);
+                    }
+                    break;
+                }
                 at(g, w.src, ss->cast ? ss->cast : ss->missile, "cast", out);
                 for (int i = 0; i < w.nTargets && i < 2; ++i)
                     if (w.targets[i] && (w.targets[i] != w.src || !ss->cast)) at(g, w.targets[i], ss->impact, "spellimpact", out);
@@ -113,6 +221,14 @@ void SoundWorld::update(GameSession& g, const float pos[3], bool moving, bool on
                 stop.stop = true;
                 stop.tag = w.src | 1;
                 out.push_back(stop);
+                if (w.src == me && me != 0 && nowMs - failBlipMs_ > 400) {   // 6.39: our own cast fizzles
+                    failBlipMs_ = nowMs;
+                    SoundReq r;
+                    r.event = "spellfail";
+                    r.self = true;
+                    r.what = "spellfail";
+                    out.push_back(r);
+                }
                 break;
             }
         }

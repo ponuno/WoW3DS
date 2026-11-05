@@ -251,7 +251,23 @@ bool DataDir::open(const std::string& root) {
     for (auto& e : fs::directory_iterator(root, ec)) {
         std::string ext = e.path().extension().string();
         for (char& c : ext) c = (char)std::tolower((unsigned char)c);
-        if (ext == ".mpq") return openMpq(root);
+        if (ext == ".mpq") {
+            const bool ok = openMpq(root);
+            // 6.98: loose files next to the archives (a Turtle WoW client has Data\Interface\...): read when no archive has
+            // the file. Only the folders that hold such overrides, not the whole tree.
+            for (const char* sub : {"Interface", "interface"}) {
+                const fs::path d = fs::path(root) / sub;
+                if (!fs::is_directory(d, ec)) continue;
+                for (auto it = fs::recursive_directory_iterator(d, ec); it != fs::recursive_directory_iterator(); it.increment(ec)) {
+                    if (ec) break;
+                    if (!it->is_regular_file(ec)) continue;
+                    std::string rel = fs::relative(it->path(), root, ec).generic_string();
+                    files_.emplace(normalize(rel), it->path().string());
+                }
+                break;
+            }
+            return ok;
+        }
     }
     for (auto it = fs::recursive_directory_iterator(root, ec); it != fs::recursive_directory_iterator();
          it.increment(ec)) {
@@ -264,7 +280,13 @@ bool DataDir::open(const std::string& root) {
 }
 
 bool DataDir::read(const std::string& gamePath, std::vector<uint8_t>& out) const {
-    if (!archives_.empty()) return readMpq(gamePath, out);
+    if (fdid_) { bool handled = false; const bool ok = readForever(gamePath, out, handled); if (handled) return ok; }
+    if (!archives_.empty()) {
+        if (readMpq(gamePath, out)) return true;
+        if (files_.empty()) return false;
+        auto lf = files_.find(normalize(gamePath));
+        return lf != files_.end() && readFileFast(lf->second, out);
+    }
     std::string key = normalize(gamePath);
     auto it = files_.find(key);
     if (it == files_.end()) {
@@ -400,7 +422,7 @@ int printPackInfo(const std::string& path) {
     for (auto& [t, n] : countBy)
         std::printf("  %s x%-4zu %8.1f KB\n", typeName(t), n, bytesBy[t] / 1024.0);
 
-    size_t texGpu = 0, missingTex = 0, totalPlacements = 0, fxModels = 0, fxEmitters = 0, fxGlows = 0, fxAnimated = 0, lodModels = 0, lodCreatures = 0;
+    size_t texGpu = 0, missingTex = 0, totalPlacements = 0, fxModels = 0, fxEmitters = 0, fxGlows = 0, fxAnimated = 0, uvModels = 0, portalModels = 0, portalCount = 0, portalLost = 0, lodModels = 0, lodCreatures = 0, farCreatures = 0;
     std::map<uint8_t, size_t> fmtCount;
     for (uint32_t i = 0; i < h.entryCount; ++i) {
         const uint8_t* p = b.data() + e[i].offset;
@@ -484,6 +506,26 @@ int printPackInfo(const std::string& path) {
                 if (!w3d_model_lods(p, e[i].size)) return fail("model LOD table");
                 ++lodModels;
             }
+            if (m.offTexIds >= W3D_MODEL_HDR_UVA_END && m.offUvAnim) {   // 6.41: moving textures
+                const W3dUvAnimTable* ut = w3d_model_uvanim(p, e[i].size);
+                if (!ut) return fail("model UV animation table");
+                const uint16_t* us = reinterpret_cast<const uint16_t*>(p + ut->offSub);
+                for (uint32_t k = 0; k < m.submeshCount; ++k)
+                    if (us[k] != W3D_UVA_NONE && us[k] >= ut->animCount) return fail("submesh UV animation index");
+                ++uvModels;
+            }
+            if (m.offTexIds >= W3D_MODEL_HDR_PORTAL_END && m.offPortals) {   // 6.42: WMO portals
+                const W3dPortalTable* pt = w3d_model_portals(p, e[i].size);
+                if (!pt) return fail("model portal table");
+                const W3dPortal* pp = w3d_portals_of(pt);
+                for (uint32_t k = 0; k < pt->count; ++k) {
+                    const float nl = pp[k].plane[0] * pp[k].plane[0] + pp[k].plane[1] * pp[k].plane[1] + pp[k].plane[2] * pp[k].plane[2];
+                    if (!(nl > 0.9f && nl < 1.1f) || !(pp[k].radius >= 0) || !pp[k].toModel) return fail("portal plane / sphere / target");
+                    if (!byKey.count({W3D_ENTRY_MODEL, pp[k].toModel})) ++portalLost;   // (a group left out: --wmo-exterior-only, or a failed one)
+                }
+                ++portalModels;
+                portalCount += pt->count;
+            }
             if (const W3dFxHeader* fx = w3d_model_fx(p, e[i].size)) {   // stage 5.32: effects behind the footer
                 ++fxModels;
                 fxEmitters += fx->emitterCount;
@@ -530,6 +572,8 @@ int printPackInfo(const std::string& path) {
             }
             if ((h.levelUp != W3D_SFX_NONE && h.levelUp >= h.effectCount) || (h.loot != W3D_SFX_NONE && h.loot >= h.effectCount))
                 return fail("spell fx special effect index");
+            if (h.offEffects >= sizeof h && ((h.arrow != W3D_SFX_NONE && h.arrow >= h.effectCount) || (h.bullet != W3D_SFX_NONE && h.bullet >= h.effectCount)))
+                return fail("spell fx ammo effect index");
             size_t withSpeed = 0;
             for (uint32_t k = 0; k < h.spellCount; ++k) {
                 if (k && sr[k].spell <= sr[k - 1].spell) return fail("spell refs not sorted");
@@ -609,6 +653,20 @@ int printPackInfo(const std::string& path) {
                 }
                 for (int j = 0; j < pp.count; ++j) if (pp.bones[j] >= c.boneCount) return fail("palette bone index");
             }
+            if (c.farPalette) {   // 7.0: every LOD-2 range lies in the far palette
+                if (c.farPalette > c.paletteCount || !c.lodCount) return fail("creature far palette");
+                const W3dBonePalette& fp = pal[c.farPalette - 1];
+                const W3dSubLod* lv = w3d_creature_lods(p, e[i].size);
+                if (!lv) return fail("creature far palette without LODs");
+                for (uint32_t k = 0; k < c.submeshCount; ++k)
+                    for (uint32_t q = lv[k].firstIndex[W3D_MODEL_LODS - 1]; q < lv[k].firstIndex[W3D_MODEL_LODS - 1] + lv[k].indexCount[W3D_MODEL_LODS - 1]; ++q) {
+                        const W3dSkinVertex& v = vx[idx[q]];
+                        for (int j = 0; j < 2; ++j)
+                            if (v.bone[j] % 3 || v.bone[j] / 3 >= fp.count) return fail("far vertex bone outside the far palette");
+                        if (v.weight[0] + v.weight[1] != 255) return fail("far weights don't sum to 255");
+                    }
+                ++farCreatures;
+            }
             const W3dBone* bo = reinterpret_cast<const W3dBone*>(p + c.offBones);
             for (uint32_t k = 0; k < c.boneCount; ++k) if (bo[k].parent >= (int)k) return fail("bone parent order");
             const W3dAnimSeq* sq = reinterpret_cast<const W3dAnimSeq*>(p + c.offSeqs);
@@ -678,7 +736,9 @@ int printPackInfo(const std::string& path) {
         }
     }
     std::printf("  placements: %zu\n", totalPlacements);
-    std::printf("  LODs (6.12): %zu models, %zu creature models with lighter versions\n", lodModels, lodCreatures);
+    std::printf("  moving textures (6.41): %zu models\n", uvModels);
+    std::printf("  WMO portals (6.42): %zu groups hold %zu portals (%zu lead to a group that is not in the pack)\n", portalModels, portalCount, portalLost);
+    std::printf("  LODs (6.12): %zu models, %zu creature models with lighter versions, %zu with a far skeleton (7.0)\n", lodModels, lodCreatures, farCreatures);
     if (fxModels) std::printf("  effects: %zu models, %zu particle emitters, %zu glow sprites, %zu with bone animation\n", fxModels, fxEmitters, fxGlows, fxAnimated);
     std::printf("  texture GPU memory: %.1f KB (", texGpu / 1024.0);
     for (auto& [fmt, n] : fmtCount) std::printf(" %s:%zu", fmtName(fmt), n);

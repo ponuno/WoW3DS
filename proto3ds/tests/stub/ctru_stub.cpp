@@ -143,3 +143,7 @@ void C3D_TexDelete(C3D_Tex* t) {
     if (t->onVram) g_vram -= t->size;
     std::free(t->data); t->data = nullptr; --g_texLive;
 }
+
+// 7.0: creature_view.cpp writes to the perf log; tests without perflog.cpp get this no-op (weak: perf_test's real one wins)
+#include <cstdarg>
+namespace perf { __attribute__((weak)) void event(const char*, ...) {} }

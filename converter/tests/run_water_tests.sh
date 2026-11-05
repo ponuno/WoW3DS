@@ -33,4 +33,12 @@ grep -q "0 building cells from 0 groups" "$OUT/nowmo.log"
 "$B/w3dpreview" "$OUT/water.w3dp" "$OUT/prev" > /dev/null
 "$B/w3dpreview" "$OUT/water.w3dp" "$OUT/prev" --liquid | tee "$OUT/prev.log"
 grep -q "liquid_32_48.png: 260 wet cells, surface 0.00 .. 81.00" "$OUT/prev.log"
+# 6.59c: building waters past 65535 vertices in a tile: drawn from the 4-yd grid (the upper surface), not skipped
+python3 "$T/gen_bigwater_data.py" "$OUT/BigData"
+"$B/w3dconv" --data "$OUT/BigData" --map Test --tiles 32 48 32 48 -o "$OUT/big.w3dp" -v > "$OUT/big.log" 2>&1 || { tail -20 "$OUT/big.log"; exit 1; }
+grep -E "liquids of tile 32_48" "$OUT/big.log"
+grep -q "liquids of tile 32_48: 72000 vertices, too many - drawn from the 4-yd grid" "$OUT/big.log"
+"$B/w3dconv" --info "$OUT/big.w3dp" | tee "$OUT/big_info.log" | grep -E "water 32_48|liquid 32_48|^OK"
+grep -q "^water 32_48\|  water 32_48" "$OUT/big_info.log"
+grep -q "^OK" "$OUT/big_info.log"
 echo "WATER TESTS: PASS"

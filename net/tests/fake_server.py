@@ -11,6 +11,7 @@ header cipher against a second implementation.
 --life (with --stage5): the stage-5.10 scenario of life5.py (inventory, loot window, gossip, 3 deaths).
 --trade (with --stage5): the stage-5.12..5.14 scenario of trade5.py (faction reactions, quests, a vendor).
 --party (with --stage5): the stage-5.17 scenario of party5.py (invitation, members, stats, leader, kick, leave).
+--turtle: expect the Turtle WoW 1.18.1 login (build 7272), world build 5875 (6.58).
 --stage5: after entering the world, send real update objects / monster moves /
 another player (stage5.py) and validate the client's movement packets.
 Account: TEST / PASSWORD. World server listens on port+1.
@@ -52,7 +53,11 @@ def realmd(conn, world_port, salt_zero_top):
     gamename = body[0:4]; ver = body[4:7]; build = struct.unpack("<H", body[7:9])[0]
     acc_len = body[29]; account = body[30:30 + acc_len].decode()
     print(f"[realmd] challenge: protocol {proto} game {gamename!r} version {tuple(ver)} build {build} account {account}")
-    assert gamename == b"WoW\x00" and build == 5875 and account == ACCOUNT
+    if TURTLE:   # 6.58: Turtle-type realmd (tortoise-wow): realms only for 1.18.1 build 7272
+        assert tuple(ver) == (1, 18, 1) and build == 7272, (tuple(ver), build)
+    else:
+        assert build == 5875
+    assert gamename == b"WoW\x00" and account == ACCOUNT
 
     salt = bytearray(os.urandom(32))
     salt[31] = 0 if salt_zero_top else (salt[31] | 1)
@@ -167,6 +172,7 @@ def world(conn):
     expect = H(account.encode(), b"\0\0\0\0", struct.pack("<I", client_seed), struct.pack("<I", seed), K)
     if digest != expect:
         print("[world] AUTH_SESSION digest MISMATCH"); send(0x1EE, bytes([0x0D])); return
+    assert build == 5875, f"world build {build}"   # (6.58: the Turtle world server too)
     print(f"[world] AUTH_SESSION OK (build {build}, account {account}, addon block {addon_size} bytes inflated OK={RESULTS['addons_ok']})")
     crypt = Crypt(K)
     send(0x1EE, bytes([0x0C]) + struct.pack("<IBI", 0, 0, 0))
@@ -210,6 +216,8 @@ def world(conn):
             batching["on"] = True                  # like real servers: VERIFY_WORLD + first updates in one TCP write
             send(0x236, struct.pack("<Iffff", 0, *SPAWN, 3.07))   # SMSG_LOGIN_VERIFY_WORLD
             send(0x209, b"\0" * 128)               # SMSG_ACCOUNT_DATA_TIMES
+            if "--cinematic" in sys.argv:          # 6.86: a new character's intro (vmangos: SendCinematicStart on the first login)
+                send(0x0FA, struct.pack("<I", 81))     # SMSG_TRIGGER_CINEMATIC, human intro
             RESULTS["world_ok"] = True
             print(f"[world] player {guid} entered the world")
             if STAGE5:
@@ -229,6 +237,9 @@ def world(conn):
                 send(0x0A9, os.urandom(3000))      # fake update object, bigger than one TCP read
             batching["on"] = False
             conn.sendall(b"".join(batch)); batch.clear()
+        elif op == 0x0FC:                          # CMSG_COMPLETE_CINEMATIC (6.86)
+            RESULTS["cinematic_done"] = True
+            print("[world] intro cinematic completed by the client")
         elif op == 0x1DC:                          # CMSG_PING
             seq, lat = struct.unpack("<II", body)
             RESULTS["pings"] += 1
@@ -263,6 +274,7 @@ def _wrap(handler, c, *args):
     finally: c.close()
 
 STAGE5 = "--stage5" in sys.argv
+TURTLE = "--turtle" in sys.argv   # 6.58
 
 if __name__ == "__main__":
     port = int(sys.argv[sys.argv.index("--port") + 1]) if "--port" in sys.argv else 3724

@@ -129,6 +129,14 @@ void WorldObject::positionAt(uint32_t nowMs, float out[3], float* orient) const 
         out[0] += std::cos(a) * d;
         out[1] += std::sin(a) * d;
     }
+    if (blendMs) {   // 6.83
+        const uint32_t age = nowMs - blendMs;
+        if ((int32_t)age >= 0 && age < kBlendMs) {
+            const float k = 1.0f - (float)age / (float)kBlendMs;
+            const float e = k * k;   // eases out
+            out[0] += blend[0] * e; out[1] += blend[1] * e; out[2] += blend[2] * e;
+        }
+    }
     if (orient) *orient = normalizeAngle(o);
 }
 
@@ -305,7 +313,7 @@ bool ObjectTable::parseFields(Reader& r, WorldObject* o) {
     return !r.bad;
 }
 
-bool ObjectTable::parseMovementBlock(Reader& r, WorldObject& o, uint32_t nowMs) {
+bool ObjectTable::parseMovementBlock(Reader& r, WorldObject& o, uint32_t nowMs, bool transportTime) {
     uint8_t uf = r.u8();
     if (uf & UPDATEFLAG_SELF) o.self = true;
     if (uf & UPDATEFLAG_LIVING) {
@@ -316,6 +324,7 @@ bool ObjectTable::parseMovementBlock(Reader& r, WorldObject& o, uint32_t nowMs) 
         if (m.flags & MoveFlag::OnTransport) {
             m.transportGuid = r.packedGuid();
             m.tx = r.f32(); m.ty = r.f32(); m.tz = r.f32(); m.to = r.f32();
+            if (transportTime) r.u32();   // 6.58: Turtle
         }
         if (m.flags & MoveFlag::Swimming) m.pitch = r.f32();
         m.fallTime = r.u32();
@@ -328,7 +337,7 @@ bool ObjectTable::parseMovementBlock(Reader& r, WorldObject& o, uint32_t nowMs) 
         o.hasPos = true;
         o.posMs = nowMs;
         o.pathActive = false;
-        if (m.flags & MoveFlag::SplineEnabled) {
+        if ((m.flags & MoveFlag::SplineEnabled) || (turtle && (m.flags & 0x08000000u))) {   // (6.58: Turtle may use TBC's bit)
             uint32_t sf = r.u32();
             o.pathHasFinalO = false;
             if (sf & SPLINE_FINAL_POINT) r.skip(12);
@@ -374,6 +383,21 @@ bool ObjectTable::parseMovementBlock(Reader& r, WorldObject& o, uint32_t nowMs) 
     return !r.bad;
 }
 
+bool ObjectTable::parseMovementOrCreate(Reader& r, WorldObject& o, uint32_t nowMs, bool withFields) {
+    if (!turtle) return parseMovementBlock(r, o, nowMs) && (!withFields || parseFields(r, &o));
+    // 6.58: Turtle's layout first (a u32 after the transport position), then 1.12's, as WoWee (TurtlePacketParsers::parseUpdateObject).
+    // They differ only for a unit on a transport; the whole block (with its fields) decides.
+    const size_t at = r.pos;
+    const WorldObject keep = o;
+    if (parseMovementBlock(r, o, nowMs, true) && (!withFields || parseFields(r, &o))) return true;
+    o = keep;
+    r.pos = at;
+    r.bad = false;
+    stats.lastError.clear();
+    ++stats.turtleFallbacks;
+    return parseMovementBlock(r, o, nowMs, false) && (!withFields || parseFields(r, &o));
+}
+
 bool ObjectTable::parseUpdate(const uint8_t* p, size_t n, uint32_t nowMs) {
     nowMs_ = nowMs;
     Reader r(p, n);
@@ -396,7 +420,7 @@ bool ObjectTable::parseUpdate(const uint8_t* p, size_t n, uint32_t nowMs) {
                 uint64_t g = r.u64();   // full GUID here, unlike every other block
                 WorldObject tmp;
                 WorldObject* o = find(g);
-                if (!parseMovementBlock(r, o ? *o : tmp, nowMs)) { stats.lastError = "MOVEMENT block truncated"; return false; }
+                if (!parseMovementOrCreate(r, o ? *o : tmp, nowMs, false)) { stats.lastError = "MOVEMENT block truncated"; return false; }
                 break;
             }
             case UPD_CREATE:
@@ -410,7 +434,7 @@ bool ObjectTable::parseUpdate(const uint8_t* p, size_t n, uint32_t nowMs) {
                 o.guid = g;
                 o.type = (ObjType)ot;
                 if (g == self_) o.self = true;
-                if (!parseMovementBlock(r, o, nowMs) || !parseFields(r, &o)) {
+                if (!parseMovementOrCreate(r, o, nowMs, true)) {
                     if (!existed) objs_.erase(g);
                     if (stats.lastError.empty()) stats.lastError = "CREATE block truncated";
                     return false;
@@ -444,7 +468,16 @@ bool ObjectTable::parseMonsterMove(Reader& r, uint32_t nowMs) {
     WorldObject tmp;
     WorldObject* op = find(g);
     WorldObject& o = op ? *op : tmp;
+    float drawn[3] = {start.x, start.y, start.z};   // 6.83: where it was drawn a moment ago
+    const bool hadPos = op && o.hasPos && !o.carried && o.type == ObjType::Unit;
+    if (hadPos) o.positionAt(nowMs, drawn);
     o.mv.x = start.x; o.mv.y = start.y; o.mv.z = start.z;
+    if (hadPos) {
+        const float bx = drawn[0] - start.x, by = drawn[1] - start.y, bz = drawn[2] - start.z;
+        const float d = std::sqrt(bx * bx + by * by + bz * bz);
+        if (d > 0.05f && d < 8.0f) { o.blend[0] = bx; o.blend[1] = by; o.blend[2] = bz; o.blendMs = nowMs ? nowMs : 1; }
+        else o.blendMs = 0;   // (a teleport, or nothing to hide)
+    }
     o.posMs = nowMs;
     o.hasPos = true;
     o.pathHasFinalO = false;
@@ -456,7 +489,11 @@ bool ObjectTable::parseMonsterMove(Reader& r, uint32_t nowMs) {
         case 4: o.pathFinalO = r.f32(); o.pathHasFinalO = true; break;
         default: return false;
     }
-    uint32_t flags = r.u32(), dur = r.u32(), count = r.u32();
+    uint32_t flags = r.u32();
+    if (turtle && (flags & 0x00400000u)) { r.u8(); r.u32(); }   // 6.58: Turtle's Animation: type, start time (WoWee readSplineBodyHead)
+    uint32_t dur = r.u32();
+    if (turtle && (flags & 0x00000800u)) { r.f32(); r.u32(); }  // Parabolic: vertical acceleration, start time
+    uint32_t count = r.u32();
     if (r.bad || count == 0 || count > 1000) return false;
     // Uncompressed (Catmull-Rom/flying/cyclic): count absolute points.
     // Linear: destination, then count-1 packed offsets from the midpoint.
@@ -513,6 +550,23 @@ bool ObjectTable::handle(uint16_t op, const Bytes& data, uint32_t nowMs) {
             return true;
         }
         case ObjOp::SMSG_MONSTER_MOVE: {
+            // 6.58: a Turtle server may send the body zlib-compressed (u32 size, then a zlib stream) and wrapped as a sub-packet
+            // (u8 size, u16 opcode, body) - WoWee MovementHandler::handleMonsterMove
+            if (turtle && data.size() >= 6 && data[4] == 0x78 && (data[5] == 0x01 || data[5] == 0x9C || data[5] == 0xDA || data[5] == 0x5E)) {
+                const uint32_t size = data[0] | (data[1] << 8) | (data[2] << 16) | ((uint32_t)data[3] << 24);
+                Bytes out;
+                if (size == 0 || size > 65536 || !zlibInflate(data.data() + 4, data.size() - 4, out, size)) {
+                    stats.monsterMoveFails++;
+                    return true;
+                }
+                ++stats.turtleCompressedMoves;
+                if (out.size() >= 3 && (size_t)out[0] + 1 == out.size() && (uint16_t)(out[1] | (out[2] << 8)) == ObjOp::SMSG_MONSTER_MOVE)
+                    out.erase(out.begin(), out.begin() + 3);
+                Reader r(out);
+                if (parseMonsterMove(r, nowMs)) stats.monsterMoves++;
+                else stats.monsterMoveFails++;
+                return true;
+            }
             Reader r(data);
             if (parseMonsterMove(r, nowMs)) stats.monsterMoves++;
             else stats.monsterMoveFails++;

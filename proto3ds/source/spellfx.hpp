@@ -28,6 +28,9 @@ struct Table {
     const W3dSpellEffect* effect(uint16_t index) const;
     uint16_t levelUp() const { return h_ ? h_->levelUp : W3D_SFX_NONE; }   // stage 5.34: not spells
     uint16_t loot() const { return h_ ? h_->loot : W3D_SFX_NONE; }
+    // 6.95: the flight models of arrows / bullets (a pack made before has a 32-byte header: none)
+    uint16_t arrow() const { return h_ && h_->offEffects >= sizeof(W3dSpellFxHeader) ? h_->arrow : W3D_SFX_NONE; }
+    uint16_t bullet() const { return h_ && h_->offEffects >= sizeof(W3dSpellFxHeader) ? h_->bullet : W3D_SFX_NONE; }
     uint32_t spellCount() const { return h_ ? h_->spellCount : 0; }
 private:
     std::vector<uint8_t> data_;
@@ -69,9 +72,13 @@ public:
     static constexpr float kRange = 80.0f;
     static constexpr uint32_t kLingerMs = 1500;
     void setTable(const Table* t) { table_ = t; }
+    bool startedMissile(uint64_t caster, uint32_t nowMs) const;   // 6.95: a spell missile of this caster started just now
     EventResult event(const Event& e, uint32_t nowMs, const float cam[3], const Resolver& where, float* distOut = nullptr);
     // Every frame: moves missiles, ends what is over, fills out (effects to show and keep alive).
     void update(uint32_t nowMs, const Resolver& where, std::vector<Placed>& out);
+    // 6.95: a physical missile (arrow, bullet) of 'effect' from the caster's right hand to the target, with no impact effect.
+    // It flies for the time a 35 yd/s shot takes (0.12 .. 0.8 s). False when too far from the camera / not shown.
+    bool shoot(uint64_t caster, uint64_t target, uint16_t effect, uint32_t nowMs, const float cam[3], const Resolver& where);
     void clear() { active_.clear(); }
     // Stage 5.34, effects that last as long as something on the unit does (an aura, a channel, a lootable corpse): the
     // stage's effects of the visual on the unit until stop(); keys[] gets their keys (0 = not started). Returns how many.

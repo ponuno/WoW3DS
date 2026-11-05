@@ -101,6 +101,7 @@ def mapTile(name, i, base):
 for i in range(12): mapTile("Elwynn", i, (40, 90, 30))
 for i in range(12): mapTile("Azeroth", i, (20, 40, 90))
 for i in range(3): mapTile("Westfall", i, (90, 90, 30))
+for i in range(12): mapTile("World", i, (60, 60, 120))   # 6.69: the picture of the whole world (no WorldMapArea row)
 # UI stage 8: the unit frame art in the real layout (target's way round: portrait hole centred at (182, 44) radius 31, the
 # level's circle at (203, 66), name and bars at x 31..150, y 22..64), elite with a golden "dragon" on the right
 def unitFrame(elite):
