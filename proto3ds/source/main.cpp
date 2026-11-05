@@ -2110,7 +2110,11 @@ int main() {
                 }
             }
         }
-        if (cinPlay.s) {   // 7.04: the intro's camera (the streamer loads around it: cam.pos)
+        // 7.10: not under the loading screen. The streamer loads around cam.pos, the loading screen waits for the ground under the
+        // CHARACTER: with the camera already at the intro's start (often far off) that ground was never read - the wait ran to its
+        // 25 s limit while the intro's clock stood at 0 ("the intro is stuck at its start, later it plays"). Now the character's place
+        // loads first, then the camera flies (the intro's clock starts then too, line ~1377).
+        if (cinPlay.s && !loadingWorld) {   // 7.04: the intro's camera (the streamer loads around it: cam.pos)
             float p[3], tg[3];
             cinPlay.s->at(netMs - cinPlay.startMs, p, tg);
             memcpy(cam.pos, p, sizeof p);
@@ -2509,7 +2513,7 @@ int main() {
         perf::lap(perf::kGlue);
         perf::mark("streamerUpdate");
         streamerSetView(cam.yaw);
-        streamerSetBoost(loadingWorld || portal.active());
+        streamerSetBoost(loadingWorld || portal.active() || (cinPlay.s && netMs - cinPlay.startMs < 4000));   // 7.10: the intro's first place
         streamerSetWorldWanted(!loginUi || loadingWorld);   // 6.37: the login screens read nothing of the world
         float streamDist = cam.drawDist;
         {   // 6.72: the automatic draw distance (autodetail.hpp): aims at the pacer's frame time (30 FPS with the pacer off); the
