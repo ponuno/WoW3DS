@@ -520,6 +520,7 @@ bool GameSession::handleQuests(uint16_t op, const Bytes& data, uint32_t nowMs) {
             r.u64();
             if (r.bad) return true;
             ++questUpdates;
+            sound("questupdate");
             std::string what;
             if (const QuestInfo* qi = questInfoIfKnown(q))
                 for (const QuestInfo::Objective& o : qi->obj)

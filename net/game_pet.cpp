@@ -25,6 +25,7 @@ enum : uint16_t {
     SMSG_STABLE_RESULT = 0x273, CMSG_STABLE_SWAP_PET = 0x275, SMSG_PET_BROKEN = 0x2AF, SMSG_PET_ACTION_FEEDBACK = 0x2C6,
     CMSG_PET_STOP_ATTACK = 0x2EA, CMSG_PET_SPELL_AUTOCAST = 0x2F3, SMSG_PET_ACTION_SOUND = 0x324,
     CMSG_CAST_SPELL_PET = 0x12E,   // CMSG_CAST_SPELL
+    SMSG_PET_TAME_FAILURE = 0x173,  // 7.07: u8 PetTameFailureReason - also Call Pet's answer when there is no pet / it is dead
 };
 constexpr uint32_t kHappinessStep = 333000;
 constexpr uint32_t kUnitFlagPetRename = 0x10;
@@ -37,6 +38,25 @@ const char* feedbackText(uint8_t m) {
         case 3: return "Your pet can't attack that target";
         case 4: return "Your pet can't find a path to the target";
         default: return "";
+    }
+}
+
+// 7.07: PetTameFailureReason (vMaNGOS SharedDefines; the texts of 1.12's PETTAME_* strings). Call Pet answers 7 (no pet in the
+// current slot: it ran away, was abandoned or is in the stable) and 10 (it is dead: Revive Pet).
+const char* tameFailureText(uint8_t r) {
+    switch (r) {
+        case 1: return "Invalid creature";
+        case 2: return "You have too many pets";
+        case 3: return "That creature already has an owner";
+        case 4: return "That creature is not tameable";
+        case 5: return "You already have a pet";
+        case 6: return "You cannot tame creatures";
+        case 7: return "You do not have a pet to call (it ran away, was abandoned or is in the stable)";
+        case 8: return "Internal pet error";
+        case 9: return "That creature is too high level";
+        case 10: return "Your pet is dead: use Revive Pet";
+        case 11: return "Your pet is not dead";
+        default: return "Unknown taming error";
     }
 }
 
@@ -81,6 +101,23 @@ int GameSession::petLoyalty() const {
 bool GameSession::petCanRename() const {
     const WorldObject* o = petObject();
     return o && (o->field(UF::UNIT_FLAGS) & kUnitFlagPetRename) != 0;
+}
+
+bool GameSession::petCanDismissHunter() const {
+    return petCanAbandon() && knowsSpell(kSpellDismissPet);
+}
+
+bool GameSession::petDismissHunter(uint32_t nowMs) {
+    if (!petGuid()) { error("You have no pet", Vocal::None, nowMs); return false; }
+    if (!knowsSpell(kSpellDismissPet)) { fail("You do not know Dismiss Pet.", nowMs); return false; }
+    if (cast.active && nowMs - cast.startMs < 400) return false;
+    // CMSG_CAST_SPELL u32 spell, u16 mask 0: the spell's own target is the pet (not our selected unit: castSpell would check
+    // the range to that one and could refuse)
+    Writer w;
+    w.u32(kSpellDismissPet);
+    w.u16(0);
+    send(CMSG_CAST_SPELL_PET, w.b, nowMs);
+    return true;
 }
 
 bool GameSession::petCanAbandon() const {
@@ -293,13 +330,26 @@ void GameSession::buyStableSlot(uint32_t nowMs) {
 // ------------------------------------------------------------------ updates
 void GameSession::updatePet(uint32_t nowMs) {
     const WorldObject* o = petObject();
-    if (pet.active && !o) {
+    // 7.07: while our own UNIT_FIELD_SUMMON still names the pet the server has it (its object may come late after logging in or
+    // a loading screen): the bar is kept; SMSG_PET_SPELLS with guid 0 is what ends it
+    const WorldObject* me = selfObject();
+    const uint64_t summon = me ? ((uint64_t)me->field(UF::UNIT_FIELD_SUMMON) | ((uint64_t)me->field(UF::UNIT_FIELD_SUMMON + 1) << 32)) : 0;
+    if (pet.active && !o && !(summon && summon == pet.guid)) {
         // the unit left our view (died and despawned, went out of range): the bar stays for a few seconds
         if (!petGoneMs_) petGoneMs_ = nowMs ? nowMs : 1;
         else if (nowMs - petGoneMs_ > 8000) { pet = PetState(); petGoneMs_ = 0; }
     } else {
         petGoneMs_ = 0;
     }
+    // 7.07: a hunter's pet that stays unhappy loses loyalty (vMaNGOS Pet::TickLoyaltyChange: -20 every 12 s) and at the lowest
+    // loyalty runs away for good - a freshly tamed pet starts unhappy (166500 of 333000) and is gone after ~20 minutes unfed.
+    // The original shows the red happiness face; here a red line when it turns unhappy, again every 90 s while it lasts.
+    const int mood = o && pet.active ? petHappiness() : 0;
+    if (mood == 1 && (petMoodSeen_ != 1 || nowMs - petMoodWarnMs_ > 90000)) {
+        petMoodWarnMs_ = nowMs ? nowMs : 1;
+        fail(petLoyalty() <= 1 ? "Your pet is unhappy and will run away! Feed it (Feed Pet)." : "Your pet is unhappy: feed it (Feed Pet).", nowMs);
+    }
+    if (mood) petMoodSeen_ = mood;
     if (o && pet.active) {
         const uint32_t num = o->field(UF::UNIT_FIELD_PETNUMBER);
         if (num && num != pet.number) { pet.number = num; pet.name.clear(); pet.nameAskedMs = 0; }
@@ -391,9 +441,15 @@ bool GameSession::handlePet(uint16_t op, const Bytes& data, uint32_t nowMs) {
             error(why, Vocal::None, nowMs, "Pet: " + spellNames.name(spell) + ": " + why);
             return true;
         }
-        case SMSG_PET_BROKEN:
-            addLocal("Your pet's loyalty is gone: it has run away.", nowMs);
+        case SMSG_PET_BROKEN:   // 7.07: a red line too (only a chat line before: easy to miss - "the pet is gone after logging in")
+            fail("Your pet was unhappy for too long and has run away.", nowMs);
             return true;
+        case SMSG_PET_TAME_FAILURE: {
+            const uint8_t why = r.u8();
+            if (r.bad || !why) return true;
+            fail(tameFailureText(why), nowMs);
+            return true;
+        }
         case SMSG_PET_ACTION_SOUND:
             return true;
         case MSG_LIST_STABLED_PETS: {

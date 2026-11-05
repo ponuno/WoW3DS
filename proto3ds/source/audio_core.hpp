@@ -28,12 +28,18 @@ public:
     size_t bytes() const { return size_; }
     // The built-in sounds of the stub (no client sounds converted): short synthesized blips per event.
     bool synthesize(Alloc a = nullptr, Free f = nullptr);
+    // 6.39: after load(): the built-in sound for every event the pack does not carry (a name that this client does not have),
+    // so an event is never silent. Returns how many were added.
+    size_t synthesizeMissing(Alloc a = nullptr, Free f = nullptr);
 private:
+    bool synthInto(Alloc a, Free f, bool missingOnly, size_t* added);
     void release();
     std::unordered_map<uint32_t, std::vector<Clip>> clips_;
     uint8_t* blob_ = nullptr;
     size_t size_ = 0;
     Free free_ = nullptr;
+    uint8_t* extra_ = nullptr;   // the built-in sounds that fill the holes of a loaded pack
+    Free extraFree_ = nullptr;
     std::minstd_rand rng_{12345};
 };
 

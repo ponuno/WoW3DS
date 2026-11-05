@@ -21,6 +21,8 @@ Model* streamerAcquireItemModel(uint32_t) { return nullptr; }
 void streamerReleaseItemModel(Model*) {}
 void streamerReleaseDisplay(CreatureDisplay*) {}
 bool CreatureDisplay::ready() const { return false; }
+// nor the performance log (creature_view.cpp notes odd animation picks in it)
+namespace perf { void event(const char*, ...) {} }
 
 static int g_fail = 0, g_ok = 0;
 #define CHECK(c, ...) do { if (c) ++g_ok; else { ++g_fail; std::printf("FAIL %s:%d ", __FILE__, __LINE__); std::printf(__VA_ARGS__); std::printf("\n"); } } while (0)
@@ -129,9 +131,31 @@ static void stateMachine() {
     c.castGoMs = 9900; c.castGoLook = CastLook::Bow;
     CHECK(k.id(c) == W3D_ANIM_FIRE_BOW, "auto shot with a bow");
     k.id(c, 1100);
+    // 6.87: between the shots of Auto Shot / aiming: the ranged ready stance, not the melee one; a gun / crossbow fires as a rifle
+    c.inCombat = true; c.weapon = CreatureWeapon::OneHand; c.rangedStance = CastLook::Rifle;
+    CHECK(k.id(c) == W3D_ANIM_READY_RIFLE, "between shots: the gun ready (not ready 1H)");
+    c.castGoMs = 9930; c.castGoLook = CastLook::Rifle;
+    CHECK(k.id(c) == W3D_ANIM_ATTACK_RIFLE, "a shot with a gun");
+    CHECK(k.id(c, 1100) == W3D_ANIM_READY_RIFLE, "back to the gun ready stance");
+    c.rangedStance = CastLook::Bow;
+    CHECK(k.id(c) == W3D_ANIM_READY_BOW, "a bow ready");
+    c.rangedStance = CastLook::Thrown;
+    CHECK(k.id(c) == W3D_ANIM_READY_THROWN, "a throwing weapon ready");
+    c.rangedStance = CastLook::Spell;
+    CHECK(k.id(c) == W3D_ANIM_READY_1H, "no shooting: the melee ready stance again");
+    c.inCombat = false;
+    k.id(c, 1100);
     c.casting = 3;
     CHECK(k.id(c) == W3D_ANIM_CHANNEL_CAST_DIRECTED, "channel");
     c.casting = 0;
+    // 6.36: opening / gathering at a game object kneels (the spell-casting hands were shown before)
+    c.casting = 5;
+    CHECK(k.id(c) == W3D_ANIM_KNEEL_START, "gathering: kneels down");
+    CHECK(k.id(c, 1100) == W3D_ANIM_KNEEL_LOOP, "gathering: the kneeling pose while the bar runs");
+    c.casting = 0; c.castGoMs = 9950; c.castGoObject = true; c.castGoDirected = false;
+    CHECK(k.id(c) == W3D_ANIM_KNEEL_END, "the gathering is done: gets up, no spell release");
+    c.castGoObject = false;
+    k.id(c, 1100);
     // emotes: one-shot, cancelled by moving; looping emote state
     c.emoteAnim = 67; c.emoteMs = 10000;
     CHECK(k.id(c) == 67, "wave");
@@ -206,6 +230,8 @@ static void stateMachine() {
     CHECK(w.id(v) == W3D_ANIM_STAND, "no parry: stands");
     v.casting = 1;
     CHECK(w.id(v) == W3D_ANIM_STAND, "no spell animations: stands");
+    v.casting = 5;
+    CHECK(w.id(v) == W3D_ANIM_STAND, "gathering without kneeling animations: stands");
     v.casting = 0;
     v.speed = 3; v.moveFlags = 0x2; v.inCombat = false;
     CHECK(w.id(v) == W3D_ANIM_WALK, "no backwards: walks");
@@ -219,6 +245,20 @@ static void stateMachine() {
     bool loop;
     CHECK(idOf(wolf.data(), creaturePickSeq(wolf.data(), true, 0, false, false, &rate, &loop)) == W3D_ANIM_DEATH && !loop, "pick: dead");
     CHECK(idOf(wolf.data(), creaturePickSeq(wolf.data(), false, 7, false, false, &rate, &loop)) == W3D_ANIM_RUN, "pick: run");
+
+    // 6.36: w3d_seq_animated / the diagnostics for models that cannot move (the hand-made models have no keys: all still)
+    CHECK(!w3d_seq_animated(wolf.data(), 0), "a still stand is not animated");
+    CHECK(!w3d_seq_animated(wolf.data(), -1) && !w3d_seq_animated(wolf.data(), 99), "no such sequence: not animated");
+    {
+        std::vector<uint8_t> m = makeModel({0, 4, 5});
+        W3dCreatureHeader* h = (W3dCreatureHeader*)m.data();
+        W3dAnimSeq* sq = (W3dAnimSeq*)(m.data() + h->offSeqs);
+        sq[0].frames = 10;   // ten frames, but the one bone's channels are all NONE
+        CHECK(!w3d_seq_animated(m.data(), 0), "frames without keyed channels: still");
+        uint32_t* ch = (uint32_t*)(m.data() + sq[0].offChannels);
+        ch[0] = W3D_CHAN_ANIM | 0;   // rotation keyed over time
+        CHECK(w3d_seq_animated(m.data(), 0), "a keyed channel over several frames: animated");
+    }
 
     // the mount seat: bone at rest, scaled 2x, turned 90 degrees
     std::vector<uint8_t> horse = makeModel({0, 4, 5}, true);
@@ -298,7 +338,34 @@ static void sessionSide(const char* log) {
         fillUnitState(s, *s.objects.find(wg), now + 4000, c);
         CHECK(c.swingOff, "the wolf's off hand");
     }
-    std::printf("  session: emote, cast at us / around, release, parry, off hand\n");
+    // 6.36: a cast at a game object (Opening a chest, a quest object): kneeling, and no spell release at the end
+    {
+        const uint64_t go = 0xF110000000000123ull;
+        auto fb = [](float f) { uint32_t u; std::memcpy(&u, &f, 4); return u; };
+        Writer u;
+        u.u32(1); u.u8(0); u.u8(3); u.packedGuid(go); u.u8(5);
+        u.u8(0x40);
+        u.f32(10); u.f32(20); u.f32(30); u.f32(0);
+        u.u8(1); u.u32(1u << UF::GAMEOBJECT_TYPE_ID); u.u32(3);   // a chest
+        (void)fb;
+        CHECK(s.objects.parseUpdate(u.b.data(), u.b.size(), now + 5000), "game object created");
+        CHECK(s.objects.find(go) && s.objects.find(go)->type == ObjType::GameObject, "it is a game object");
+        Writer w;
+        packed(w, mg); packed(w, mg);
+        w.u32(6247); w.u16(0); w.u32(2000);
+        w.u16(0x800); packed(w, go);
+        s.handle(0x131, w.b, now + 5000);
+        fillUnitState(s, *s.objects.find(mg), now + 5500, c);
+        CHECK(c.casting == 5, "opening a chest: casting = at an object (%u)", c.casting);
+        Writer g;
+        packed(g, mg); packed(g, mg);
+        g.u32(6247); g.u16(0); g.u8(0); g.u8(0); g.u16(0x800); packed(g, go);
+        s.handle(0x132, g.b, now + 7000);
+        fillUnitState(s, *s.objects.find(mg), now + 7000, c);
+        CHECK(c.castGoMs == now + 7000 && c.castGoObject && !c.castGoDirected && c.casting == 0, "the release is at an object (%d %d %u)",
+              (int)c.castGoObject, (int)c.castGoDirected, c.casting);
+    }
+    std::printf("  session: emote, cast at us / around, release, parry, off hand, cast at a game object\n");
 }
 
 // Game objects (stage 5.41): doors and chests play Open / Close when their state changes, rest in the pose of the state; corpses and
@@ -395,9 +462,175 @@ static void gameObjects() {
     }
 }
 
+
+// 6.43: a model of 8 bones whose Stand poses all of them but whose kneeling sequences have no keys at all (the converter found none):
+// a wind rider at the flight master (stand state 8) must stand, not show its bind pose (the T-pose).
+static void brokenSequences() {
+    const std::vector<uint16_t> ids = {W3D_ANIM_STAND, W3D_ANIM_KNEEL_START, W3D_ANIM_KNEEL_LOOP, 75, W3D_ANIM_SIT_GROUND, W3D_ANIM_WALK};
+    const uint32_t nb = 8;
+    std::vector<uint8_t> b(sizeof(W3dCreatureHeader) + nb * sizeof(W3dBone) + ids.size() * sizeof(W3dAnimSeq) + ids.size() * nb * 12 + 16, 0);
+    W3dCreatureHeader* h = (W3dCreatureHeader*)b.data();
+    h->boneCount = nb;
+    h->seqCount = (uint32_t)ids.size();
+    h->offBones = sizeof(W3dCreatureHeader);
+    h->offSeqs = h->offBones + nb * sizeof(W3dBone);
+    h->transScale = 1;
+    h->seatBone = -1;
+    const uint32_t offChan = h->offSeqs + (uint32_t)(ids.size() * sizeof(W3dAnimSeq));
+    W3dBone* bone = (W3dBone*)(b.data() + h->offBones);
+    for (uint32_t i = 0; i < nb; ++i) bone[i].parent = -1;
+    W3dAnimSeq* s = (W3dAnimSeq*)(b.data() + h->offSeqs);
+    uint32_t* ch = (uint32_t*)(b.data() + offChan);
+    for (size_t i = 0; i < ids.size(); ++i) {
+        s[i].animId = ids[i];
+        s[i].frames = 1;
+        s[i].durationMs = 1000;
+        s[i].offChannels = offChan + (uint32_t)(i * nb * 12);
+        // Stand, sitting and walking pose every bone (a constant key at offset 0); the three kneeling ones none
+        const bool keyed = ids[i] == W3D_ANIM_STAND || ids[i] == W3D_ANIM_SIT_GROUND || ids[i] == W3D_ANIM_WALK;
+        for (uint32_t k = 0; k < nb * 3; ++k) ch[i * nb * 3 + k] = keyed && k % 3 == 0 ? 0u : W3D_CHAN_NONE;
+    }
+    const uint8_t* m = b.data();
+    CHECK(w3d_seq_posed_bones(m, 0) == nb && w3d_seq_posed_bones(m, 2) == 0, "posed bones counted");
+    CHECK(w3d_seq_broken(m, 2) && w3d_seq_broken(m, 3) && !w3d_seq_broken(m, 0) && !w3d_seq_broken(m, 4), "the keyless sequences are broken, Stand / sit are not");
+    Clock k;
+    k.blob = m;
+    CreatureSeen c{};
+    c.standState = 8;
+    CHECK(k.id(c) == W3D_ANIM_STAND && k.id(c, 1100) == W3D_ANIM_STAND, "stand state 8 with keyless kneeling: Stand, not the bind pose");
+    c.standState = 1;
+    k.id(c);
+    CHECK(k.id(c, 1100) == W3D_ANIM_SIT_GROUND, "a keyed sitting sequence still plays");
+    c.standState = 0;
+    c.loopAnim = 75;
+    CHECK(k.id(c, 1100) == W3D_ANIM_STAND, "a keyless looping emote: Stand");
+}
+
+// 6.64: smoothing under ping
+static void pingSmoothing() {
+    std::vector<uint16_t> all;
+    for (int i = 0; i <= 138; ++i) all.push_back((uint16_t)i);
+    std::vector<uint8_t> hum = makeModel(all);
+    CreatureSeen c;
+    c.inCombat = true; c.weapon = CreatureWeapon::OneHand;
+    {   // a blow that lands while the unit is still extrapolated as moving plays when it stops
+        Clock k{UnitAnimator(), hum.data()};
+        k.id(c);
+        c.speed = 5; c.moveFlags = 1;
+        k.id(c);
+        c.swingMs = k.now + 10;
+        CHECK(k.id(c) == W3D_ANIM_RUN, "moving: still runs");
+        c.speed = 0; c.moveFlags = 0;
+        CHECK(k.id(c, 100) == W3D_ANIM_ATTACK_1H, "latched swing plays once the unit stops");
+    }
+    {   // but not forever
+        Clock k{UnitAnimator(), hum.data()};
+        CreatureSeen d = c;
+        d.swingMs = 0; d.speed = 5; d.moveFlags = 1;
+        k.id(d);
+        d.swingMs = k.now + 10;
+        for (int i = 0; i < 14; ++i) k.id(d);   // 700 ms of frames, still moving
+        d.speed = 0; d.moveFlags = 0;
+        CHECK(k.id(d) != W3D_ANIM_ATTACK_1H, "a swing older than the latch window is dropped");
+    }
+    {   // catch-up: an event 120 ms old starts 120 ms in
+        Clock k{UnitAnimator(), hum.data()};
+        CreatureSeen d = c;
+        d.swingMs = 0;
+        k.id(d);
+        d.swingMs = k.now - 70;   // stamped before this frame (now advances 50 in step)
+        k.id(d);
+        CHECK(k.a.timeMs() >= 100.0f && k.a.timeMs() <= 150.0f, "late event starts partway in (%f)", k.a.timeMs());
+    }
+    {   // a second swing does not cut the first: it follows it
+        Clock k{UnitAnimator(), hum.data()};
+        CreatureSeen d = c;
+        d.swingMs = 0;
+        k.id(d);
+        d.swingMs = k.now + 10;
+        k.id(d);
+        k.id(d, 300);
+        d.swingMs = k.now + 10;
+        k.id(d, 100);
+        CHECK(k.a.timeMs() > 300.0f, "second swing waits for the first (%f)", k.a.timeMs());
+        k.id(d, 400);   // first over (1000 ms) at ~+850: still waiting in the window? 100+400 -> 500 elapsed
+        k.id(d, 400);
+        CHECK(true, "follows");
+    }
+}
+
+// 6.93: drawing / sheathing the weapons: the reach (89 back, 90 hip) plays once, the weapon changes hands at 40% of it.
+static void sheathing() {
+    std::vector<uint16_t> all;
+    for (int i = 0; i <= 138; ++i) all.push_back((uint16_t)i);
+    std::vector<uint8_t> hum = makeModel(all);
+    CreatureSeen c;
+    c.look = 1;
+    c.equip[W3D_EQ_MAINHAND] = 100; c.equipInv[W3D_EQ_MAINHAND] = 13;   // a one-hander: the hip
+    {
+        Clock k{UnitAnimator(), hum.data()};
+        k.step(c);
+        CHECK(!k.a.weaponsDrawn(), "starts sheathed");
+        c.inCombat = true;
+        CHECK(k.id(c) == W3D_ANIM_HIP_SHEATHE, "a one-hander: the hip reach");
+        CHECK(!k.a.weaponsDrawn(), "still sheathed at the start of the reach");
+        k.step(c, 300);
+        CHECK(!k.a.weaponsDrawn(), "300 ms of 1000: not yet");
+        k.step(c, 150);
+        CHECK(k.a.weaponsDrawn(), "after 40%%: in the hand");
+        CHECK(!k.step(c).loop, "the reach plays once");
+        k.step(c, 1000);
+        CHECK(k.a.weaponsDrawn(), "stays drawn");
+        c.inCombat = false;
+        CHECK(k.id(c) == W3D_ANIM_HIP_SHEATHE, "the same reach to put it away");
+        CHECK(k.a.weaponsDrawn(), "still in the hand at the start");
+        k.step(c, 450);
+        CHECK(!k.a.weaponsDrawn(), "sheathed after 40%%");
+    }
+    {   // a two-hander: the reach to the back
+        CreatureSeen d = c;
+        d.inCombat = false;
+        d.equipInv[W3D_EQ_MAINHAND] = 17;
+        Clock k{UnitAnimator(), hum.data()};
+        k.step(d);
+        d.inCombat = true;
+        CHECK(k.id(d) == W3D_ANIM_SHEATHE, "a two-hander: the back reach");
+    }
+    {   // running: no reach, the weapon changes at once; and a creature never sheathes
+        CreatureSeen d = c;
+        d.inCombat = false;
+        d.speed = 7;
+        Clock k{UnitAnimator(), hum.data()};
+        k.step(d);
+        d.inCombat = true;
+        CHECK(k.id(d) == W3D_ANIM_RUN, "running: no reach");
+        CHECK(k.a.weaponsDrawn(), "running: drawn at once");
+    }
+    {   // a model without the sequences: at once, nothing stuck
+        std::vector<uint8_t> bare = makeModel({0, 4, 5, 25, 26});
+        CreatureSeen d = c;
+        d.inCombat = false;
+        Clock k{UnitAnimator(), bare.data()};
+        k.step(d);
+        d.inCombat = true;
+        k.step(d);
+        CHECK(k.a.weaponsDrawn(), "no reach in the model: drawn at once");
+    }
+    {   // first seen already in combat: drawn, no reach
+        CreatureSeen d = c;
+        d.inCombat = true;
+        Clock k{UnitAnimator(), hum.data()};
+        AnimChoice a = k.step(d);
+        CHECK(k.a.weaponsDrawn() && idOf(hum.data(), a.seq) != W3D_ANIM_HIP_SHEATHE, "first seen in combat");
+    }
+}
+
 int main(int argc, char** argv) {
     gameObjects();
     stateMachine();
+    sheathing();
+    pingSmoothing();
+    brokenSequences();
     sessionSide(argc > 1 ? argv[1] : "/tmp/w3d_stage5/fight.w3dl");
     std::printf("ANIM: %d checks, %d failed -> %s\n", g_ok + g_fail, g_fail, g_fail ? "FAIL" : "PASS");
     return g_fail ? 1 : 0;

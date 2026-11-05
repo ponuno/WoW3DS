@@ -6,6 +6,8 @@
 #include "w3d_farlod.h"
 #include "w3d_farobj.h"
 #include "world.h"
+#include "hlod.hpp"
+#include "w3d_hlod.h"
 
 #include <array>
 #include <vector>
@@ -13,30 +15,41 @@
 #include <string.h>
 
 #include <algorithm>
+#include "sky.hpp"
+#include <map>
 #include <unordered_map>
 
 #include "w3d_anim.h"
 
 #include "model_shbin.h"
 #include "skin_shbin.h"
+#include "vs_fold.hpp"
 #include "terrain_shbin.h"
 #include "fx_shbin.h"
 #include "fx.hpp"
 #include "perflog.hpp"
+#include "static_batch.hpp"
 
 namespace {
 
 // Sky colours (RGB). Fog uses the horizon colour so distant terrain melts into the sky.
-const uint8_t kZenith[3] = {70, 120, 200};
-const uint8_t kHorizon[3] = {190, 210, 230};
+// 6.60: the sky's five colours (top, middle, two horizon bands, fog = the horizon) - these defaults until rendererSetSky says otherwise
+// (the zone's and the server's time of day, sky.cpp); the dome is two vertex buffers so a new colouring never touches the one the GPU reads
+enum { kSkyTop, kSkyMid, kSkyBand1, kSkyBand2, kSkyFog, kSkyN };
+uint8_t g_skyCol[kSkyN][3] = {{70, 120, 200}, {110, 155, 215}, {150, 185, 225}, {175, 200, 228}, {190, 210, 230}};
 inline u32 fogConstColor(const uint8_t c[3]) { return (u32)c[0] | ((u32)c[1] << 8) | ((u32)c[2] << 16) | 0xFF000000u; }
-u32 g_fogColor = fogConstColor(kHorizon);   // this frame's fog: the horizon, or the water's colour under the surface
+float g_skyBase[kSkyN][3] = {{70, 120, 200}, {110, 155, 215}, {150, 185, 225}, {175, 200, 228}, {190, 210, 230}};   // the zone's colours, before the spirit world's grading
+float g_ghostFogShare = 0.55f;   // 6.80
+float g_ghost = 0.0f;   // 6.62: 0 alive .. 1 ghost: the sky and the fog go grey
+u32 g_fogColor = fogConstColor(g_skyCol[kSkyFog]);   // this frame's fog: the horizon, or the water's colour under the surface
 
 struct Shader {
     DVLB_s* dvlb = nullptr;
     shaderProgram_s prog;
     int uProj = -1, uMV = -1, uScale = -1, uOffset = -1, uUV = -1, uLight = -1, uLightParams = -1, uFog = -1, uBones = -1;
     int uMask = -1;
+    int uUvA = -1, uUvB = -1;   // 6.41: the model shader's texture transform rows
+    int uMvp = -1;              // 6.70: the model shader's projection * modelView * T(offset) * S(scale)
 };
 Shader g_terrainSh, g_modelSh, g_skinSh, g_fxSh;
 C3D_AttrInfo g_terrainAttr, g_modelAttr, g_skinAttr, g_fxAttr;
@@ -57,9 +70,99 @@ int g_markerVerts = 0;
 constexpr float kMarkerQ = 16384.0f;   // int16 units per marker unit
 
 // Sky dome (terrain vertex layout, unit radius scaled by posScale).
-W3dTerrainVertex* g_skyV = nullptr;
+W3dTerrainVertex* g_skyBuf[2] = {nullptr, nullptr};
+int g_skyCur = 0;
 uint16_t* g_skyI = nullptr;
 int g_skyIndexCount = 0;
+constexpr int kSkyRings = 9, kSkySegs = 16;
+// 6.61: the sun and the moon: a bright disc inside a soft halo each, drawn added onto the dome; the vertices are rebuilt when the hour changes
+// (three buffers in turn so the GPU never reads one being written)
+constexpr int kCelSegs = 16, kCelVerts = 2 * 2 * kCelSegs * 3;   // (sun, moon) x (halo, core) x segments x 3
+W3dTerrainVertex* g_celBuf[3] = {nullptr, nullptr, nullptr};
+int g_celCur = 0, g_celCount = 0;
+constexpr float kSkyElev[kSkyRings + 1] = {-10, 0, 4, 8, 15, 22, 33, 45, 65, 90};   // degrees of each ring
+
+// 6.41: the model shader's texture transform: identity (a still texture), or the rows of one animated part
+// 6.70: the model shader's uniforms are kept here and folded before a draw (vs_fold.hpp): the shader no longer scales, offsets,
+// projects in two steps or scales the uv / normal per vertex. Every model-program draw calls modelVsFlush() first (drawFlush()).
+struct ModelVs {
+    C3D_Mtx proj, mv;
+    float scale[4] = {1, 1, 1, 1}, off[3] = {0, 0, 0};
+    float uvA[3] = {1, 0, 0}, uvB[3] = {0, 1, 0}, light[3] = {0, 0, 1};
+    bool matDirty = true, uvDirty = true, lightDirty = true;
+};
+ModelVs g_mvs;
+const C3D_Mtx* g_foldedLast = nullptr;   // 7.05: whose folded matrices the registers hold (mvsFolded; null: unknown)
+bool g_progModel = false;   // the model program is the bound one (drawFlush folds its uniforms)
+vsfold::M4 toM4(const C3D_Mtx& c) {
+    vsfold::M4 r;
+    for (int i = 0; i < 4; ++i) { r.m[i][0] = c.r[i].x; r.m[i][1] = c.r[i].y; r.m[i][2] = c.r[i].z; r.m[i][3] = c.r[i].w; }
+    return r;
+}
+C3D_Mtx fromM4(const vsfold::M4& m) {
+    C3D_Mtx c;
+    for (int i = 0; i < 4; ++i) { c.r[i].x = m.m[i][0]; c.r[i].y = m.m[i][1]; c.r[i].z = m.m[i][2]; c.r[i].w = m.m[i][3]; }
+    return c;
+}
+void bindProgram(Shader& sh) {
+    C3D_BindProgram(&sh.prog);
+    g_progModel = &sh == &g_modelSh;
+    if (g_progModel) g_mvs.matDirty = g_mvs.uvDirty = g_mvs.lightDirty = true;   // (another program may have used the registers)
+}
+void mvsProj(const C3D_Mtx& m) { g_mvs.proj = m; g_mvs.matDirty = true; }
+void mvsMV(const C3D_Mtx& m) { g_mvs.mv = m; g_mvs.matDirty = true; g_foldedLast = nullptr; }
+void mvsScale(float x, float y, float z, float uv) {
+    if (x != g_mvs.scale[0] || y != g_mvs.scale[1] || z != g_mvs.scale[2]) g_mvs.matDirty = true;
+    if (uv != g_mvs.scale[3]) g_mvs.uvDirty = true;
+    g_mvs.scale[0] = x; g_mvs.scale[1] = y; g_mvs.scale[2] = z; g_mvs.scale[3] = uv;
+}
+void mvsOffset(float x, float y, float z, float) {
+    if (x != g_mvs.off[0] || y != g_mvs.off[1] || z != g_mvs.off[2]) g_mvs.matDirty = true;
+    g_mvs.off[0] = x; g_mvs.off[1] = y; g_mvs.off[2] = z;
+}
+void mvsUvA(float a, float b, float c, float) { g_mvs.uvA[0] = a; g_mvs.uvA[1] = b; g_mvs.uvA[2] = c; g_mvs.uvDirty = true; }
+void mvsUvB(float a, float b, float c, float) { g_mvs.uvB[0] = a; g_mvs.uvB[1] = b; g_mvs.uvB[2] = c; g_mvs.uvDirty = true; }
+void mvsLight(float x, float y, float z, float) { g_mvs.light[0] = x; g_mvs.light[1] = y; g_mvs.light[2] = z; g_mvs.lightDirty = true; }
+void modelVsFlush() {
+    if (g_mvs.matDirty) {
+        g_foldedLast = nullptr;
+        const vsfold::M4 mvF = vsfold::foldScaleOffset(toM4(g_mvs.mv), g_mvs.scale, g_mvs.off);
+        const C3D_Mtx mvC = fromM4(mvF), mvpC = fromM4(vsfold::mul(toM4(g_mvs.proj), mvF));
+        C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_modelSh.uMvp, &mvpC);
+        C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_modelSh.uMV, &mvC);
+        g_mvs.matDirty = false;
+    }
+    if (g_mvs.uvDirty) {
+        float a[3], b[3];
+        vsfold::foldUvRow(g_mvs.uvA, g_mvs.scale[3], a);
+        vsfold::foldUvRow(g_mvs.uvB, g_mvs.scale[3], b);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, g_modelSh.uUvA, a[0], a[1], a[2], 0);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, g_modelSh.uUvB, b[0], b[1], b[2], 0);
+        g_mvs.uvDirty = false;
+    }
+    if (g_mvs.lightDirty) {
+        constexpr float k = 1.0f / 127.0f;
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, g_modelSh.uLight, g_mvs.light[0] * k, g_mvs.light[1] * k, g_mvs.light[2] * k, 0);
+        g_mvs.lightDirty = false;
+    }
+}
+inline void drawFlush() { if (g_progModel) modelVsFlush(); }
+// 7.05: an instance's matrices folded once (drawModels: per instance, not per instance and part); the upload is skipped when
+// the same instance's matrices are in the registers already (the parts of one model drawn one after another). mv is the
+// unfolded one, kept for whoever folds next.
+void mvsFolded(const C3D_Mtx& mvp, const C3D_Mtx& mvFolded, const C3D_Mtx& mv) {
+    if (g_foldedLast == &mvp && !g_mvs.matDirty) return;
+    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_modelSh.uMvp, &mvp);
+    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_modelSh.uMV, &mvFolded);
+    g_mvs.mv = mv;
+    g_mvs.matDirty = false;
+    g_foldedLast = &mvp;
+}
+
+void setUvIdentity() {
+    mvsUvA(1, 0, 0, 0);
+    mvsUvB(0, 1, 0, 0);
+}
 
 void initShader(Shader& s, const u8* bin, u32 size) {
     s.dvlb = DVLB_ParseFile((u32*)bin, size);
@@ -76,43 +179,90 @@ void initShader(Shader& s, const u8* bin, u32 size) {
     s.uFog = loc("fogParams");
     s.uBones = loc("bones");
     s.uMask = loc("fogMask");
+    s.uUvA = loc("uvRowA");
+    s.uUvB = loc("uvRowB");
+    s.uMvp = loc("mvp");
 }
 
-void buildSky() {
-    const int rings = 7, segs = 16;
-    const int nv = (rings + 1) * (segs + 1);
-    g_skyV = (W3dTerrainVertex*)linearAlloc(nv * sizeof(W3dTerrainVertex));
-    g_skyI = (uint16_t*)linearAlloc(rings * segs * 6 * sizeof(uint16_t));
+// The colour of the sky at an elevation (degrees): the fog at the horizon, band 2, band 1, the middle, the top at the zenith.
+void skyColorAt(float el, uint8_t out[3]) {
+    static const float stop[kSkyN] = {0, 8, 22, 45, 90};
+    static const int idx[kSkyN] = {kSkyFog, kSkyBand2, kSkyBand1, kSkyMid, kSkyTop};
+    if (el <= stop[0]) { memcpy(out, g_skyCol[idx[0]], 3); return; }
+    for (int k = 0; k + 1 < kSkyN; ++k)
+        if (el <= stop[k + 1]) {
+            const float f = (el - stop[k]) / (stop[k + 1] - stop[k]);
+            for (int c = 0; c < 3; ++c) out[c] = (uint8_t)(g_skyCol[idx[k]][c] + (g_skyCol[idx[k + 1]][c] - g_skyCol[idx[k]][c]) * f + 0.5f);
+            return;
+        }
+    memcpy(out, g_skyCol[idx[kSkyN - 1]], 3);
+}
+
+void fillSky(W3dTerrainVertex* vb) {
     int k = 0;
-    for (int r = 0; r <= rings; ++r) {
-        // elevation from -10 deg (below horizon, hides the far-plane edge) to the zenith
-        float el = (-10.0f + 100.0f * r / rings) * 3.14159265f / 180.0f;
-        float t = std::clamp(sinf(el), 0.0f, 1.0f);
-        t = sqrtf(t);
-        for (int s = 0; s <= segs; ++s, ++k) {
-            float az = 6.2831853f * s / segs;
-            W3dTerrainVertex& v = g_skyV[k];
+    for (int r = 0; r <= kSkyRings; ++r) {
+        // elevation from -10 deg (below the horizon, hides the far-plane edge) to the zenith
+        const float elDeg = kSkyElev[r], el = elDeg * 3.14159265f / 180.0f;
+        uint8_t c[3];
+        skyColorAt(elDeg, c);
+        for (int sg = 0; sg <= kSkySegs; ++sg, ++k) {
+            const float az = 6.2831853f * sg / kSkySegs;
+            W3dTerrainVertex& v = vb[k];
             v.x = (int16_t)(32000.0f * cosf(el) * cosf(az));
             v.y = (int16_t)(32000.0f * cosf(el) * sinf(az));
             v.z = (int16_t)(32000.0f * sinf(el));
             v.w = 0;
-            v.r = (uint8_t)(kHorizon[0] + (kZenith[0] - kHorizon[0]) * t);
-            v.g = (uint8_t)(kHorizon[1] + (kZenith[1] - kHorizon[1]) * t);
-            v.b = (uint8_t)(kHorizon[2] + (kZenith[2] - kHorizon[2]) * t);
+            v.r = c[0]; v.g = c[1]; v.b = c[2];
             v.a = 255;
             v.u = v.v = 0;
         }
     }
+    GSPGPU_FlushDataCache(vb, (kSkyRings + 1) * (kSkySegs + 1) * sizeof(W3dTerrainVertex));
+}
+
+// A fan disc of angular radius 'rad' (degrees) around unit direction d on the dome (radius 31000): the centre colour c * cIn, the rim c * cOut.
+int celDisc(W3dTerrainVertex* out, const float d[3], float radDeg, const float c[3], float cIn, float cOut) {
+    float ux = d[1] * 1.0f - d[2] * 0.0f, uy = -d[0], uz = 0.0f;   // d x (0, 0, 1)
+    float ul = sqrtf(ux * ux + uy * uy + uz * uz);
+    if (ul < 1e-3f) { ux = 1; uy = 0; uz = 0; ul = 1; }
+    ux /= ul; uy /= ul; uz /= ul;
+    const float vx = d[1] * uz - d[2] * uy, vy = d[2] * ux - d[0] * uz, vz = d[0] * uy - d[1] * ux;
+    const float R = 31000.0f, r = R * tanf(radDeg * 3.14159265f / 180.0f);
+    auto vert = [&](W3dTerrainVertex& v, float px, float py, float pz, float k) {
+        v.x = (int16_t)px; v.y = (int16_t)py; v.z = (int16_t)pz; v.w = 0;
+        v.r = (uint8_t)(c[0] * k); v.g = (uint8_t)(c[1] * k); v.b = (uint8_t)(c[2] * k); v.a = 255;
+        v.u = v.v = 0;
+    };
+    const float cx = d[0] * R, cy = d[1] * R, cz = d[2] * R;
+    int n = 0;
+    for (int i = 0; i < kCelSegs; ++i) {
+        const float a0 = 6.2831853f * i / kCelSegs, a1 = 6.2831853f * (i + 1) / kCelSegs;
+        vert(out[n++], cx, cy, cz, cIn);
+        vert(out[n++], cx + r * (ux * cosf(a0) + vx * sinf(a0)), cy + r * (uy * cosf(a0) + vy * sinf(a0)), cz + r * (uz * cosf(a0) + vz * sinf(a0)), cOut);
+        vert(out[n++], cx + r * (ux * cosf(a1) + vx * sinf(a1)), cy + r * (uy * cosf(a1) + vy * sinf(a1)), cz + r * (uz * cosf(a1) + vz * sinf(a1)), cOut);
+    }
+    return n;
+}
+
+void buildSky() {
+    const int nv = (kSkyRings + 1) * (kSkySegs + 1);
+    for (int b = 0; b < 2; ++b) g_skyBuf[b] = (W3dTerrainVertex*)linearAlloc(nv * sizeof(W3dTerrainVertex));
+    g_skyI = (uint16_t*)linearAlloc(kSkyRings * kSkySegs * 6 * sizeof(uint16_t));
+    for (int b = 0; b < 3; ++b) {
+        g_celBuf[b] = (W3dTerrainVertex*)linearAlloc(kCelVerts * sizeof(W3dTerrainVertex));
+        if (g_celBuf[b]) memset(g_celBuf[b], 0, kCelVerts * sizeof(W3dTerrainVertex));
+    }
+    fillSky(g_skyBuf[0]);
+    g_skyCur = 0;
     int i = 0;
-    for (int r = 0; r < rings; ++r)
-        for (int s = 0; s < segs; ++s) {
-            uint16_t a = (uint16_t)(r * (segs + 1) + s), b = (uint16_t)(a + 1), c = (uint16_t)(a + segs + 1), d = (uint16_t)(c + 1);
+    for (int r = 0; r < kSkyRings; ++r)
+        for (int sg = 0; sg < kSkySegs; ++sg) {
+            uint16_t a = (uint16_t)(r * (kSkySegs + 1) + sg), b = (uint16_t)(a + 1), c = (uint16_t)(a + kSkySegs + 1), d = (uint16_t)(c + 1);
             uint16_t q[6] = {a, b, c, c, b, d};
             memcpy(g_skyI + i, q, sizeof q);
             i += 6;
         }
     g_skyIndexCount = i;
-    GSPGPU_FlushDataCache(g_skyV, nv * sizeof(W3dTerrainVertex));
     GSPGPU_FlushDataCache(g_skyI, i * sizeof(uint16_t));
 }
 
@@ -271,9 +421,11 @@ struct Frustum {
     }
 };
 
+static uint32_t g_gtOff = 0;   // 6.46: RenderSettings::gpuTestOff of this frame (the GPU test)
 struct BindCache {
     GpuTex* unit[3] = {nullptr, nullptr, nullptr};   // (6.32: was [2] - the terrain's third texture (5.47) wrote past it)
     void bind(int u, GpuTex* t, FrameCounters& fc) {
+        if (g_gtOff & kGtTextures) t = streamerWhiteTexture();   // 6.46: the GPU test without texture fetches from memory
         if (unit[u] == t) return;
         C3D_TexBind(u, &t->tex);
         unit[u] = t;
@@ -285,7 +437,33 @@ struct BindCache {
 // indexed by depth and drew near objects fully fogged on New 3DS. The shader
 // puts fog visibility in the vertex colour's green channel; this TEV stage does
 // rgb = lerp(fogColour, previous, visibility) and passes alpha through.
-void fogStage(int stage) {
+// 6.77: the spirit world as in the original - the world itself goes grey, not only the sky and the fog. Two stages turn the colour so
+// far into its luminance (the PICA has no plain dot product with a constant: DOT3 is 4 * sum((a - .5)(b - .5)) and clamps, so the
+// colour is first moved to 0.5 + c / 2 and the constant is 0.5 + w / 2 - the result is sum(c * w) >= 0, 7 bits of the colour kept);
+// alpha passes. Only while the main world is drawn as a ghost (not the portraits, not the HUD). Returns the next free stage.
+bool g_ghostPass = false;
+int ghostStages(int stage) {
+    if (!g_ghostPass) return stage;
+    C3D_TexEnv* env = C3D_GetTexEnv(stage);
+    C3D_TexEnvInit(env);
+    C3D_TexEnvSrc(env, C3D_RGB, GPU_PREVIOUS, GPU_CONSTANT, GPU_CONSTANT);
+    C3D_TexEnvFunc(env, C3D_RGB, GPU_MULTIPLY_ADD);   // c * .5 + .5
+    C3D_TexEnvSrc(env, C3D_Alpha, GPU_PREVIOUS, GPU_PREVIOUS, GPU_PREVIOUS);
+    C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
+    C3D_TexEnvColor(env, 0xFF808080u);
+    env = C3D_GetTexEnv(stage + 1);
+    C3D_TexEnvInit(env);
+    C3D_TexEnvSrc(env, C3D_RGB, GPU_PREVIOUS, GPU_CONSTANT, GPU_PRIMARY_COLOR);
+    C3D_TexEnvFunc(env, C3D_RGB, GPU_DOT3_RGB);       // luminance .30 .59 .11 -> constant .65 .795 .555
+    C3D_TexEnvSrc(env, C3D_Alpha, GPU_PREVIOUS, GPU_PREVIOUS, GPU_PREVIOUS);
+    C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
+    C3D_TexEnvColor(env, 0xFF8ECBA6u);                // (ABGR: r 0xA6, g 0xCB, b 0x8E)
+    return stage + 2;
+}
+
+// fog (and, as a ghost, the grey stages in front of it - the fog keeps the cold colour of the spirit world); returns the next free stage
+int fogStage(int stage, bool grey = true) {
+    if (grey) stage = ghostStages(stage);
     C3D_TexEnv* env = C3D_GetTexEnv(stage);
     C3D_TexEnvInit(env);
     C3D_TexEnvSrc(env, C3D_RGB, GPU_PREVIOUS, GPU_CONSTANT, GPU_PRIMARY_COLOR);
@@ -294,6 +472,7 @@ void fogStage(int stage) {
     C3D_TexEnvSrc(env, C3D_Alpha, GPU_PREVIOUS, GPU_PREVIOUS, GPU_PREVIOUS);
     C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
     C3D_TexEnvColor(env, g_fogColor);
+    return stage + 1;
 }
 
 void resetStages(int from) {
@@ -313,11 +492,11 @@ void camRelative(C3D_Mtx* mv, const C3D_Mtx& view, const float pos[3], const flo
 
 // ------------------------------------------------------------------ passes
 void drawSky(const C3D_Mtx& view, FrameCounters& fc) {
-    C3D_BindProgram(&g_terrainSh.prog);
+    bindProgram(g_terrainSh);
     C3D_SetAttrInfo(&g_terrainAttr);
     C3D_BufInfo* buf = C3D_GetBufInfo();
     BufInfo_Init(buf);
-    BufInfo_Add(buf, g_skyV, sizeof(W3dTerrainVertex), 3, 0x210);
+    BufInfo_Add(buf, g_skyBuf[g_skyCur], sizeof(W3dTerrainVertex), 3, 0x210);
     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_terrainSh.uProj, &g_proj);
     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_terrainSh.uMV, &view);
     float s = g_skyRadius / 32000.0f;
@@ -334,12 +513,104 @@ void drawSky(const C3D_Mtx& view, FrameCounters& fc) {
     C3D_AlphaTest(false, GPU_ALWAYS, 0);
     C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
     C3D_CullFace(GPU_CULL_NONE);
+    drawFlush();
     C3D_DrawElements(GPU_TRIANGLES, g_skyIndexCount, C3D_UNSIGNED_SHORT, g_skyI);
     ++fc.drawCalls;
 }
 
+// 6.61: a zone's sky model (LightSkybox: clouds, stars, a horizon) over the dome, scaled to it; static, unlit, no depth
+Model* g_skyModel = nullptr;
+void setModelBlend(uint8_t blend, bool twoSided, bool noCullAll);
+void drawSkyModel(const C3D_Mtx& view, const RenderSettings& rs, FrameCounters& fc) {
+    Model* m = g_skyModel;
+    if (!m || !m->h || m->state != AssetState::Ready || !m->texturesReady() || !m->subs) return;
+    const W3dModelHeader* h = m->h;
+    float ext = 1.0f;
+    for (int a = 0; a < 3; ++a) ext = std::max(ext, std::max(std::fabs(h->bmin[a]), std::fabs(h->bmax[a])));
+    const float sc = 0.92f * g_skyRadius / ext;
+    C3D_Mtx mv = view;
+    Mtx_Scale(&mv, sc, sc, sc);
+    bindProgram(g_modelSh);
+    setUvIdentity();
+    C3D_SetAttrInfo(&g_modelAttr);
+    mvsProj(g_proj);
+    C3D_TexEnv* env = C3D_GetTexEnv(0);
+    C3D_TexEnvInit(env);
+    C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+    C3D_TexEnvOpRgb(env, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_R, GPU_TEVOP_RGB_SRC_COLOR);
+    C3D_TexEnvFunc(env, C3D_RGB, GPU_MODULATE);
+    C3D_TexEnvSrc(env, C3D_Alpha, GPU_TEXTURE0, GPU_TEXTURE0, GPU_TEXTURE0);
+    C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
+    resetStages(1);
+    setFogUniform(g_modelSh, false, true);
+    BindCache bc;
+    C3D_BufInfo* buf = C3D_GetBufInfo();
+    BufInfo_Init(buf);
+    BufInfo_Add(buf, m->blob + h->offVertices, sizeof(W3dModelVertex), 3, 0x210);
+    mvsScale(h->posScale[0], h->posScale[1], h->posScale[2], w3d_model_uv_scale(h));
+    mvsOffset(h->posOffset[0], h->posOffset[1], h->posOffset[2], 0);
+    mvsMV(mv);
+    mvsLight(0, 0, 1, 0);
+    const uint16_t* idx = (const uint16_t*)(m->blob + h->offIndices);
+    for (int pass = 0; pass < 2; ++pass) {   // opaque, then blended
+        for (u32 i = 0; i < h->submeshCount; ++i) {
+            const W3dSubmesh& sm = m->subs[i];
+            const bool blended = sm.blend == W3D_BLEND_ALPHA || sm.blend == W3D_BLEND_ADD;
+            if (blended != (pass == 1)) continue;
+            setModelBlend(sm.blend, true, rs.modelsNoCull);
+            C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);   // (the sky never touches the depth)
+            bc.bind(0, sm.tex >= m->tex.size() ? streamerWhiteTexture() : m->tex[sm.tex], fc);   // 6.99: (also a model let go this frame: its list is empty)
+            C3D_FVUnifSet(GPU_VERTEX_SHADER, g_modelSh.uLightParams, 1.0f, 1.0f, 0, 1.0f);   // unlit
+            drawFlush();
+            C3D_DrawElements(GPU_TRIANGLES, sm.indexCount, C3D_UNSIGNED_SHORT, idx + sm.firstIndex);
+            ++fc.drawCalls;
+            fc.tris += sm.indexCount / 3;
+        }
+    }
+    C3D_AlphaTest(false, GPU_ALWAYS, 0);
+    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+    C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_ALL);
+}
+
+// 6.61: the sun and the moon, added onto the sky (no depth: the ground and everything else is drawn over them)
+void drawCelestial(const C3D_Mtx& view, FrameCounters& fc) {
+    if (g_celCount <= 0 || !g_celBuf[g_celCur]) return;
+    bindProgram(g_terrainSh);
+    C3D_SetAttrInfo(&g_terrainAttr);
+    C3D_BufInfo* buf = C3D_GetBufInfo();
+    BufInfo_Init(buf);
+    BufInfo_Add(buf, g_celBuf[g_celCur], sizeof(W3dTerrainVertex), 3, 0x210);
+    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_terrainSh.uProj, &g_proj);
+    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_terrainSh.uMV, &view);
+    const float s = g_skyRadius / 32000.0f;
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, g_terrainSh.uScale, s, s, s, 0);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, g_terrainSh.uOffset, 0, 0, 0, 0);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, g_terrainSh.uUV, 0, 0, 0, 0);
+    C3D_TexEnv* env = C3D_GetTexEnv(0);
+    C3D_TexEnvInit(env);
+    C3D_TexEnvSrc(env, C3D_Both, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+    C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+    resetStages(1);
+    setFogUniform(g_terrainSh, false, false);
+    C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+    C3D_AlphaTest(false, GPU_ALWAYS, 0);
+    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ONE, GPU_ONE, GPU_ONE);
+    C3D_CullFace(GPU_CULL_NONE);
+    drawFlush();
+    C3D_DrawArrays(GPU_TRIANGLES, 0, g_celCount);
+    ++fc.drawCalls;
+}
+
+// 6.54d: the PVS says nothing past rs.pvsFarR can be seen from the camera's cell: a sphere wholly past it is skipped
+static inline bool pvsFarSkip(const RenderSettings& rs, const float cam[3], const float c[3], float rad) {
+    if (!rs.pvsOn || !rs.pvsFarHidden) return false;
+    const float dx = c[0] - cam[0], dy = c[1] - cam[1], dz = c[2] - cam[2];
+    const float lim = rs.pvsFarR + rad;
+    return dx * dx + dy * dy + dz * dz >= lim * lim;
+}
+
 void drawTerrain(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, const RenderSettings& rs, FrameCounters& fc) {
-    C3D_BindProgram(&g_terrainSh.prog);
+    bindProgram(g_terrainSh);
     C3D_SetAttrInfo(&g_terrainAttr);
     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_terrainSh.uProj, &g_proj);
     C3D_FVUnifSet(GPU_VERTEX_SHADER, g_terrainSh.uUV, 0, 0, 0, 0);
@@ -352,9 +623,14 @@ void drawTerrain(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, cons
         envLayers = layers;
         C3D_TexEnv* env = C3D_GetTexEnv(0);
         C3D_TexEnvInit(env);
-        C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE1, GPU_TEXTURE0, GPU_PRIMARY_COLOR);
-        C3D_TexEnvOpRgb(env, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_ALPHA);
-        C3D_TexEnvFunc(env, C3D_RGB, GPU_INTERPOLATE);
+        if (layers == 1) {   // 6.46: the GPU test - the base layer alone (one texture fetch a pixel)
+            C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE0, GPU_TEXTURE0, GPU_TEXTURE0);
+            C3D_TexEnvFunc(env, C3D_RGB, GPU_REPLACE);
+        } else {
+            C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE1, GPU_TEXTURE0, GPU_PRIMARY_COLOR);
+            C3D_TexEnvOpRgb(env, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_ALPHA);
+            C3D_TexEnvFunc(env, C3D_RGB, GPU_INTERPOLATE);
+        }
         C3D_TexEnvSrc(env, C3D_Alpha, GPU_CONSTANT, GPU_CONSTANT, GPU_CONSTANT);
         C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
         C3D_TexEnvColor(env, 0xFFFFFFFF);
@@ -373,7 +649,7 @@ void drawTerrain(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, cons
         C3D_TexEnvSrc(env, C3D_RGB, GPU_PREVIOUS, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
         C3D_TexEnvOpRgb(env, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_R, GPU_TEVOP_RGB_SRC_COLOR);
         C3D_TexEnvFunc(env, C3D_RGB, GPU_MODULATE);
-        fogStage(next++);
+        next = fogStage(next);
         resetStages(next);
     };
     setFogUniform(g_terrainSh, rs.fog, true);
@@ -397,6 +673,7 @@ void drawTerrain(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, cons
             bc.bind(1, atlas, fc);
             for (const FarDraw& d : far) {
                 if (!fr.sphereFar(d.center, d.radius)) continue;
+                if (pvsFarSkip(rs, cam.pos, d.center, d.radius)) { ++fc.pvsFar; continue; }   // 6.54d
                 C3D_BufInfo* buf = C3D_GetBufInfo();
                 BufInfo_Init(buf);
                 BufInfo_Add(buf, d.verts, sizeof(W3dTerrainVertex), 3, 0x210);
@@ -405,6 +682,7 @@ void drawTerrain(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, cons
                 C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_terrainSh.uMV, &mv);
                 C3D_FVUnifSet(GPU_VERTEX_SHADER, g_terrainSh.uScale, W3D_FAR_XY_SCALE, W3D_FAR_XY_SCALE, zs, W3D_FAR_UV_SCALE);
                 C3D_FVUnifSet(GPU_VERTEX_SHADER, g_terrainSh.uOffset, 0, 0, -W3D_FAR_SINK, 0);
+                drawFlush();
                 C3D_DrawElements(GPU_TRIANGLES, W3D_FAR_INDICES, C3D_UNSIGNED_SHORT, fidx);
                 ++fc.drawCalls;
                 fc.tris += W3D_FAR_INDICES / 3;
@@ -425,6 +703,7 @@ void drawTerrain(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, cons
             const W3dTerrainVertex* boundV = nullptr;
             for (const FarObjDraw& d : fo) {
                 if (!fr.sphereFar(d.center, d.radius)) continue;
+                if (pvsFarSkip(rs, cam.pos, d.center, d.radius)) { ++fc.pvsFar; continue; }   // 6.54d
                 if (d.verts != boundV) {
                     C3D_BufInfo* buf = C3D_GetBufInfo();
                     BufInfo_Init(buf);
@@ -436,6 +715,34 @@ void drawTerrain(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, cons
                     C3D_FVUnifSet(GPU_VERTEX_SHADER, g_terrainSh.uOffset, 0, 0, 0, 0);
                     boundV = d.verts;
                 }
+                drawFlush();
+                C3D_DrawElements(GPU_TRIANGLES, d.count, C3D_UNSIGNED_SHORT, d.idx);
+                ++fc.drawCalls;
+                fc.tris += d.count / 3;
+            }
+            C3D_CullFace(GPU_CULL_BACK_CCW);
+        }
+    }
+    // 6.57: the horizon - a far block's buildings and large doodads as one mesh (hlod.cpp decided which, before collectModels)
+    if (!(g_gtOff & kGtBuildings)) {
+        const std::vector<hlod::Draw>& hd = hlod::draws();
+        GpuTex* pal = hlod::palette();
+        if (!hd.empty() && pal) {
+            setTerrainEnv(2);
+            bc.bind(0, pal, fc);
+            bc.bind(1, pal, fc);
+            C3D_CullFace(GPU_CULL_NONE);
+            for (const hlod::Draw& d : hd) {
+                if (!fr.sphereFar(d.center, d.radius)) continue;
+                C3D_BufInfo* buf = C3D_GetBufInfo();
+                BufInfo_Init(buf);
+                BufInfo_Add(buf, d.verts, sizeof(W3dTerrainVertex), 3, 0x210);
+                C3D_Mtx mv;
+                camRelative(&mv, view, d.origin, cam.pos);
+                C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_terrainSh.uMV, &mv);
+                C3D_FVUnifSet(GPU_VERTEX_SHADER, g_terrainSh.uScale, W3D_HLOD_POS_UNIT, W3D_HLOD_POS_UNIT, W3D_HLOD_POS_UNIT, W3D_FAR_UV_SCALE);
+                C3D_FVUnifSet(GPU_VERTEX_SHADER, g_terrainSh.uOffset, 0, 0, 0, 0);
+                drawFlush();
                 C3D_DrawElements(GPU_TRIANGLES, d.count, C3D_UNSIGNED_SHORT, d.idx);
                 ++fc.drawCalls;
                 fc.tris += d.count / 3;
@@ -446,8 +753,8 @@ void drawTerrain(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, cons
     for (Tile* t : streamerReadyTiles()) {
         if (tileBeyond(t->tx, t->ty, cam.pos, fr.maxDist)) continue;   // 6.34c: its far ground mesh is drawn instead (above)
         const W3dTerrainHeader* h = t->th;
-        const uint16_t* tex2 = w3d_terrain_tex2(h, t->terr);
-        setTerrainEnv(tex2 ? 3 : 2);
+        const uint16_t* tex2 = (g_gtOff & kGtTerrainLayers) ? nullptr : w3d_terrain_tex2(h, t->terr);
+        setTerrainEnv((g_gtOff & kGtTerrainLayers) ? 1 : tex2 ? 3 : 2);
         C3D_BufInfo* buf = C3D_GetBufInfo();
         BufInfo_Init(buf);
         BufInfo_Add(buf, t->terr + h->offVertices, sizeof(W3dTerrainVertex), 3, 0x210);
@@ -472,6 +779,12 @@ void drawTerrain(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, cons
             }
             float rad = sqrtf(r2);
             if (!fr.sphereFar(c, rad)) continue;   // (6.34: the loaded tiles' ground to the horizon, LOD 2 out there)
+            if (pvsFarSkip(rs, cam.pos, c, rad)) { ++fc.pvsFar; continue; }   // 6.54d: past what can be seen from here
+            if (rs.pvsOn && t->pvsStamp == rs.pvsStamp && i < t->pvsTerr.size() && t->pvsTerr[i] != rs.pvsStamp) {   // 6.54: the PVS
+                const float ex = c[0] - cam.pos[0], ey = c[1] - cam.pos[1], ez = c[2] - cam.pos[2];
+                const float dc = sqrtf(ex * ex + ey * ey + ez * ez);
+                if (dc - rad > rs.pvsNear && dc - rad < rs.pvsMaxDist) { ++fc.pvsTerr; continue; }   // (past its distance: the horizon, drawn)
+            }
             int lod;
             if (byRegion) {
                 lod = regLod[t->batchRegion[i]];   // (capped by the coarsest level all the region's batches keep their ground at, 6.13)
@@ -483,8 +796,9 @@ void drawTerrain(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, cons
             if (rs.forceLod >= 0) lod = rs.forceLod;
             if (i < t->batchMaxLod.size() && lod > t->batchMaxLod[i]) lod = t->batchMaxLod[i];   // stage 6.13: no ground lost at holes
             bc.bind(0, t->ttex[b.tex0], fc);
-            bc.bind(1, t->ttex[b.tex1], fc);
+            if (!(g_gtOff & kGtTerrainLayers)) bc.bind(1, t->ttex[b.tex1], fc);
             if (tex2) bc.bind(2, t->ttex[tex2[i]], fc);
+            drawFlush();
             C3D_DrawElements(GPU_TRIANGLES, b.indexCount[lod], C3D_UNSIGNED_SHORT, idx + b.firstIndex[lod]);
             ++fc.drawCalls;
             ++fc.visibleBatches;
@@ -531,7 +845,233 @@ static uint32_t g_nowMs = 0;
 static bool g_fadeOn = true;
 
 // One instance: drawn this frame?
-static inline void collectInstance(const Tile* t, Instance& in, const Frustum& fr, const RenderSettings& rs, FrameCounters& fc) {
+// 6.42: which interior groups of the WMOs are seen (wmo_portals.hpp: WoWee's rules). The tile's building groups become a portal graph
+// once every one of them is in (a model still loading would look like a missing room). Each frame the first interior group asks, the
+// walk decides whether the camera is surely inside a building (then that building's interior groups are drawn only when reached, up to
+// kPortalDist yards) or not (nothing is culled: the old rule, an interior group within its radius + 25 yards). Packs without portal
+// tables (older converters) always keep the old rule.
+static constexpr float kPortalDist = 70.0f;
+static uint32_t g_portalFrame = 0;
+static bool g_haveViewer = false;
+static float g_viewer[3] = {0, 0, 0};
+static bool portalSphere(void* ctx, const float c[3], float r) { return ((const Frustum*)ctx)->sphere(c, r); }
+static bool portalsReady(Tile* t, const Frustum& fr) {
+    if (t->pstate == 2) return false;
+    if (t->pstate == 1 && t->pinstances != t->instances.size()) t->pstate = 0;   // (the tile's instances changed: again)
+    if (t->pstate == 0) {
+        bool any = false;
+        for (const Instance& in : t->instances) {
+            const Model* m = in.model;
+            if (!m->building) continue;
+            if (m->state != AssetState::Ready) return false;   // a group still loading: the graph waits
+            if (m->h && m->portals) any = true;
+        }
+        if (!any) { t->pstate = 2; return false; }
+        t->pnodes.clear();
+        for (uint32_t i = 0; i < t->instances.size(); ++i) {
+            Instance& in = t->instances[i];
+            in.pnode = -1;
+            const Model* m = in.model;
+            if (!m->building || !m->h) continue;
+            wmoportal::Node n;
+            n.modelId = m->id;
+            if (m->portals) { n.portals = w3d_portals_of(m->portals); n.nPortals = m->portals->count; n.hasTable = true; }
+            n.interior = m->interior;
+            memcpy(n.pos, in.pos, sizeof n.pos);
+            memcpy(n.rot, in.rot, sizeof n.rot);
+            memcpy(n.bmin, m->h->bmin, sizeof n.bmin);
+            memcpy(n.bmax, m->h->bmax, sizeof n.bmax);
+            n.radius = m->h->radius * in.scale;
+            n.inst = i;
+            in.pnode = (int32_t)t->pnodes.size();
+            t->pnodes.push_back(std::move(n));
+        }
+        wmoportal::buildGraph(t->pnodes);
+        t->pinstances = (uint32_t)t->instances.size();
+        t->pstate = 1;
+        t->pframe = 0;
+    }
+    if (t->pframe != g_portalFrame) {
+        t->pframe = g_portalFrame;
+        t->pcomp = wmoportal::reach(t->pnodes, fr.cam, g_haveViewer ? g_viewer : nullptr, portalSphere, (void*)&fr, g_portalFrame);
+        // 6.56: the other buildings from outside - their interior groups seen through an opening (Stormwind's canal walls and halls
+        // are "interior" groups: drawn only within radius + 25 before, holes in the town at a distance)
+        wmoportal::reachOutside(t->pnodes, fr.cam, t->pcomp, fr.maxDist, portalSphere, (void*)&fr, g_portalFrame);
+    }
+    return true;
+}
+
+// 6.44: small static doodads merged per cell (static_batch.hpp). Plan: once every model of the tile is in, the eligible instances are
+// grouped by 32-yd cell, size class and owning building (two or more members). Decision, once a frame per group (the first member that
+// is collected asks): merged when the whole group lies inside the doodads' solid distance (no member at the dissolving edge), every member
+// has finished fading in and its building is shown; then its batches are drawn and its members skipped. A group's buffers are built the
+// first time it would be merged (one group a frame, kStaticCapBytes of linear memory over all tiles); until then, and on every "no",
+// its members are drawn one by one as before.
+static constexpr uint32_t kStaticCapBytes = 8u << 20;
+// (6.44b: a tile and indices, not pointers into its vectors - a group built later in the same frame grows Tile::sbatches and moved the batches
+// queued before it: the GPU then read freed memory as vertex addresses and counts and hung on the command list)
+struct ActiveBatch { Tile* t; uint32_t batch, group; uint8_t lod; };
+static std::vector<ActiveBatch> g_activeBatches;
+static bool g_batchesSorted = false;
+static int g_staticBuildsLeft = 0;
+static uint32_t g_staticBytes = 0;
+
+static bool staticPlan(Tile* t) {
+    if (t->sstate == 1 && t->sinstances == t->instances.size()) return true;
+    for (const Instance& in : t->instances)
+        if (in.model->state != AssetState::Ready) return false;   // (a model still loading: plan later)
+    if (t->sstate == 1) {   // (the instances changed: the old buffers go with the tile; a fresh plan)
+        for (Instance& in : t->instances) in.sgroup = -1;
+    }
+    for (Instance& in : t->instances) in.sgroup = -1;
+    t->sgroups.clear();
+    struct Key {
+        int cx, cy, b;
+        uint16_t owner;
+        bool operator<(const Key& o) const {
+            return cx != o.cx ? cx < o.cx : cy != o.cy ? cy < o.cy : b != o.b ? b < o.b : owner < o.owner;
+        }
+    };
+    std::map<Key, uint32_t> byKey;
+    std::vector<Tile::StaticGroup> groups;
+    for (uint32_t i = 0; i < t->instances.size(); ++i) {
+        const Instance& in = t->instances[i];
+        const Model* m = in.model;
+        if (!m->h || m->building || m->fx || m->meshHidden || m->fxAnim.a || m->uva || in.bldg || !(in.scale > 0)) continue;
+        const float r = m->h->radius * in.scale;
+        const int b = sbatch::bucketOf(r);
+        if (b < 0 || !sbatch::eligibleModel(m->blob, m->size)) continue;
+        const Key k{(int)floorf(in.pos[0] / sbatch::kCell), (int)floorf(in.pos[1] / sbatch::kCell), b, in.owner};
+        auto it = byKey.find(k);
+        if (it == byKey.end()) {
+            it = byKey.emplace(k, (uint32_t)groups.size()).first;
+            groups.emplace_back();
+            groups.back().owner = in.owner;
+        }
+        groups[it->second].members.push_back(i);
+    }
+    for (Tile::StaticGroup& g : groups) {
+        if (g.members.size() < 2) continue;   // (a group of one is no gain)
+        float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+        g.minR = 1e30f;
+        g.maxR = 0;
+        for (uint32_t i : g.members) {
+            const Instance& in = t->instances[i];
+            const float r = in.model->h->radius * in.scale;
+            g.minR = std::min(g.minR, r);
+            g.maxR = std::max(g.maxR, r);
+            for (int k = 0; k < 3; ++k) { lo[k] = std::min(lo[k], in.pos[k] - r); hi[k] = std::max(hi[k], in.pos[k] + r); }
+        }
+        for (int k = 0; k < 3; ++k) g.center[k] = 0.5f * (lo[k] + hi[k]);
+        g.radius = 0;
+        for (uint32_t i : g.members) {
+            const Instance& in = t->instances[i];
+            const float dx = in.pos[0] - g.center[0], dy = in.pos[1] - g.center[1], dz = in.pos[2] - g.center[2];
+            g.radius = std::max(g.radius, sqrtf(dx * dx + dy * dy + dz * dz) + in.model->h->radius * in.scale);
+        }
+        t->sgroups.push_back(std::move(g));
+    }
+    for (uint32_t gi = 0; gi < t->sgroups.size(); ++gi)
+        for (uint32_t i : t->sgroups[gi].members) t->instances[i].sgroup = (int32_t)gi;
+    t->sinstances = (uint32_t)t->instances.size();
+    t->sstate = 1;
+    return true;
+}
+
+static bool staticBuild(Tile* t, Tile::StaticGroup& g) {
+    std::vector<sbatch::MemberIn> mem;
+    std::vector<std::vector<uintptr_t>> keys(g.members.size());
+    uint32_t born = 0;
+    for (size_t k = 0; k < g.members.size(); ++k) {
+        const Instance& in = t->instances[g.members[k]];
+        const Model* m = in.model;
+        if (!m->drawable) return false;   // (its textures are not in yet: later)
+        born = laterMs(born, m->drawableMs);
+        keys[k].resize(m->h->submeshCount);
+        for (uint32_t s = 0; s < m->h->submeshCount; ++s)
+            keys[k][s] = (uintptr_t)(m->subs[s].tex == W3D_NO_TEXTURE || m->subs[s].tex >= m->tex.size() ? streamerWhiteTexture()
+                                                                                                            : m->tex[m->subs[s].tex]);
+        sbatch::MemberIn mi;
+        mi.blob = m->blob;
+        memcpy(mi.pos, in.pos, sizeof mi.pos);
+        memcpy(mi.rot, in.rot, sizeof mi.rot);
+        mi.scale = in.scale;
+        mi.texKeys = keys[k].data();
+        mem.push_back(mi);
+    }
+    std::vector<sbatch::BatchOut> out = sbatch::build(mem, g.center);
+    const uint32_t first = (uint32_t)t->sbatches.size();
+    for (sbatch::BatchOut& o : out) {
+        Tile::StaticBatch b;
+        b.tex = (GpuTex*)o.tex;
+        b.blend = o.blend;
+        b.flags = o.flags;
+        const size_t vb = o.v.size() * sizeof(W3dModelVertex), ib = o.idx.size() * sizeof(uint16_t);
+        b.v = (W3dModelVertex*)linearMemAlign(vb, 16);
+        b.idx = (uint16_t*)linearAlloc(ib);
+        if (!b.v || !b.idx) {   // out of linear memory: this group stays single (what was made of it is freed with the tile)
+            if (b.v) linearFree(b.v);
+            if (b.idx) linearFree(b.idx);
+            g.state = 2;
+            g.firstBatch = first;
+            g.batchCount = 0;
+            return false;
+        }
+        b.vBytes = (uint32_t)vb;   // 6.52
+        b.iBytes = (uint32_t)ib;
+        memcpy(b.v, o.v.data(), vb);
+        memcpy(b.idx, o.idx.data(), ib);
+        GSPGPU_FlushDataCache(b.v, vb);
+        GSPGPU_FlushDataCache(b.idx, ib);
+        memcpy(b.first, o.first, sizeof b.first);
+        memcpy(b.count, o.count, sizeof b.count);
+        memcpy(b.scale, o.scale, sizeof b.scale);
+        memcpy(b.offset, o.offset, sizeof b.offset);
+        b.uvScale = o.uvScale;
+        t->sbatches.push_back(b);
+        t->sbytes += (uint32_t)(vb + ib);
+        g_staticBytes += (uint32_t)(vb + ib);
+    }
+    g.firstBatch = first;
+    g.batchCount = (uint32_t)(t->sbatches.size() - first);
+    g.bornMs = born;
+    g.state = 1;
+    return true;
+}
+
+// Is the group drawn merged this frame? (its batches are queued when it is, and in view)
+static void staticDecide(Tile* t, Tile::StaticGroup& g, const Frustum& fr, const RenderSettings& rs, FrameCounters& fc) {
+    g.frame = g_portalFrame;
+    g.merged = false;
+    if (g.state == 2) return;
+    const Tile::Bldg* og = g.owner && g.owner <= t->bldgs.size() ? &t->bldgs[g.owner - 1] : nullptr;
+    if (og && !og->open) return;
+    const float dx = g.center[0] - fr.cam[0], dy = g.center[1] - fr.cam[1], dz = g.center[2] - fr.cam[2];
+    const float dist = sqrtf(dx * dx + dy * dy + dz * dz);
+    const float solid = 0.75f * (40.0f + rs.doodadRange * g.minR);   // (collectInstance: a doodad dissolves past 75% of its distance)
+    if (dist + g.radius > solid) return;
+    if (g.state == 0) {
+        if (g_staticBuildsLeft <= 0 || g_staticBytes >= kStaticCapBytes) return;
+        --g_staticBuildsLeft;
+        if (!staticBuild(t, g)) return;
+        ++fc.sbBuilt;
+    }
+    if (g_fadeOn) {   // (every member done fading in, its building too)
+        uint32_t born = laterMs(g.bornMs, t->readyMs);
+        if (og) born = laterMs(born, og->openMs);
+        if (g_nowMs - born < kFadeMs) return;
+    }
+    g.merged = true;
+    if (!fr.sphere(g.center, g.radius)) return;   // every member is out of view
+    const float dn = std::max(0.0f, dist - g.radius);
+    const uint8_t lod = rs.forceLod >= 0 ? (uint8_t)std::min(rs.forceLod, 2) : w3d_lod_for(dn * dn, g.maxR);
+    const uint32_t gi = (uint32_t)(&g - t->sgroups.data());
+    for (uint32_t k = 0; k < g.batchCount; ++k) g_activeBatches.push_back({t, g.firstBatch + k, gi, lod});
+    ++fc.sbGroups;
+    fc.sbMembers += (u32)g.members.size();
+}
+
+static inline void collectInstance(Tile* t, Instance& in, const Frustum& fr, const RenderSettings& rs, FrameCounters& fc) {
     Model* m = in.model;
     if (!m->drawable || !m->h) return;   // stage 5.30: each model as soon as it and its textures are in
     if (m->meshHidden) return;           // 6.17: an emitter volume (its particles come from the tile's instances, not from here)
@@ -543,12 +1083,57 @@ static inline void collectInstance(const Tile* t, Instance& in, const Frustum& f
     if (in.radius <= 0) in.radius = m->h->radius * in.scale;
     if (in.radius <= 0) return;
     if (!rs.doodads && !m->building) return;
+    if ((g_gtOff & kGtBuildings) && m->building) return;   // 6.46: the GPU test
+    // 6.57: its block is far: the horizon's mesh stands for it
+    if (rs.hlodStamp && in.hblock >= 0 && t->hlodFar[in.hblock] == rs.hlodStamp) { ++fc.hlodSkip; return; }
+    // Interior-only groups (rooms, Stormwind's halls and cellars) are drawn only when the camera is near them (radius + 25), or:
+    // 6.42: in the building the camera is inside, when the portal walk reached them (to kPortalDist); 6.56: from outside, when the
+    // walk from the building's outdoor groups through its openings reached them (to the draw distance, as the game).
+    bool portalGated = false, outsideSeen = false, linked = false;
+    if (m->interior && m->portals && portalsReady(t, fr) && in.pnode >= 0) {
+        const wmoportal::Node& pn = t->pnodes[in.pnode];
+        if (t->pcomp != wmoportal::kNone && pn.comp == t->pcomp) {   // the camera is inside this building: only the rooms reached
+            if (pn.stamp != g_portalFrame) return;
+            portalGated = true;
+        } else outsideSeen = pn.ostamp == g_portalFrame;
+        linked = pn.outdoorLinked;
+    }
+    // 6.57f: an interior group WITHOUT portals in a tile whose buildings have portal tables has no opening to be seen through: only
+    // from inside its own box (Stormwind's stand-in cathedral spires: no portals and a radius that made "near" half the town)
+    // (6.57g: not through the tile's portal graph - the spires stand in a tile without any building with portals: its graph never exists)
+    if (m->interior && !m->portals && g_packHasPortals) {
+        const float d[3] = {fr.cam[0] - in.pos[0], fr.cam[1] - in.pos[1], fr.cam[2] - in.pos[2]};
+        float l[3];
+        wmoportal::unrotate(in.rot, d, l);
+        for (int k = 0; k < 3; ++k)
+            if (l[k] < m->h->bmin[k] - 1.0f || l[k] > m->h->bmax[k] + 1.0f) return;
+    }
+    if (rs.dbgBldg && m->building) {   // 6.57e: the test of pad.txt 'dbgbldg'
+        const int k = rs.dbgBldg;
+        if ((k == 1 && m->interior && !portalGated) || (k == 2 && !m->interior) || (k == 3 && m->interior && m->portals && !portalGated) ||
+            (k == 4 && m->interior && !m->portals))
+            return;
+    }
+    // 6.54: the PVS - a doodad (6.54d: or WMO group) of a covered tile that cannot be seen from the camera's cell (nearer than pvsNear +
+    // its radius: drawn anyway)
+    // (6.56: not an interior group seen from outside unless the file (v4) knows them: the walk / the old rule decide those)
+    // (6.56d: far only with portals - an unreachable interior group is inside-only scenery, e.g. Stormwind's stand-in cathedral spires)
+    // (6.57c: and only one whose building has an outdoor group - the portals of the stand-in cathedral lead only among its own)
+    const bool farInterior = m->interior && !portalGated && (outsideSeen || (rs.interiorFar && m->portals && linked));
+    if (rs.pvsOn && t->pvsStamp == rs.pvsStamp && in.pvsStamp != rs.pvsStamp && !(farInterior && !rs.pvsInteriors)) {
+        const float dx = in.pos[0] - fr.cam[0], dy = in.pos[1] - fr.cam[1], dz = in.pos[2] - fr.cam[2];
+        const float lim = rs.pvsNear + in.radius;
+        if (dx * dx + dy * dy + dz * dz > lim * lim) { ++(m->building ? fc.pvsBldg : fc.pvsDood); return; }
+    }
+    if (in.sgroup >= 0 && rs.staticBatch && in.sgroup < (int32_t)t->sgroups.size()) {   // 6.44: merged with its cell's doodads?
+        Tile::StaticGroup& g = t->sgroups[in.sgroup];
+        if (g.frame != g_portalFrame) staticDecide(t, g, fr, rs, fc);
+        if (g.merged) return;
+    }
     // Small doodads fade out long before the draw distance (bushes ~110 yd,
     // big trees reach the fog); this is what keeps draw calls in budget.
     // Buildings are kept to the draw distance.
-    // Interior-only groups (rooms, Stormwind's halls and cellars; no portals yet) are drawn only
-    // when the camera is near them: from outside they are hidden behind the exterior anyway.
-    float maxD = m->interior ? in.radius + 25.0f
+    float maxD = m->interior ? (farInterior ? fr.maxDist + in.radius : in.radius + (portalGated ? kPortalDist : 25.0f))
                : m->building ? fr.maxDist + in.radius : 40.0f + rs.doodadRange * in.radius;
     float dx = in.pos[0] - fr.cam[0], dy = in.pos[1] - fr.cam[1], dz = in.pos[2] - fr.cam[2];
     const float d2 = dx * dx + dy * dy + dz * dz;
@@ -570,7 +1155,14 @@ static inline void collectInstance(const Tile* t, Instance& in, const Frustum& f
     }
     in.fade = fade;
     if (fade < 1.0f) { ++m->fadeCount; ++fc.fading; }
-    in.lod = m->lods ? w3d_lod_for(d2, in.radius) : 0;   // stage 6.12: by the size on the screen
+    if (m->lods && rs.forceLod >= 0)      // 6.47: the GPU test's "lightest LOD everywhere" (it reached only terrain and merged doodads)
+        in.lod = (uint8_t)std::min(rs.forceLod, 2);
+    else if (m->lods && m->lodErr[0] > 0) {   // 6.47: a building group's levels by its error's size on the screen
+        const float dn = std::max(0.0f, sqrtf(d2) - in.radius);
+        in.lod = w3d_lod_for_error(dn, m->lodErr, in.scale > 0 ? in.scale : 1.0f, rs);
+        ++fc.bldgLod[in.lod];
+    } else
+        in.lod = !m->lods ? 0 : m->foliage ? w3d_lod_for_foliage(d2, in.radius) : w3d_lod_for(d2, in.radius);   // stage 6.12: by the size on the screen (6.84: foliage nearer)
     if (m->visible.empty()) g_activeModels.push_back(m);
     m->visible.push_back(&in);
     if (m->building) ++fc.buildings;
@@ -598,6 +1190,14 @@ static void chunkRadii(Tile* t, Tile::Chunk& ch) {
 }
 
 void collectModels(const Frustum& fr, const RenderSettings& rs, FrameCounters& fc) {
+    ++g_portalFrame;
+    g_activeBatches.clear();   // 6.44
+    g_batchesSorted = false;
+    g_staticBuildsLeft = 1;
+    g_staticBytes = 0;
+    for (Tile* t : streamerReadyTiles()) g_staticBytes += t->sbytes;
+    if (rs.staticBatch)
+        for (Tile* t : streamerReadyTiles()) staticPlan(t);
     for (Tile* t : streamerReadyTiles()) {
         if (t->chunks.empty()) {   // (no grid: a tile built elsewhere)
             for (Instance& in : t->instances) collectInstance(t, in, fr, rs, fc);
@@ -611,7 +1211,8 @@ void collectModels(const Frustum& fr, const RenderSettings& rs, FrameCounters& f
                 if (!ch.hasB && !ch.hasI && !doods) { ++fc.chunksCulled; continue; }
                 float maxD = 0, r = 0;
                 if (ch.hasB) { maxD = fr.maxDist + ch.maxRb; r = ch.maxRb; }
-                if (ch.hasI) { maxD = std::max(maxD, ch.maxRi + 25.0f); r = std::max(r, ch.maxRi); }
+                // (6.56: an interior group seen through an opening from outside is drawn to the draw distance; each decides itself)
+                if (ch.hasI) { maxD = std::max(maxD, fr.maxDist + ch.maxRi); r = std::max(r, ch.maxRi); }
                 if (doods) { maxD = std::max(maxD, 40.0f + rs.doodadRange * ch.maxRd); r = std::max(r, ch.maxRd); }
                 const float dx = ch.center[0] - fr.cam[0], dy = ch.center[1] - fr.cam[1], dz = ch.center[2] - fr.cam[2];
                 const float lim = maxD + ch.half;
@@ -629,6 +1230,12 @@ void collectModels(const Frustum& fr, const RenderSettings& rs, FrameCounters& f
 static std::vector<C3D_Mtx> g_instMv;
 static bool g_mvReady = false;
 static void buildMatrices(const Camera& cam, const C3D_Mtx& view) {
+    // 6.44: models in the order of their first part's texture - neighbours that share one skip the bind (BindCache)
+    std::sort(g_activeModels.begin(), g_activeModels.end(), [](const Model* a, const Model* b) {
+        const GpuTex* ta = a->h && a->h->submeshCount && a->subs[0].tex < a->tex.size() ? a->tex[a->subs[0].tex] : nullptr;
+        const GpuTex* tb = b->h && b->h->submeshCount && b->subs[0].tex < b->tex.size() ? b->tex[b->subs[0].tex] : nullptr;
+        return ta != tb ? ta < tb : a < b;
+    });
     size_t n = 0;
     for (Model* m : g_activeModels) n += m->visible.size();
     g_instMv.resize(n);
@@ -648,9 +1255,10 @@ static void buildMatrices(const Camera& cam, const C3D_Mtx& view) {
 }
 
 void drawModels(const Camera& cam, const C3D_Mtx& view, const RenderSettings& rs, bool blendedPass, FrameCounters& fc) {
-    C3D_BindProgram(&g_modelSh.prog);
+    bindProgram(g_modelSh);
+    setUvIdentity();   // 6.41: the uniform registers are shared by the shaders: never left to chance
     C3D_SetAttrInfo(&g_modelAttr);
-    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_modelSh.uProj, &g_proj);
+    mvsProj(g_proj);
     C3D_TexEnv* env = C3D_GetTexEnv(0);
     C3D_TexEnvInit(env);
     // rgb = texture * light (vertex colour red), alpha = texture alpha
@@ -667,20 +1275,38 @@ void drawModels(const Camera& cam, const C3D_Mtx& view, const RenderSettings& rs
     C3D_TexEnvColor(tintEnv, 0xFFFFFFFFu);
     u32 tintNow = 0xFFFFFFFFu;     // stage 6.11: the constant of stage 1 now (white; a fading instance's opacity; an effect's tint)
     bool tintAlphaConst = false;   // stage 6.11: stage 1 takes its alpha from the constant alone (opaque parts of fading instances)
-    fogStage(2);
-    resetStages(3);
+    resetStages(fogStage(2));
     setFogUniform(g_modelSh, rs.fog, true);
 
     if (!g_mvReady) buildMatrices(cam, view);
     BindCache bc;
+    bool uvMoved = false;   // 6.41: the shader holds a part's texture transform now
     for (Model* m : g_activeModels) {
         const W3dModelHeader* h = m->h;
+        // 6.52: the GPU test's phase "vertices in VRAM" draws from a copy of the blob there once it is made (null otherwise)
+        const uint8_t* vcopy = streamerGtVramCopy(m->blob, m->size);
+        const uint8_t* base = vcopy ? vcopy : m->blob;
         C3D_BufInfo* buf = C3D_GetBufInfo();
         BufInfo_Init(buf);
-        BufInfo_Add(buf, m->blob + h->offVertices, sizeof(W3dModelVertex), 3, 0x210);
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, g_modelSh.uScale, h->posScale[0], h->posScale[1], h->posScale[2], w3d_model_uv_scale(h));
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, g_modelSh.uOffset, h->posOffset[0], h->posOffset[1], h->posOffset[2], 0);
-        const uint16_t* idx = (const uint16_t*)(m->blob + h->offIndices);
+        BufInfo_Add(buf, base + h->offVertices, sizeof(W3dModelVertex), 3, 0x210);
+        mvsScale(h->posScale[0], h->posScale[1], h->posScale[2], w3d_model_uv_scale(h));
+        mvsOffset(h->posOffset[0], h->posOffset[1], h->posOffset[2], 0);
+        const uint16_t* idx = (const uint16_t*)(base + h->offIndices);
+        // 7.05: the instances' matrices folded once for all the parts (a part riding a bone - fxAnim - still folds its own)
+        static std::vector<C3D_Mtx> foldMv, foldMvp;
+        const bool folded = !m->fxAnim.a;
+        if (folded) {
+            const C3D_Mtx* mvs0 = g_instMv.data() + m->mvBase;
+            const size_t nv = m->visible.size();
+            if (foldMv.size() < nv) { foldMv.resize(nv); foldMvp.resize(nv); }
+            const vsfold::M4 P = toM4(g_mvs.proj);
+            for (size_t vi = 0; vi < nv; ++vi) {
+                const vsfold::M4 f = vsfold::foldScaleOffset(toM4(mvs0[vi]), g_mvs.scale, g_mvs.off);
+                foldMv[vi] = fromM4(f);
+                foldMvp[vi] = fromM4(vsfold::mul(P, f));
+            }
+        }
+        g_foldedLast = nullptr;   // (the arrays are reused by every model: the same address is another model's matrix now)
         for (u32 s = 0; s < h->submeshCount; ++s) {
             const W3dSubmesh& sm = m->subs[s];
             bool isBlended = sm.blend == W3D_BLEND_ALPHA || sm.blend == W3D_BLEND_ADD;
@@ -688,6 +1314,7 @@ void drawModels(const Camera& cam, const C3D_Mtx& view, const RenderSettings& rs
             // transparent pass (depth is still written: a half-visible wall hides what is behind it)
             const bool fadeOnly = blendedPass && !isBlended && m->fadeCount;
             if (isBlended != blendedPass && !fadeOnly) continue;
+            if ((g_gtOff & kGtAlphaKey) && sm.blend == W3D_BLEND_ALPHAKEY && !m->building) continue;   // 6.51: the GPU test
             // (5.31: drawing buildings from both sides did not close the holes in Stormwind's walls - they were cracks
             // from the simplification, fixed in the converter - so buildings are culled again: the GPU time matters.)
             setModelBlend(sm.blend, sm.flags & W3D_SUBF_TWO_SIDED, rs.modelsNoCull);
@@ -711,9 +1338,19 @@ void drawModels(const Camera& cam, const C3D_Mtx& view, const RenderSettings& rs
                 // kept pointer were silently lost: 6.11/6.12 fades drew fully opaque - perf log 6m: r_fading ~28, nothing seen)
                 C3D_DirtyTexEnv(tintEnv);
             }
-            bc.bind(0, sm.tex == W3D_NO_TEXTURE ? streamerWhiteTexture() : m->tex[sm.tex], fc);
+            bc.bind(0, sm.tex >= m->tex.size() ? streamerWhiteTexture() : m->tex[sm.tex], fc);   // 6.99: (also a model let go this frame: its list is empty)
             const float unlit = (sm.flags & W3D_SUBF_UNLIT) ? 1.0f : 0.0f;
             C3D_FVUnifSet(GPU_VERTEX_SHADER, g_modelSh.uLightParams, 0.55f, 0.6f, 0, unlit);   // (6.10: once a part)
+            if (const W3dUvAnim* ua = m->uva ? w3d_uv_of(m->blob, m->uva, s) : nullptr) {   // 6.41: a moving texture (lava, falls, portals, runes)
+                float r0[4], r1[4];
+                w3d_uv_rows(m->blob, ua, g_nowMs, r0, r1);
+                mvsUvA(r0[0], r0[1], r0[2], 0);
+                mvsUvB(r1[0], r1[1], r1[2], 0);
+                uvMoved = true;
+            } else if (uvMoved) {
+                setUvIdentity();
+                uvMoved = false;
+            }
             const float* lastLight = nullptr;
             const C3D_Mtx* mvs = g_instMv.data() + m->mvBase;
             for (u32 vi = 0; vi < m->visible.size(); ++vi) {
@@ -743,19 +1380,95 @@ void drawModels(const Camera& cam, const C3D_Mtx& view, const RenderSettings& rs
                     const u32 want = in->fade < 1.0f ? (0x00FFFFFFu | (u32)(in->fade * 255.0f + 0.5f) << 24) : 0xFFFFFFFFu;
                     if (want != tintNow) { C3D_TexEnvColor(tintEnv, want); C3D_DirtyTexEnv(tintEnv); tintNow = want; }
                 }
-                C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_modelSh.uMV, &mv);
+                if (folded) mvsFolded(foldMvp[vi], foldMv[vi], mvs[vi]);
+                else mvsMV(mv);
                 if (!lastLight || memcmp(lastLight, in->lightModel, sizeof in->lightModel) != 0) {   // (the same rotation: the same light)
-                    C3D_FVUnifSet(GPU_VERTEX_SHADER, g_modelSh.uLight, in->lightModel[0], in->lightModel[1], in->lightModel[2], 0);
+                    mvsLight(in->lightModel[0], in->lightModel[1], in->lightModel[2], 0);
                     lastLight = in->lightModel;
                 }
                 uint32_t first = sm.firstIndex, count = sm.indexCount;
                 if (in->lod && m->lods)   // stage 6.12: the lightest level there is, up to the one asked for
                     for (int k = in->lod; k >= 1; --k)
                         if (m->lods[s].indexCount[k - 1]) { first = m->lods[s].firstIndex[k - 1]; count = m->lods[s].indexCount[k - 1]; break; }
+                drawFlush();
                 C3D_DrawElements(GPU_TRIANGLES, count, C3D_UNSIGNED_SHORT, idx + first);
                 ++fc.drawCalls;
                 ++fc.lodDraws[in->lod < 3 ? in->lod : 2];
                 fc.tris += count / 3;
+                if (vcopy) fc.vramTris += count / 3;   // 6.52
+                if (!m->building) {   // 6.51: the doodads by blend and size
+                    const int bi = sm.blend == W3D_BLEND_OPAQUE ? 0 : sm.blend == W3D_BLEND_ALPHAKEY ? 1 : 2;
+                    const int ci = in->radius < 1.5f ? 0 : in->radius < 4.0f ? 1 : in->radius < 12.0f ? 2 : 3;
+                    fc.dTris[bi][ci] += count / 3;
+                    ++fc.dDraws[bi][ci];
+                }
+            }
+        }
+    }
+    // 6.44: the merged small doodads (opaque / cut-out parts only), sorted by texture
+    if (!blendedPass && !g_activeBatches.empty()) {
+        if (!g_batchesSorted) {
+            std::sort(g_activeBatches.begin(), g_activeBatches.end(), [](const ActiveBatch& a, const ActiveBatch& b) {
+                const Tile::StaticBatch& x = a.t->sbatches[a.batch];
+                const Tile::StaticBatch& y = b.t->sbatches[b.batch];
+                return x.tex != y.tex ? x.tex < y.tex : x.flags < y.flags;
+            });
+            g_batchesSorted = true;
+        }
+        if (tintNow != 0xFFFFFFFFu || tintAlphaConst) {
+            C3D_TexEnvSrc(tintEnv, C3D_Both, GPU_PREVIOUS, GPU_CONSTANT, GPU_PRIMARY_COLOR);
+            C3D_TexEnvFunc(tintEnv, C3D_Both, GPU_MODULATE);
+            C3D_TexEnvColor(tintEnv, 0xFFFFFFFFu);
+            C3D_DirtyTexEnv(tintEnv);
+            tintNow = 0xFFFFFFFFu;
+            tintAlphaConst = false;
+        }
+        if (uvMoved) { setUvIdentity(); uvMoved = false; }
+        mvsLight(0.30f, 0.40f, 0.866f, 0);   // (world space: the batches are not turned)
+        const Tile::StaticGroup* lastG = nullptr;
+        float lastUnlit = -1;
+        for (const ActiveBatch& ab : g_activeBatches) {
+            if (ab.batch >= ab.t->sbatches.size() || ab.group >= ab.t->sgroups.size()) continue;   // (never: a guard)
+            const Tile::StaticBatch& b = ab.t->sbatches[ab.batch];
+            const Tile::StaticGroup* g = &ab.t->sgroups[ab.group];
+            const int lod = ab.lod < 3 ? ab.lod : 2;
+            if (!b.count[lod] || !b.v || !b.idx) continue;
+            if ((g_gtOff & kGtAlphaKey) && b.blend == W3D_BLEND_ALPHAKEY) continue;   // 6.51: the GPU test
+            if (g != lastG) {
+                C3D_Mtx mv;
+                camRelative(&mv, view, g->center, cam.pos);
+                mvsMV(mv);
+                lastG = g;
+            }
+            // 6.52: the GPU test's copies in VRAM (both buffers, or neither)
+            const uint8_t* cv = streamerGtVramCopy(b.v, b.vBytes);
+            const uint8_t* ci = streamerGtVramCopy(b.idx, b.iBytes);
+            if (!cv) ci = nullptr;
+            const W3dModelVertex* bv = ci ? (const W3dModelVertex*)cv : b.v;
+            const uint16_t* bi = ci ? (const uint16_t*)ci : b.idx;
+            C3D_BufInfo* buf = C3D_GetBufInfo();
+            BufInfo_Init(buf);
+            BufInfo_Add(buf, bv, sizeof(W3dModelVertex), 3, 0x210);
+            mvsScale(b.scale[0], b.scale[1], b.scale[2], b.uvScale);
+            mvsOffset(b.offset[0], b.offset[1], b.offset[2], 0);
+            setModelBlend(b.blend, b.flags & W3D_SUBF_TWO_SIDED, rs.modelsNoCull);
+            const float unlit = (b.flags & W3D_SUBF_UNLIT) ? 1.0f : 0.0f;
+            if (unlit != lastUnlit) {
+                C3D_FVUnifSet(GPU_VERTEX_SHADER, g_modelSh.uLightParams, 0.55f, 0.6f, 0, unlit);
+                lastUnlit = unlit;
+            }
+            bc.bind(0, b.tex ? b.tex : streamerWhiteTexture(), fc);
+            drawFlush();
+            C3D_DrawElements(GPU_TRIANGLES, b.count[lod], C3D_UNSIGNED_SHORT, bi + b.first[lod]);
+            if (ci) fc.vramTris += b.count[lod] / 3;   // 6.52
+            ++fc.drawCalls;
+            ++fc.sbDraws;
+            ++fc.lodDraws[lod];
+            fc.tris += b.count[lod] / 3;
+            {   // 6.51
+                const int bi = b.blend == W3D_BLEND_OPAQUE ? 0 : b.blend == W3D_BLEND_ALPHAKEY ? 1 : 2;
+                fc.sbTris[bi] += b.count[lod] / 3;
+                ++fc.sbDrawsBl[bi];
             }
         }
     }
@@ -766,18 +1479,18 @@ void drawModels(const Camera& cam, const C3D_Mtx& view, const RenderSettings& rs
 void drawMarkers(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, const RenderSettings& rs,
                  const std::vector<Marker>& markers, FrameCounters& fc) {
     if (markers.empty()) return;
-    C3D_BindProgram(&g_modelSh.prog);
+    bindProgram(g_modelSh);
+    setUvIdentity();   // 6.41: the uniform registers are shared by the shaders: never left to chance
     C3D_SetAttrInfo(&g_modelAttr);
-    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_modelSh.uProj, &g_proj);
+    mvsProj(g_proj);
     C3D_BufInfo* buf = C3D_GetBufInfo();
     BufInfo_Init(buf);
     BufInfo_Add(buf, g_markerV, sizeof(W3dModelVertex), 3, 0x210);
     const float q = 1.0f / kMarkerQ;
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, g_modelSh.uScale, q, q, q, 0);
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, g_modelSh.uOffset, 0, 0, 0, 0);
+    mvsScale(q, q, q, 0);
+    mvsOffset(0, 0, 0, 0);
     C3D_FVUnifSet(GPU_VERTEX_SHADER, g_modelSh.uLightParams, 0.5f, 0.6f, 0, 0.35f);
-    fogStage(1);
-    resetStages(2);
+    resetStages(fogStage(1));
     setFogUniform(g_modelSh, rs.fog, true);
     C3D_AlphaTest(false, GPU_ALWAYS, 0);
     C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
@@ -798,7 +1511,7 @@ void drawMarkers(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, cons
             BufInfo_Init(b2);
             BufInfo_Add(b2, sel ? (void*)g_selV : ring ? (void*)g_ringV : (void*)g_markerV, sizeof(W3dModelVertex), 3, 0x210);
             const float qq = ring || sel ? 2.0f / kMarkerQ : 1.0f / kMarkerQ;
-            C3D_FVUnifSet(GPU_VERTEX_SHADER, g_modelSh.uScale, qq, qq, qq, 0);
+            mvsScale(qq, qq, qq, 0);
         }
         // stage 0: rgb = marker colour * light (vertex red), alpha = 1
         C3D_TexEnv* env = C3D_GetTexEnv(0);
@@ -813,10 +1526,10 @@ void drawMarkers(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, cons
         camRelative(&mv, view, m.pos, cam.pos);
         Mtx_RotateZ(&mv, m.yaw, true);
         Mtx_Scale(&mv, m.width, m.width, m.height);
-        C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_modelSh.uMV, &mv);
+        mvsMV(mv);
         // light direction in marker space: rotate the sun by -yaw
         float cy = cosf(-m.yaw), sy = sinf(-m.yaw);
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, g_modelSh.uLight, sun[0] * cy - sun[1] * sy, sun[0] * sy + sun[1] * cy, sun[2], 0);
+        mvsLight(sun[0] * cy - sun[1] * sy, sun[0] * sy + sun[1] * cy, sun[2], 0);
         const bool wantBlend = sel && m.shape == 4;
         if (wantBlend != blending) {
             blending = wantBlend;
@@ -829,6 +1542,7 @@ void drawMarkers(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, cons
             first = m.shape == 3 ? 0 : g_selRingVerts;
             nv = m.shape == 3 ? g_selRingVerts : g_selVerts - g_selRingVerts;
         }
+        drawFlush();
         C3D_DrawArrays(GPU_TRIANGLES, first, nv);
         ++fc.drawCalls;
         ++fc.markers;
@@ -862,9 +1576,10 @@ std::vector<WornDraw> g_worn;
 
 void drawWorn(const RenderSettings& rs, FrameCounters& fc) {
     if (g_worn.empty()) return;
-    C3D_BindProgram(&g_modelSh.prog);
+    bindProgram(g_modelSh);
+    setUvIdentity();   // 6.41: the uniform registers are shared by the shaders: never left to chance
     C3D_SetAttrInfo(&g_modelAttr);
-    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_modelSh.uProj, &g_proj);
+    mvsProj(g_proj);
     C3D_TexEnv* env = C3D_GetTexEnv(0);
     C3D_TexEnvInit(env);
     C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
@@ -872,8 +1587,7 @@ void drawWorn(const RenderSettings& rs, FrameCounters& fc) {
     C3D_TexEnvFunc(env, C3D_RGB, GPU_MODULATE);
     C3D_TexEnvSrc(env, C3D_Alpha, GPU_TEXTURE0, GPU_TEXTURE0, GPU_TEXTURE0);
     C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
-    fogStage(1);
-    resetStages(2);
+    resetStages(fogStage(1));
     setFogUniform(g_modelSh, rs.fog, true);
     BindCache bc;
     for (int pass = 0; pass < 2; ++pass) {   // opaque, then blended
@@ -883,18 +1597,19 @@ void drawWorn(const RenderSettings& rs, FrameCounters& fc) {
             C3D_BufInfo* buf = C3D_GetBufInfo();
             BufInfo_Init(buf);
             BufInfo_Add(buf, m->blob + h->offVertices, sizeof(W3dModelVertex), 3, 0x210);
-            C3D_FVUnifSet(GPU_VERTEX_SHADER, g_modelSh.uScale, h->posScale[0], h->posScale[1], h->posScale[2], w3d_model_uv_scale(h));
-            C3D_FVUnifSet(GPU_VERTEX_SHADER, g_modelSh.uOffset, h->posOffset[0], h->posOffset[1], h->posOffset[2], 0);
-            C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_modelSh.uMV, &w.mv);
-            C3D_FVUnifSet(GPU_VERTEX_SHADER, g_modelSh.uLight, w.light[0], w.light[1], w.light[2], 0);
+            mvsScale(h->posScale[0], h->posScale[1], h->posScale[2], w3d_model_uv_scale(h));
+            mvsOffset(h->posOffset[0], h->posOffset[1], h->posOffset[2], 0);
+            mvsMV(w.mv);
+            mvsLight(w.light[0], w.light[1], w.light[2], 0);
             const uint16_t* idx = (const uint16_t*)(m->blob + h->offIndices);
             for (u32 i = 0; i < h->submeshCount; ++i) {
                 const W3dSubmesh& sm = m->subs[i];
                 const bool blended = sm.blend == W3D_BLEND_ALPHA || sm.blend == W3D_BLEND_ADD;
                 if (blended != (pass == 1)) continue;
                 setModelBlend(sm.blend, sm.flags & W3D_SUBF_TWO_SIDED, rs.modelsNoCull);
-                bc.bind(0, sm.tex == W3D_NO_TEXTURE ? streamerWhiteTexture() : m->tex[sm.tex], fc);
+                bc.bind(0, sm.tex >= m->tex.size() ? streamerWhiteTexture() : m->tex[sm.tex], fc);   // 6.99: (also a model let go this frame: its list is empty)
                 C3D_FVUnifSet(GPU_VERTEX_SHADER, g_modelSh.uLightParams, 0.55f, 0.6f, 0, (sm.flags & W3D_SUBF_UNLIT) ? 1.0f : 0.0f);
+                drawFlush();
                 C3D_DrawElements(GPU_TRIANGLES, sm.indexCount, C3D_UNSIGNED_SHORT, idx + sm.firstIndex);
                 ++fc.drawCalls;
                 fc.tris += sm.indexCount / 3;
@@ -951,11 +1666,12 @@ std::vector<int> g_poseOff;
 std::vector<uint8_t> g_unitLod;   // stage 6.12: the mesh level of each unit of g_posedList
 const std::vector<CreatureInstance>* g_posedList = nullptr;
 
-static bool creatureVisible(const CreatureInstance& ci, const Frustum& fr, const W3dCreatureHeader** hOut, float* sOut) {
+static bool creatureVisible(const CreatureInstance& ci, const Frustum& fr, const W3dCreatureHeader** hOut, float* sOut,
+                            const uint8_t* readySnap = nullptr, size_t idx = 0) {
     const CreatureDisplay* d = ci.disp;
-    if (!d || !d->ready()) return false;
+    if (!d || !(readySnap ? readySnap[idx] != 0 : d->ready())) return false;   // (7.05: the pose thread reads the main thread's snapshot)
     const W3dCreatureHeader* h = d->model->h;
-    const float s = ci.scale * (d->d.scale > 0.01f ? d->d.scale : 1.0f);
+    const float s = w3d_unit_draw_scale(ci.scale, &d->d);
     float c[3] = {ci.pos[0], ci.pos[1], ci.pos[2] + 0.5f * (h->bmin[2] + h->bmax[2]) * s};
     if (!fr.sphere(c, h->radius * s)) return false;
     *hOut = h;
@@ -966,7 +1682,10 @@ static bool creatureVisible(const CreatureInstance& ci, const Frustum& fr, const
 // Stage 6.12: the far units (kCreatureFullAnimRange) share poses: one per model, sequence and loop flag a frame, at a common
 // clock that steps 10 times a second - a herd far away moves in step, which nobody sees at that size.
 static uint32_t g_nowMs6 = 0;   // (set by rendererPrepare)
-void prepareCreatures(const Frustum& fr, const std::vector<CreatureInstance>& list, FrameCounters& fc) {
+// 7.05: readySnap (the pose thread): which units were ready when the job was given (the main thread may make others ready
+// meanwhile); recordPoints false: the unit points (a map the main thread reads) are recorded after the join, on the main thread.
+void prepareCreatures(const Frustum& fr, const std::vector<CreatureInstance>& list, FrameCounters& fc, const uint8_t* readySnap = nullptr,
+                      bool recordPoints = true, uint32_t clockMs = ~0u) {
     const u64 t0 = svcGetSystemTick();
     g_posedList = &list;
     g_poseOff.assign(list.size(), -1);
@@ -980,7 +1699,7 @@ void prepareCreatures(const Frustum& fr, const std::vector<CreatureInstance>& li
         const W3dCreatureHeader* h;
         float s;
         const CreatureInstance& ci = list[i];
-        if (!creatureVisible(ci, fr, &h, &s)) continue;
+        if (!creatureVisible(ci, fr, &h, &s, readySnap, i)) continue;
         const float dx = ci.pos[0] - fr.cam[0], dy = ci.pos[1] - fr.cam[1], dz = ci.pos[2] - fr.cam[2];
         const float d2 = dx * dx + dy * dy + dz * dz;
         g_unitLod[i] = ci.disp->model->lods ? w3d_lod_for(d2, h->radius * s) : 0;
@@ -998,18 +1717,142 @@ void prepareCreatures(const Frustum& fr, const std::vector<CreatureInstance>& li
         total += h->boneCount;
     }
     if (g_posePool.size() < total) g_posePool.resize(total);
-    const float sharedMs = (float)(g_nowMs6 / 100u * 100u);
+    const float sharedMs = (float)((clockMs != ~0u ? clockMs : g_nowMs6) / 100u * 100u);
     for (const Shared& x : shared) w3d_anim_pose(x.blob, x.seq, sharedMs, x.loop ? 1 : 0, g_posePool.data() + x.off);
+    // 6.99: the units between the near ring and the far ones are posed less often - every 2nd frame from 22 yd, every 3rd from
+    // 45 yd (the frames staggered by the unit, so the work spreads); between those frames the last pose is drawn again. A camp
+    // of 25 Turtle WoW refugees (88-162 bones each) cost ~3 ms of posing a frame. A new sequence or model is posed at once.
+    struct PoseMemo { const uint8_t* blob = nullptr; int seq = -2; bool loop = false; uint32_t frame = 0, used = 0; std::vector<W3dMat34> m; };
+    static std::unordered_map<uint64_t, PoseMemo> memo;
+    static uint32_t poseFrame = 0;
+    ++poseFrame;
     for (size_t i = 0; i < list.size(); ++i) {
         if (g_poseOff[i] < 0) continue;
         const CreatureInstance& ci = list[i];
         const W3dCreatureHeader* h = ci.disp->model->h;
-        const float s = ci.scale * (ci.disp->d.scale > 0.01f ? ci.disp->d.scale : 1.0f);
+        const float s = w3d_unit_draw_scale(ci.scale, &ci.disp->d);
         W3dMat34* P = g_posePool.data() + g_poseOff[i];
-        if (!isFar[i]) w3d_anim_pose(ci.disp->model->blob, ci.seq, ci.timeMs, ci.loop ? 1 : 0, P);
-        if (ci.guid) recordUnitPoints(ci, h, ci.disp->model->blob, s, P);
+        if (!isFar[i]) {
+            const float dx = ci.pos[0] - fr.cam[0], dy = ci.pos[1] - fr.cam[1], dz = ci.pos[2] - fr.cam[2];
+            const float d2 = dx * dx + dy * dy + dz * dz;
+            const uint32_t every = !ci.guid || d2 < 22.0f * 22.0f ? 1u : d2 < 45.0f * 45.0f ? 2u : 3u;
+            const uint8_t* blob = ci.disp->model->blob;
+            if (every == 1) {
+                w3d_anim_pose(blob, ci.seq, ci.timeMs, ci.loop ? 1 : 0, P);
+            } else {
+                PoseMemo& pm = memo[ci.guid];
+                const bool same = pm.blob == blob && pm.seq == ci.seq && pm.loop == ci.loop && pm.m.size() == h->boneCount;
+                const bool due = !same || poseFrame - pm.frame >= every || ((poseFrame + (uint32_t)(ci.guid * 2654435761u)) % every) == 0;
+                if (due) {
+                    w3d_anim_pose(blob, ci.seq, ci.timeMs, ci.loop ? 1 : 0, P);
+                    pm.blob = blob; pm.seq = ci.seq; pm.loop = ci.loop; pm.frame = poseFrame;
+                    pm.m.assign(P, P + h->boneCount);
+                    ++fc.posesFresh;
+                } else {
+                    memcpy(P, pm.m.data(), h->boneCount * sizeof(W3dMat34));
+                    ++fc.posesReused;
+                }
+                pm.used = poseFrame;
+            }
+        }
+        if (ci.guid && recordPoints) recordUnitPoints(ci, h, ci.disp->model->blob, s, P);
     }
+    if ((poseFrame & 255) == 0)   // units gone for a while: their memo goes
+        for (auto it = memo.begin(); it != memo.end();) it = poseFrame - it->second.used > 120 ? memo.erase(it) : std::next(it);
     fc.poseMs += ticksToMs(svcGetSystemTick() - t0);
+}
+
+// 7.05: the units' poses on core 2 (New 3DS). The main thread hands the job over as soon as the frame's unit list and camera
+// are final (main.cpp, after the game phase) and goes on with the HUD, the touch screen, the streamer and the visibility pass;
+// rendererPrepare joins it. The job writes only the pose globals (g_posePool / g_poseOff / g_unitLod / g_posedList) and its
+// own counters, which nobody reads before the join; the unit points (a map the spells read) are recorded after it, here.
+// Without core 2 (Old 3DS) or when the thread cannot start, rendererPrepare poses on the main thread as before.
+namespace {
+struct PoseJob {
+    const std::vector<CreatureInstance>* list = nullptr;
+    Frustum fr;
+    std::vector<uint8_t> ready;
+    FrameCounters fc;
+    uint32_t nowMs = 0;
+    bool pending = false;
+};
+PoseJob g_job;
+Thread g_poseThread = nullptr;
+LightEvent g_poseGo, g_poseDone;
+volatile bool g_poseQuit = false;
+bool g_poseTried = false;
+
+void poseMain(void*) {
+    for (;;) {
+        LightEvent_Wait(&g_poseGo);
+        if (g_poseQuit) break;
+        g_job.fc = FrameCounters();
+        prepareCreatures(g_job.fr, *g_job.list, g_job.fc, g_job.ready.data(), false, g_job.nowMs);
+        LightEvent_Signal(&g_poseDone);
+    }
+}
+
+void poseWait() {
+    if (!g_job.pending) return;
+    LightEvent_Wait(&g_poseDone);
+    g_job.pending = false;
+}
+}  // namespace
+
+bool posesStartImpl(const Frustum& fr, const RenderSettings& rs, const std::vector<CreatureInstance>* list) {
+    poseWait();   // (a job nobody joined: the login screen came in between)
+    if (!g_poseTried) {
+        g_poseTried = true;
+        bool n3ds = false;
+        APT_CheckNew3DS(&n3ds);
+        s32 prio = 0x30;
+        svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+        LightEvent_Init(&g_poseGo, RESET_ONESHOT);
+        LightEvent_Init(&g_poseDone, RESET_ONESHOT);
+        if (n3ds) g_poseThread = threadCreate(poseMain, nullptr, 32 * 1024, prio, 2, false);   // (the same priority: core 2 is its own)
+        perf::event("unit poses: %s", g_poseThread ? "on core 2 (7.05)" : "on the main thread (no core 2)");
+    }
+    if (!g_poseThread || !list || list->empty() || !rs.creatures) return false;
+    g_job.list = list;
+    g_job.fr = fr;
+    g_job.ready.resize(list->size());
+    for (size_t i = 0; i < list->size(); ++i) g_job.ready[i] = (*list)[i].disp && (*list)[i].disp->ready() ? 1 : 0;
+    g_job.nowMs = rs.nowMs;
+    g_job.pending = true;
+    LightEvent_Signal(&g_poseGo);
+    return true;
+}
+
+// The join (rendererPrepare): true when the job posed this very list; its counters go to fc, the unit points are recorded.
+static bool posesJoin(const std::vector<CreatureInstance>* list, FrameCounters& fc) {
+    if (!g_job.pending) return false;
+    const u64 w0 = svcGetSystemTick();
+    poseWait();
+    fc.poseWaitMs += ticksToMs(svcGetSystemTick() - w0);
+    if (g_job.list != list || g_poseOff.size() != list->size()) return false;
+    fc.farUnits += g_job.fc.farUnits;
+    fc.sharedPoses += g_job.fc.sharedPoses;
+    fc.posesFresh += g_job.fc.posesFresh;
+    fc.posesReused += g_job.fc.posesReused;
+    fc.poseMs += g_job.fc.poseMs;
+    for (size_t i = 0; i < list->size(); ++i) {
+        const CreatureInstance& ci = (*list)[i];
+        if (g_poseOff[i] < 0 || !ci.guid) continue;
+        const W3dCreatureHeader* h = ci.disp->model->h;
+        recordUnitPoints(ci, h, ci.disp->model->blob, w3d_unit_draw_scale(ci.scale, &ci.disp->d), g_posePool.data() + g_poseOff[i]);
+    }
+    ++fc.posesThreaded;
+    return true;
+}
+
+void posesShutdownImpl() {
+    if (!g_poseThread) return;
+    poseWait();
+    g_poseQuit = true;
+    LightEvent_Signal(&g_poseGo);
+    threadJoin(g_poseThread, U64_MAX);
+    threadFree(g_poseThread);
+    g_poseThread = nullptr;
 }
 
 void drawCreatures(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, const RenderSettings& rs,
@@ -1017,7 +1860,7 @@ void drawCreatures(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, co
     if (list.empty()) return;
     const bool posed = g_posedList == &list && g_poseOff.size() == list.size();
     g_worn.clear();
-    C3D_BindProgram(&g_skinSh.prog);
+    bindProgram(g_skinSh);
     C3D_SetAttrInfo(&g_skinAttr);
     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_skinSh.uProj, &g_proj);
     C3D_TexEnv* env = C3D_GetTexEnv(0);
@@ -1028,15 +1871,15 @@ void drawCreatures(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, co
     C3D_TexEnvSrc(env, C3D_Alpha, GPU_TEXTURE0, GPU_TEXTURE0, GPU_TEXTURE0);
     C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
     // stage 6.12: stage 1 = the unit's opacity while it appears (constant alpha; white = nothing changes), fog after it
-    C3D_TexEnv* tintEnv = C3D_GetTexEnv(1);
+    const int tintStage = ghostStages(1);   // 6.77: as a ghost the grey comes before the unit's tint (ghosts, spirit healers stay blue)
+    C3D_TexEnv* tintEnv = C3D_GetTexEnv(tintStage);
     C3D_TexEnvInit(tintEnv);
     C3D_TexEnvSrc(tintEnv, C3D_Both, GPU_PREVIOUS, GPU_CONSTANT, GPU_PRIMARY_COLOR);
     C3D_TexEnvFunc(tintEnv, C3D_Both, GPU_MODULATE);
     C3D_TexEnvColor(tintEnv, 0xFFFFFFFFu);
     u32 tintNow = 0xFFFFFFFFu;
     bool tintAlphaConst = false;
-    fogStage(2);
-    resetStages(3);
+    resetStages(fogStage(tintStage + 1, false));
     setFogUniform(g_skinSh, rs.fog, true);
     BindCache bc;
     for (size_t ci_i = 0; ci_i < list.size(); ++ci_i) {
@@ -1048,7 +1891,7 @@ void drawCreatures(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, co
         if (posed) {   // stage 6.4: culled and posed before the wait
             if (g_poseOff[ci_i] < 0) continue;
             h = d->model->h;
-            s = ci.scale * (d->d.scale > 0.01f ? d->d.scale : 1.0f);
+            s = w3d_unit_draw_scale(ci.scale, &d->d);
             P = g_posePool.data() + g_poseOff[ci_i];
         } else {
             if (!creatureVisible(ci, fr, &h, &s)) continue;
@@ -1101,6 +1944,17 @@ void drawCreatures(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, co
             WornDraw wd;
             Mtx_Multiply(&wd.mv, &mv, &bone);
             Mtx_Translate(&wd.mv, wi.pos[0], wi.pos[1], wi.pos[2], true);
+            // 6.92: a two-hander, bow or gun on the back (attachment 12) takes WoWee's turn (a shield there does not: backFix is off)
+            if (wi.backFix) {
+                float f[12];
+                w3d_back_weapon_xform(f);
+                C3D_Mtx fx;
+                for (int r = 0; r < 3; ++r) { fx.r[r].x = f[r * 4]; fx.r[r].y = f[r * 4 + 1]; fx.r[r].z = f[r * 4 + 2]; fx.r[r].w = f[r * 4 + 3]; }
+                fx.r[3].x = 0; fx.r[3].y = 0; fx.r[3].z = 0; fx.r[3].w = 1;
+                C3D_Mtx t;
+                Mtx_Multiply(&t, &wd.mv, &fx);
+                wd.mv = t;
+            }
             wd.model = wi.model;
             wd.light[0] = lightObj[0]; wd.light[1] = lightObj[1]; wd.light[2] = lightObj[2];
             g_worn.push_back(wd);
@@ -1111,6 +1965,10 @@ void drawCreatures(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, co
         const W3dCreatureTex* ct = (const W3dCreatureTex*)(blob + h->offTex);
         const uint16_t* idx = (const uint16_t*)(blob + h->offIndices);
         int curPal = -1;
+        // 7.0: at LOD 2 a blob with a far skeleton draws every piece with that one palette (its own vertex copies there)
+        const int unitLod = posed ? g_unitLod[ci_i] : 0;
+        const W3dSubLod* subLods = d->model->lods;
+        const bool farSkel = unitLod >= W3D_MODEL_LODS && subLods && h->farPalette && h->farPalette <= h->paletteCount;
         for (u32 i = 0; i < h->submeshCount; ++i) {
             const W3dSkinSubmesh& m = sm[i];
             if (d->d.geosetCount) {
@@ -1118,8 +1976,17 @@ void drawCreatures(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, co
                 for (int k = 0; k < d->d.geosetCount && !on; ++k) on = d->d.geosets[k] == m.geoset;
                 if (!on) continue;
             }
-            if (m.palette != curPal && m.palette < h->paletteCount) {
-                const W3dBonePalette& p = pal[m.palette];
+            // 7.03: a player's piece with no texture to wear (the model's own art is not a type the converter knows) or a cloak
+            // with no cloak worn was drawn in the white stand-in texture - Turtle WoW's Goblin showed a pale ragged flap sticking
+            // out of its side. Such pieces are skipped (only for players: a monster's untextured part stays as it was).
+            if (d->look) {
+                if (m.texSlot == W3D_NO_TEXTURE) continue;
+                if (m.texSlot < h->texCount && ct[m.texSlot].kind == W3D_CTEX_CAPE && !d->tex[W3D_CTEX_CAPE - 1]) continue;
+            }
+            const bool farHere = farSkel && subLods[i].indexCount[W3D_MODEL_LODS - 1];
+            const int wantPal = farHere ? h->farPalette - 1 : m.palette;
+            if (wantPal != curPal && wantPal < (int)h->paletteCount) {
+                const W3dBonePalette& p = pal[wantPal];
                 // 6.35: never more than the shader's bones[] (W3D_PALETTE_BONES * 3 registers) - past it citro3d's
                 // uniform array ends and libctru's allocators and the GPU command buffer pointer follow in memory
                 const int nb = p.count < W3D_PALETTE_BONES ? p.count : W3D_PALETTE_BONES;
@@ -1131,7 +1998,7 @@ void drawCreatures(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, co
                         v.x = M[r * 4]; v.y = M[r * 4 + 1]; v.z = M[r * 4 + 2]; v.w = M[r * 4 + 3];
                     }
                 }
-                curPal = m.palette;
+                curPal = wantPal;
                 ++fc.boneUploads;
             }
             setModelBlend(m.blend, m.flags & W3D_SUBF_TWO_SIDED, rs.modelsNoCull);
@@ -1157,16 +2024,22 @@ void drawCreatures(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, co
                 // kept pointer were silently lost: 6.11/6.12 fades drew fully opaque - perf log 6m: r_fading ~28, nothing seen)
                 C3D_DirtyTexEnv(tintEnv);
             }
-            const u32 want = fading ? (0x00FFFFFFu | (u32)(std::max(0.0f, ci.fade) * 255.0f + 0.5f) << 24) : 0xFFFFFFFFu;
+            const u32 want = fading ? ((ci.tint & 0x00FFFFFFu) | (u32)(std::max(0.0f, ci.fade) * 255.0f + 0.5f) << 24) : 0xFFFFFFFFu;   // (6.62: ci.tint colours it: a ghost's blue)
             if (want != tintNow) { C3D_TexEnvColor(tintEnv, want); C3D_DirtyTexEnv(tintEnv); tintNow = want; }
             bc.bind(0, m.texSlot == W3D_NO_TEXTURE ? streamerWhiteTexture() : creatureTex(d, h, ct, m.texSlot), fc);
             C3D_FVUnifSet(GPU_VERTEX_SHADER, g_skinSh.uLightParams, 0.55f, 0.6f, 0, (m.flags & W3D_SUBF_UNLIT) ? 1.0f : 0.0f);
             uint32_t first = m.firstIndex, count = m.indexCount;
-            const W3dSubLod* lods = d->model->lods;
-            const int lod = posed ? g_unitLod[ci_i] : 0;
-            if (lod && lods)   // stage 6.12: the lightest level there is, up to the one asked for
-                for (int k = lod; k >= 1; --k)
+            const W3dSubLod* lods = subLods;
+            const int lod = unitLod;
+            if (farHere) {   // 7.0: the far skeleton's own copy of the piece (never a level with the piece's palette)
+                first = lods[i].firstIndex[W3D_MODEL_LODS - 1];
+                count = lods[i].indexCount[W3D_MODEL_LODS - 1];
+            } else if (lod && lods) {   // stage 6.12: the lightest level there is, up to the one asked for
+                // 7.0: a blob with a far skeleton has LOD-2 copies bound to the far palette - never with this piece's own
+                for (int k = std::min(lod, h->farPalette ? W3D_MODEL_LODS - 1 : W3D_MODEL_LODS); k >= 1; --k)
                     if (lods[i].indexCount[k - 1]) { first = lods[i].firstIndex[k - 1]; count = lods[i].indexCount[k - 1]; break; }
+            }
+            drawFlush();
             C3D_DrawElements(GPU_TRIANGLES, count, C3D_UNSIGNED_SHORT, idx + first);
             ++fc.drawCalls;
             ++fc.lodDraws[lod];
@@ -1180,7 +2053,7 @@ void drawCreatures(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, co
 }
 
 void drawWater(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, const RenderSettings& rs, FrameCounters& fc) {
-    C3D_BindProgram(&g_terrainSh.prog);
+    bindProgram(g_terrainSh);
     C3D_SetAttrInfo(&g_terrainAttr);
     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_terrainSh.uProj, &g_proj);
     const float t = rs.timeSec;
@@ -1194,8 +2067,7 @@ void drawWater(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, const 
     C3D_TexEnvFunc(env, C3D_RGB, GPU_MODULATE);
     C3D_TexEnvSrc(env, C3D_Alpha, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
     C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
-    fogStage(1);
-    resetStages(2);
+    resetStages(fogStage(1));
     setFogUniform(g_terrainSh, rs.fog, true);
     C3D_AlphaTest(false, GPU_ALWAYS, 0);
     C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_ONE, GPU_ZERO);
@@ -1240,6 +2112,7 @@ void drawWater(const Camera& cam, const C3D_Mtx& view, const Frustum& fr, const 
                 else C3D_FVUnifSet(GPU_VERTEX_SHADER, g_terrainSh.uUV, fmodf(t * 0.05f, 64.0f), fmodf(t * 0.03f, 64.0f), 0, 0);
             }
             bc.bind(0, tile->wtex[tex], fc);
+            drawFlush();
             C3D_DrawElements(GPU_TRIANGLES, b.indexCount, C3D_UNSIGNED_SHORT, idx + b.firstIndex);
             ++fc.drawCalls;
             ++fc.waterBatches;
@@ -1358,7 +2231,7 @@ static void fxSimulate(const Camera& cam, const C3D_Mtx& view, const RenderSetti
                 memcpy(s.pos, ci.pos, sizeof s.pos);
                 s.rot[0] = s.rot[1] = 0;
                 s.rot[2] = ci.yaw;
-                s.scale = ci.scale * (d->d.scale > 0.01f ? d->d.scale : 1.0f);
+                s.scale = w3d_unit_draw_scale(ci.scale, &d->d);
                 g_fxSources.push_back(s);
             }
         if (effects)   // spell effects (stage 5.33): first served, the pool's hard cap still holds
@@ -1421,7 +2294,7 @@ void drawFx(const Camera& cam, const C3D_Mtx& view, const RenderSettings& rs, Fr
     }
     GSPGPU_FlushDataCache(vb, sizeof(FxVertex) * 4 * g_fxQuads.size());
 
-    C3D_BindProgram(&g_fxSh.prog);
+    bindProgram(g_fxSh);
     C3D_SetAttrInfo(&g_fxAttr);
     C3D_BufInfo* buf = C3D_GetBufInfo();
     BufInfo_Init(buf);
@@ -1465,6 +2338,7 @@ void drawFx(const Camera& cam, const C3D_Mtx& view, const RenderSettings& rs, Fr
                 C3D_TexBind(0, gt && !standIn ? &((GpuTex*)q.tex)->tex : &g_fxDot);
                 ++fc.texBinds;
             }
+            drawFlush();
             C3D_DrawElements(GPU_TRIANGLES, (int)(i - run) * 6, C3D_UNSIGNED_SHORT, g_fxIdx + run * 6);
             ++fc.drawCalls;
             fc.tris += (u32)(i - run) * 2;
@@ -1518,6 +2392,7 @@ void rendererInit() {
 }
 
 void rendererShutdown() {
+    rendererPosesShutdown();   // 7.05
     shaderProgramFree(&g_terrainSh.prog);
     shaderProgramFree(&g_modelSh.prog);
     shaderProgramFree(&g_skinSh.prog);
@@ -1532,7 +2407,8 @@ void rendererShutdown() {
     DVLB_Free(g_skinSh.dvlb);
     DVLB_Free(g_terrainSh.dvlb);
     DVLB_Free(g_modelSh.dvlb);
-    if (g_skyV) linearFree(g_skyV);
+    for (int b = 0; b < 2; ++b) if (g_skyBuf[b]) { linearFree(g_skyBuf[b]); g_skyBuf[b] = nullptr; }
+    for (int b = 0; b < 3; ++b) if (g_celBuf[b]) { linearFree(g_celBuf[b]); g_celBuf[b] = nullptr; }
     if (g_skyI) linearFree(g_skyI);
     if (g_markerV) linearFree(g_markerV);
 }
@@ -1567,6 +2443,10 @@ void rendererSetProjection(float drawDist) {
 }
 
 void rendererSetHorizon(float yards) { g_horizonWant = yards; }
+void rendererSetViewer(const float* p) {   // 6.42: the character's position for the portal walk
+    g_haveViewer = p != nullptr;
+    if (p) memcpy(g_viewer, p, sizeof g_viewer);
+}
 
 bool rendererUnitPoint(uint64_t guid, int slot, float out[3]) {
     if (slot < 0 || slot > 5) return false;
@@ -1629,14 +2509,50 @@ static void frameFrustum(const Camera& cam, const RenderSettings& rs, Frustum& f
 
 // Visible doodads / buildings / spell-effect meshes into each model's 'visible' list (g_activeModels).
 static std::vector<Instance> g_effInst;   // spell effects' meshes (stage 5.33), drawn with the doodads
+// 6.59: the sun in a turned model's own space (as the streamer gives the tiles' instances: lightToModel)
+// 7.05: the pose thread's public face (frameFrustum is defined just above)
+bool rendererPosesStart(const Camera& cam, const RenderSettings& rs, const std::vector<CreatureInstance>* list) {
+    Frustum fr;
+    frameFrustum(cam, rs, fr);
+    return posesStartImpl(fr, rs, list);
+}
+void rendererPosesShutdown() { posesShutdownImpl(); }
+
+static void sunInModel(const float rot[3], float out[3]) {
+    float v[3] = {0.30f, 0.40f, 0.866f};   // (the tiles' sun: streamer.cpp lightToModel)
+    float c, s, tmp;
+    c = cosf(-rot[2]); s = sinf(-rot[2]);
+    tmp = c * v[0] - s * v[1]; v[1] = s * v[0] + c * v[1]; v[0] = tmp;
+    c = cosf(-rot[1]); s = sinf(-rot[1]);
+    tmp = c * v[0] + s * v[2]; v[2] = -s * v[0] + c * v[2]; v[0] = tmp;
+    c = cosf(-rot[0]); s = sinf(-rot[0]);
+    tmp = c * v[1] - s * v[2]; v[2] = s * v[1] + c * v[2]; v[1] = tmp;
+    out[0] = v[0]; out[1] = v[1]; out[2] = v[2];
+}
+
 static void collectAll(const Frustum& fr, const RenderSettings& rs, FrameCounters& fc, const std::vector<SceneModel>* effects) {
     collectModels(fr, rs, fc);   // doodads (if enabled) and buildings
     g_effInst.clear();
-    if (effects && rs.effects > 0) {
+    if (effects) {
         g_effInst.reserve(effects->size());
         for (const SceneModel& sm : *effects) {
             Model* m = sm.model;
             if (!sm.emit || !m || !m->drawable || !m->h) continue;
+            if (sm.building) {   // 6.59: a game object that is a building (its group or a piece of its furniture)
+                if ((g_gtOff & kGtBuildings) && m->building) continue;
+                if (!rs.doodads && !m->building) continue;
+                Instance in{};
+                in.model = m;
+                memcpy(in.pos, sm.pos, sizeof in.pos);
+                memcpy(in.rot, sm.rot, sizeof in.rot);
+                in.scale = sm.scale;
+                in.radius = m->h->radius * sm.scale;
+                sunInModel(in.rot, in.lightModel);
+                g_effInst.push_back(in);
+                ++fc.objWmoParts;
+                continue;
+            }
+            if (rs.effects <= 0) continue;
             Instance in{};
             in.model = m;
             memcpy(in.pos, sm.pos, sizeof in.pos);
@@ -1657,6 +2573,7 @@ static void collectAll(const Frustum& fr, const RenderSettings& rs, FrameCounter
 static void clearVisible() {   // per-frame instance pointers: tiles / models may be freed before the next frame
     for (Model* m : g_activeModels) { m->visible.clear(); m->fadeCount = 0; }
     g_activeModels.clear();
+    g_activeBatches.clear();   // 6.44: points into tiles that may be freed before the next frame (and the login scene draws none)
     g_mvReady = false;
 }
 
@@ -1676,6 +2593,7 @@ static void agePoints(const RenderSettings& rs) {
 static bool g_prepared = false;
 void rendererPrepare(const Camera& cam, const RenderSettings& rsIn, FrameCounters& fc, const std::vector<SceneModel>* effects,
                      const std::vector<CreatureInstance>* creatures) {
+    g_gtOff = rsIn.gpuTestOff;   // 6.46
     clearVisible();
     RenderSettings rs = rsIn;
     if (rs.underwater) rs.fog = true;
@@ -1693,7 +2611,7 @@ void rendererPrepare(const Camera& cam, const RenderSettings& rsIn, FrameCounter
     fc.passMs[FrameCounters::kCollect] += ticksToMs(t1 - t0);
     // stage 6.4 (second step): the units' poses and the particles' simulation too
     agePoints(rs);
-    if (creatures && rs.creatures && !creatures->empty()) prepareCreatures(fr, *creatures, fc);
+    if (creatures && rs.creatures && !creatures->empty() && !posesJoin(creatures, fc)) prepareCreatures(fr, *creatures, fc);   // 7.05
     float f[3];
     cam.forward(f);
     C3D_Mtx view;
@@ -1720,6 +2638,8 @@ void rendererDraw(C3D_RenderTarget* target, const Camera& cam, const RenderSetti
                   const std::vector<SceneModel>* effects) {
     (void)target;
     RenderSettings rs = rsIn;
+    g_gtOff = rs.gpuTestOff;   // 6.46
+    g_ghostPass = g_ghost > 0.5f;   // 6.77
     if (rs.underwater) rs.fog = true;   // the water is never clear: the fog switch only concerns the open air
     float f[3];
     cam.forward(f);
@@ -1730,13 +2650,19 @@ void rendererDraw(C3D_RenderTarget* target, const Camera& cam, const RenderSetti
     // Under the surface (stage 5.26): the water's colour all around, sight ends at its fog distance (Light.dbc underwater
     // parameters): no sky, and nothing farther than that is drawn at all.
     const float keepX = g_fogX, keepY = g_fogY;
+    if (g_ghostPass && !rs.underwater && keepX > 1e-6f) {   // 6.80: a ghost sees less: the fog comes in (start and end both pulled in), the far slabs melt into the haze
+        const float e = keepY / keepX, s0 = e - 1.0f / keepX;
+        const float e2 = std::max(e * g_ghostFogShare, 40.0f), s2 = std::max(s0 * g_ghostFogShare * 0.6f, 5.0f);
+        g_fogX = 1.0f / std::max(e2 - s2, 1.0f);
+        g_fogY = e2 * g_fogX;
+    }
     if (rs.underwater) {
         const float end = std::max(rs.waterFogEnd, 6.0f);
         g_fogX = 1.0f / end;   // visibility = 1 - dist / end: from the eye
         g_fogY = 1.0f;
         g_fogColor = fogConstColor(rs.waterFog);
     } else {
-        g_fogColor = fogConstColor(kHorizon);
+        g_fogColor = fogConstColor(g_skyCol[kSkyFog]);
     }
 
     // stage 6 (perf log): each pass's CPU time, draws and triangles
@@ -1751,9 +2677,9 @@ void rendererDraw(C3D_RenderTarget* target, const Camera& cam, const RenderSetti
         pt = now; pd = fc.drawCalls; ptr = fc.tris;
     };
     perf::mark("draw: sky / terrain");
-    if (!rs.underwater) drawSky(view, fc);
+    if (!rs.underwater) { drawSky(view, fc); drawCelestial(view, fc); drawSkyModel(view, rs, fc); }
     pass(FrameCounters::kSky);
-    drawTerrain(cam, view, fr, rs, fc);
+    if (!(g_gtOff & kGtTerrain)) drawTerrain(cam, view, fr, rs, fc);
     pass(FrameCounters::kTerrain);
     if (rs.gpuKick) gpuKick(fc);   // stage 6.3: the GPU draws the sky and the ground while the models are sorted out
     agePoints(rs);
@@ -1769,24 +2695,29 @@ void rendererDraw(C3D_RenderTarget* target, const Camera& cam, const RenderSetti
     if (creatures && rs.creatures) drawCreatures(cam, view, fr, rs, *creatures, fc);
     pass(FrameCounters::kCreatures);
     perf::mark("draw: water / transparent");
-    drawWater(cam, view, fr, rs, fc);
+    const bool alphaOn = !(g_gtOff & kGtAlpha);   // 6.46: the GPU test - no water, no transparent pass, no particles
+    if (alphaOn) drawWater(cam, view, fr, rs, fc);
     pass(FrameCounters::kWater);
-    drawModels(cam, view, rs, true, fc);
+    if (alphaOn) drawModels(cam, view, rs, true, fc);
     pass(FrameCounters::kAlpha);
     perf::mark("draw: particles");
-    drawFx(cam, view, rs, fc, effects);
+    if (alphaOn) drawFx(cam, view, rs, fc, effects);
     pass(FrameCounters::kFx);
     // Drop per-frame instance pointers: tiles/models may be freed before the next frame (prepared: rendererEndFrame does,
     // after the last eye).
     if (!g_prepared) clearVisible();
     g_fogX = keepX;
     g_fogY = keepY;
+    g_ghostPass = false;
 }
 
 void rendererDrawScene(const Camera& cam, float vfovDeg, float nearZ, float farZ, const std::vector<SceneModel>& models,
                        const std::vector<CreatureInstance>* creatures, FrameCounters& fc) {
+    poseWait();   // 7.05: a pose job nobody joined (the login screen came) is over before anything is drawn
     const C3D_Mtx keepProj = g_proj;
     const float keepNear = g_near, keepFar = g_far;
+    const uint32_t keepNowMs = g_nowMs;
+    g_nowMs = streamerNowMs();   // 6.41: rendererPrepare does not run behind the login screens: the portal's textures move on this clock
     g_near = std::max(nearZ, 0.1f);
     g_far = std::max(farZ, g_near + 1.0f);
     if (g_iod == 0) Mtx_PerspTilt(&g_proj, C3D_AngleFromDegrees(vfovDeg), C3D_AspectRatioTop, g_near, g_far, false);
@@ -1824,6 +2755,7 @@ void rendererDrawScene(const Camera& cam, float vfovDeg, float nearZ, float farZ
     if (creatures) drawCreatures(cam, view, fr, rs, *creatures, fc);
     drawModels(cam, view, rs, true, fc);
     clearVisible();
+    g_nowMs = keepNowMs;
     g_proj = keepProj;
     g_near = keepNear;
     g_far = keepFar;
@@ -1838,7 +2770,7 @@ bool rendererDrawPortrait(const CreatureInstance& ciIn, const float corr[4], Fra
     ci.pos[0] = ci.pos[1] = ci.pos[2] = 0;
     ci.yaw = 0;
     ci.guid = 0;                  // (no unit points recorded)
-    const float s = ci.scale * (d->d.scale > 0.01f ? d->d.scale : 1.0f);
+    const float s = w3d_unit_draw_scale(ci.scale, &d->d);
     // the head: the helmet attachment through the pose, else the front top of the bounding box (beasts' heads are in front)
     if (g_pose.size() < h->boneCount) g_pose.resize(h->boneCount);
     w3d_anim_pose(blob, ci.seq, ci.timeMs, ci.loop ? 1 : 0, g_pose.data());
@@ -1902,8 +2834,70 @@ bool rendererDrawPortrait(const CreatureInstance& ciIn, const float corr[4], Fra
     return fc.creatures != before;
 }
 
+// 6.61: the zone's sky model (streamerAcquireItemModel; the caller keeps it acquired and releases it); null: none
+void rendererSetSkyModel(Model* m) { g_skyModel = m; }
+
+// 6.61: the sun and the moon for this hour of the server's day (sky.cpp positions); strengths 0 = below the horizon, not drawn
+void rendererSetCelestial(const float sunDir[3], float sunStrength, const float moonDir[3], float moonStrength) {
+    if (!g_celBuf[0]) return;
+    const int next = (g_celCur + 1) % 3;
+    W3dTerrainVertex* out = g_celBuf[next];
+    int n = 0;
+    if (sunStrength > 0.01f) {
+        const float warm[3] = {255, 244, 205}, halo[3] = {255, 190, 110};
+        n += celDisc(out + n, sunDir, 13.0f, halo, 0.55f * sunStrength, 0.0f);
+        n += celDisc(out + n, sunDir, 3.6f, warm, sunStrength, sunStrength);
+    }
+    if (moonStrength > 0.01f) {
+        const float pale[3] = {225, 232, 255}, halo[3] = {120, 140, 200};
+        n += celDisc(out + n, moonDir, 7.0f, halo, 0.45f * moonStrength, 0.0f);
+        n += celDisc(out + n, moonDir, 2.8f, pale, moonStrength, moonStrength);
+    }
+    GSPGPU_FlushDataCache(out, (size_t)n * sizeof(W3dTerrainVertex));
+    g_celCount = n;
+    g_celCur = next;
+}
+
+// 6.60: the sky for this spot and hour (sky.cpp); 0..255 each. The dome is coloured again when a colour moved by a step or more.
+// (the zone's colours, graded for the spirit world, into the dome)
+static void applySkyColours() {
+    uint8_t next[kSkyN][3];
+    bool changed = false;
+    for (int k = 0; k < kSkyN; ++k) {
+        sky::Rgb in{g_skyBase[k][0], g_skyBase[k][1], g_skyBase[k][2]};
+        if (g_ghost > 0.001f) in = sky::ghostGrade(in, g_ghost);
+        const float v[3] = {in.r, in.g, in.b};
+        for (int c = 0; c < 3; ++c) {
+            next[k][c] = (uint8_t)std::clamp((int)(v[c] + 0.5f), 0, 255);
+            if (std::abs((int)next[k][c] - (int)g_skyCol[k][c]) >= 1) changed = true;
+        }
+    }
+    if (!changed || !g_skyBuf[0]) return;
+    memcpy(g_skyCol, next, sizeof g_skyCol);
+    const int spare = 1 - g_skyCur;
+    fillSky(g_skyBuf[spare]);   // (the buffer the GPU is not reading; it is the current one from the next frame on)
+    g_skyCur = spare;
+}
+
+void rendererSetSky(const float top[3], const float mid[3], const float band1[3], const float band2[3], const float fog[3]) {
+    const float* in[kSkyN] = {top, mid, band1, band2, fog};
+    for (int k = 0; k < kSkyN; ++k)
+        for (int c = 0; c < 3; ++c) g_skyBase[k][c] = in[k][c];
+    applySkyColours();
+}
+
+// 6.62: the spirit world: 0 = alive, 1 = a ghost (the sky and the fog go grey, darker and cold); 0.4 for the body before the spirit is released
+void rendererSetGhostFog(float share) { g_ghostFogShare = std::clamp(share, 0.25f, 1.0f); }
+
+void rendererSetGhost(float amount) {
+    amount = std::clamp(amount, 0.0f, 1.0f);
+    if (std::fabs(amount - g_ghost) < 0.004f) return;
+    g_ghost = amount;
+    applySkyColours();
+}
+
 u32 rendererClearColor(const RenderSettings& rs) {   // RGBA8 for C3D_RenderTargetClear
-    if (!rs.underwater) return 0x8CB8E8FF;
+    if (!rs.underwater) return ((u32)g_skyCol[kSkyMid][0] << 24) | ((u32)g_skyCol[kSkyMid][1] << 16) | ((u32)g_skyCol[kSkyMid][2] << 8) | 0xFF;
     return ((u32)rs.waterFog[0] << 24) | ((u32)rs.waterFog[1] << 16) | ((u32)rs.waterFog[2] << 8) | 0xFF;
 }
 

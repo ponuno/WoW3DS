@@ -1,2 +1,11 @@
 __pycache__/
 PLAN.md
+
+# build outputs (7.09)
+converter/build/
+proto3ds/build/
+*.elf
+*.3dsx
+*.cia
+*.smdh
+*.orig

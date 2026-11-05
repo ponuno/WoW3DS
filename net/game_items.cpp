@@ -21,7 +21,10 @@ enum : uint16_t {
     CMSG_LOOT = 0x15D, CMSG_LOOT_MONEY = 0x15E, CMSG_LOOT_RELEASE = 0x15F, SMSG_LOOT_RESPONSE = 0x160,
     SMSG_LOOT_RELEASE_RESPONSE = 0x161, SMSG_LOOT_REMOVED = 0x162, SMSG_LOOT_MONEY_NOTIFY = 0x163,
     SMSG_LOOT_CLEAR_MONEY = 0x165, SMSG_ITEM_PUSH_RESULT = 0x166,
+    // 6.88: group loot rolls
+    SMSG_LOOT_ALL_PASSED = 0x29E, SMSG_LOOT_ROLL_WON = 0x29F, CMSG_LOOT_ROLL = 0x2A0, SMSG_LOOT_START_ROLL = 0x2A1, SMSG_LOOT_ROLL = 0x2A2,
 };
+constexpr uint16_t kCmsgQuestgiverQueryQuest = 0x186;   // 7.07: a quest-starting item (game_quests.cpp has the rest of the quest opcodes)
 constexpr uint16_t TARGET_FLAG_UNIT_ = 0x0002, TARGET_FLAG_OBJECT_ = 0x0800;   // SpellCastTargets masks
 constexpr uint32_t kQueryBatch = 8;   // item queries per update(): the answers are ~250 bytes each
 
@@ -247,9 +250,20 @@ uint32_t GameSession::itemTargetSpell(uint32_t entry) const {
     return sp;
 }
 
-void GameSession::useItem(const InvItem& it, uint32_t nowMs) {
+void GameSession::useItem(const InvItem& it, uint32_t nowMs, const WorldObject* forced) {
     uint8_t index = 0;
-    itemUseSpell(itemInfoIfKnown(it.entry), &index);
+    const uint32_t useSpell = itemUseSpell(itemInfoIfKnown(it.entry), &index);
+    // 7.07: "This Item Begins a Quest" without a spell of its own (A Mysterious Message, Kodo Hide Bag ...): the original client asks
+    // the item itself for its quest - CMSG_QUESTGIVER_QUERY_QUEST u64 item, u32 quest (vMaNGOS HandleQuestgiverQueryQuestOpcode
+    // takes an item guid; Item::HasQuest = StartQuest) and the server answers with the quest's details. CMSG_USE_ITEM on such an
+    // item has no spell slot to cast, and the server answers EQUIP_ERR_ITEM_NOT_FOUND ("Item not found").
+    if (const ItemInfo* qi = itemInfoIfKnown(it.entry); qi && qi->startQuest && !useSpell && it.guid) {
+        Writer q;
+        q.u64(it.guid);
+        q.u32(qi->startQuest);
+        send(kCmsgQuestgiverQueryQuest, q.b, nowMs);
+        return;
+    }
     Writer w;
     w.u8(it.bag);
     w.u8(it.slot);
@@ -257,17 +271,46 @@ void GameSession::useItem(const InvItem& it, uint32_t nowMs) {
     // Targets (SpellCastTargets): food, drink, potions, the hearthstone act on the caster (mask 0). An item whose spell
     // needs a target (quest items "use on ...") must name it - the selected creature / player (UNIT 0x2) or object
     // (GAMEOBJECT 0x800); without it the server casts at the caster and nothing happens (Lazy Peons).
-    const WorldObject* t = target_ && itemTargetSpell(it.entry) ? objects.find(target_) : nullptr;
+    const bool needsTarget = itemTargetSpell(it.entry) != 0;
+    const WorldObject* t = target_ && needsTarget ? objects.find(target_) : nullptr;
+    // 6.59b: no target selected - the nearest object that can be used within 10 yd (the original client asks for a click on it:
+    // Samuel's Remains on Marla's Grave, quest 6395; using the grave itself only plays its animation)
+    const ItemInfo* info = itemInfoIfKnown(it.entry);
+    if (forced && needsTarget) t = forced;   // 6.75: a click on the object itself (interact)
+    else if (needsTarget && (!t || t->self) && info && (info->cls == 12 || info->cls == 15)) t = objectForItem();   // (quest / misc items only)
     if (t && !t->self && (t->type == ObjType::Unit || t->type == ObjType::Player)) {
         w.u16(TARGET_FLAG_UNIT_);
-        w.packedGuid(target_);
+        w.packedGuid(t->guid);
     } else if (t && t->type == ObjType::GameObject) {
         w.u16(TARGET_FLAG_OBJECT_);
-        w.packedGuid(target_);
+        w.packedGuid(t->guid);
     } else {
         w.u16(0);
     }
     send(CMSG_USE_ITEM, w.b, nowMs);
+}
+
+const WorldObject* GameSession::objectForItem() const {
+    const MovementInfo& me = mover.info();
+    const WorldObject* best = nullptr;
+    float bestD2 = 10.0f * 10.0f;
+    int bestRank = 0;
+    for (const auto& [guid, o] : objects.all()) {
+        if (o.type != ObjType::GameObject || !o.hasPos) continue;
+        const uint32_t type = o.field(UF::GAMEOBJECT_TYPE_ID);
+        // goobers (quest objects), chests, quest givers, spell focuses (an altar, a brazier); the server's "usable for your quest"
+        // flag first
+        if (type != 10 && type != 3 && type != 2 && type != 8 && type != 1 && type != 22) continue;
+        float p[3];
+        o.positionAt(now_, p);
+        const float dx = p[0] - me.x, dy = p[1] - me.y, dz = p[2] - me.z, d2 = dx * dx + dy * dy + dz * dz;
+        const int rank = (o.field(UF::GAMEOBJECT_DYN_FLAGS) & 1) ? 2 : 1;
+        if (d2 > 10.0f * 10.0f || rank < bestRank || (rank == bestRank && d2 >= bestD2)) continue;
+        best = &o;
+        bestD2 = d2;
+        bestRank = rank;
+    }
+    return best;
 }
 
 uint32_t GameSession::itemGroundSpell(uint32_t entry) const {
@@ -305,6 +348,7 @@ void GameSession::equipItem(const InvItem& it, uint32_t nowMs) {
     w.u8(it.bag);
     w.u8(it.slot);
     send(CMSG_AUTOEQUIP_ITEM, w.b, nowMs);
+    sound("equip");
 }
 
 void GameSession::unequipItem(const InvItem& it, uint32_t nowMs) {
@@ -361,6 +405,38 @@ void GameSession::takeAllLoot(uint32_t nowMs) {
 }
 
 // ------------------------------------------------------------------ server packets
+// ------------------------------------------------------------------ group loot rolls (6.88)
+void GameSession::rollLoot(size_t index, uint8_t vote, uint32_t nowMs) {
+    if (index >= lootRolls.size()) return;
+    const LootRoll lr = lootRolls[index];
+    lootRolls.erase(lootRolls.begin() + (long)index);
+    if (vote > kRollGreed) vote = kRollPass;
+    Writer w;
+    w.u64(lr.looted);
+    w.u32(lr.slot);
+    w.u8(vote);
+    send(CMSG_LOOT_ROLL, w.b, nowMs);
+}
+
+void GameSession::dropRoll(uint64_t looted, uint32_t slot) {
+    for (size_t i = 0; i < lootRolls.size(); ++i)
+        if (lootRolls[i].looted == looted && lootRolls[i].slot == slot) { lootRolls.erase(lootRolls.begin() + (long)i); return; }
+}
+
+void GameSession::expireRolls(uint32_t nowMs) {   // the server has passed for us: the window goes
+    for (size_t i = 0; i < lootRolls.size();)
+        if (!lootRolls[i].leftMs(nowMs)) lootRolls.erase(lootRolls.begin() + (long)i); else ++i;
+}
+
+void GameSession::lootLine(const std::string& text, uint32_t entry, uint32_t nowMs) {
+    ChatLine l;
+    l.ms = nowMs;
+    l.type = Chat::Loot;
+    l.text = text;
+    l.channel = std::to_string(entry);   // the item's name is put in once its query answers ("[Item N]" until then)
+    addLine(std::move(l));
+}
+
 bool GameSession::handleItems(uint16_t op, const Bytes& data, uint32_t nowMs) {
     Reader r(data);
     switch (op) {
@@ -457,6 +533,7 @@ bool GameSession::handleItems(uint16_t op, const Bytes& data, uint32_t nowMs) {
             r.u32(); r.u32();   // suffix factor, random property
             uint32_t count = r.u32();
             if (r.bad || who != self_) return true;
+            sound("lootitem");   // 6.39: the item lands in the bags
             std::string nm = itemName(entry);
             std::string t = std::string(created ? "You create: " : received ? "You receive item: " : "You receive loot: ") +
                             "[" + nm + "]" + (count > 1 ? "x" + std::to_string(count) : std::string()) + ".";
@@ -529,6 +606,66 @@ bool GameSession::handleItems(uint16_t op, const Bytes& data, uint32_t nowMs) {
             }
             lootWindow.money = 0;
             return true;
+        // ---- 6.88: group loot rolls (vMaNGOS Group::SendLootStartRoll / SendLootRoll / SendLootRollWon / SendLootAllPassed;
+        // cMaNGOS adds a vote mask byte to START_ROLL and an auto-pass byte to ROLL: read when there)
+        case SMSG_LOOT_START_ROLL: {
+            LootRoll lr;
+            lr.looted = r.u64(); lr.slot = r.u32(); lr.itemId = r.u32();
+            r.u32();   // random suffix
+            lr.randomProp = r.u32();
+            const uint32_t cd = r.u32();
+            if (r.bad) return true;
+            if (r.left() >= 1) { const uint8_t m = r.u8(); if (m & 0x6) lr.voteMask = m | 1; }
+            lr.startMs = nowMs;
+            lr.countdownMs = cd >= 5000 && cd <= 600000 ? cd : 60000;
+            for (const LootRoll& o : lootRolls) if (o.looted == lr.looted && o.slot == lr.slot) return true;   // sent again (relog)
+            lootRolls.push_back(lr);
+            itemInfo(lr.itemId);   // its name / icon / quality for the window
+            sound("lootroll");
+            return true;
+        }
+        case SMSG_LOOT_ROLL: {   // someone's choice (roll number 0) or, when all have chosen, their throw (1-100); 128 = passed
+            const uint64_t looted = r.u64();
+            const uint32_t slot = r.u32();
+            const uint64_t who = r.u64();
+            const uint32_t entry = r.u32();
+            r.u32(); r.u32();
+            const uint8_t number = r.u8(), type = r.u8();
+            if (r.bad) return true;
+            (void)looted; (void)slot;
+            std::string nm = who == self_ ? std::string("You") : playerName(who, nowMs);
+            if (nm.empty()) nm = "Someone";
+            const std::string item = "[" + itemName(entry) + "]";
+            std::string t;
+            if (type == kRollPass || number >= 128 || type >= 128) t = who == self_ ? "You passed on: " + item : nm + " passed on: " + item;
+            else if (number == 0) t = (who == self_ ? std::string("You have selected ") : nm + " has selected ") + (type == kRollNeed ? "Need" : "Greed") + " for: " + item;
+            else t = std::string(type == kRollNeed ? "Need" : "Greed") + " Roll - " + std::to_string(number) + " for " + item + " by " + nm;
+            lootLine(t, entry, nowMs);
+            return true;
+        }
+        case SMSG_LOOT_ROLL_WON: {
+            const uint64_t looted = r.u64();
+            const uint32_t slot = r.u32(), entry = r.u32();
+            r.u32(); r.u32();
+            const uint64_t who = r.u64();
+            const uint8_t number = r.u8(), type = r.u8();
+            if (r.bad) return true;
+            std::string nm = who == self_ ? std::string("You") : playerName(who, nowMs);
+            if (nm.empty()) nm = "Someone";
+            lootLine((who == self_ ? std::string("You won: ") : nm + " won: ") + "[" + itemName(entry) + "]" +
+                         (number && number <= 100 ? std::string(" (") + (type == kRollNeed ? "Need" : "Greed") + " " + std::to_string(number) + ")" : std::string()),
+                     entry, nowMs);
+            dropRoll(looted, slot);
+            return true;
+        }
+        case SMSG_LOOT_ALL_PASSED: {
+            const uint64_t looted = r.u64();
+            const uint32_t slot = r.u32(), entry = r.u32();
+            if (r.bad) return true;
+            lootLine("Everyone passed on: [" + itemName(entry) + "]", entry, nowMs);
+            dropRoll(looted, slot);
+            return true;
+        }
         case SMSG_LOOT_RELEASE_RESPONSE:
             lootGuid_ = 0;
             lootWindow = LootWindow();

@@ -16,6 +16,11 @@
 #include "game_ui.hpp"
 #include "ui_raster.hpp"
 
+// the renderer is not part of this test: files are written at once
+void uiWriteFileAsync(const char* path, const std::string& data) {
+    if (FILE* f = fopen(path, "wb")) { fwrite(data.data(), 1, data.size(), f); fclose(f); }
+}
+
 using namespace w3n;
 
 // every screenshot also goes onto a contact sheet (ui_sheet.png, 4 per row)
@@ -223,11 +228,11 @@ int main(int argc, char** argv) {
         {"loot", [](GameSession& s) { return s.lootWindow.open && s.itemInfoIfKnown(750); }, -1, 0, GameUi::Act::LootItem, 1, 1, 0x108},
         {"loot_all", [](GameSession& s) { return s.lootWindow.open && s.itemInfoIfKnown(750); }, -1, 0, GameUi::Act::LootAll, -1, 1, 0x15F},
         {"gossip", [](GameSession& s) { return s.gossip.open && !s.gossip.text.empty(); }, -1, 0, GameUi::Act::GossipOption, 1, 1, 0x17C},
-        {"dead", [](GameSession& s) { return s.life() == Life::Dead && !s.resurrectOffer.active; }, -1, 0, GameUi::Act::Release, -1, 1, 0x15A},
+        {"dead", [](GameSession& s) { return s.life() == Life::Dead && !s.resurrectOffer.active; }, (int)GameUi::Tab::Combat, 0, GameUi::Act::Release, -1, 1, 0x15A},
         {"ghost", [](GameSession& s) { return s.life() == Life::Ghost && s.corpse.known && s.stats.teleports > 0; }, -1, 0,
          GameUi::Act::Tab, -1, 0, 0},
-        {"healer", [](GameSession& s) { return s.spiritHealerConfirm != 0; }, -1, 0, GameUi::Act::HealerYes, -1, 1, 0x21C},
-        {"resurrect", [](GameSession& s) { return s.resurrectOffer.active; }, -1, 0, GameUi::Act::ResAccept, -1, 1, 0x15C},
+        {"healer", [](GameSession& s) { return s.spiritHealerConfirm != 0; }, (int)GameUi::Tab::Combat, 0, GameUi::Act::HealerYes, -1, 1, 0x21C},
+        {"resurrect", [](GameSession& s) { return s.resurrectOffer.active; }, (int)GameUi::Tab::Combat, 0, GameUi::Act::ResAccept, -1, 1, 0x15C},
     };
     for (const TapScene& c : taps) {
         Rig r;
@@ -460,10 +465,12 @@ int main(int argc, char** argv) {
             o.tap(GameUi::Act::QuestComplete);
             bool refused = !o.sentOp(0x18E);
             o.tap(GameUi::Act::QuestReward, 1);
-            o.draw("quest_reward_picked");
-            o.tap(GameUi::Act::QuestComplete);
+            o.draw("quest_reward_picked");   // 6.91: with the reward's mini window over it
+            const bool card = o.ui.cardOpen() && o.ui.cardItem() == o.s.questDialog.choices[1].item;
+            o.tap(GameUi::Act::QuestComplete);   // through: the tap closes the card and completes
             bool chose = o.sentOp(0x18E) && o.sent.back().data.size() == 16 && o.sent.back().data[12] == 1;
-            result("quest_reward", got && cont && got2 && refused && chose, "Continue, Complete (refused), pick 2nd, Complete ->" + o.ops());
+            result("quest_reward", got && cont && got2 && refused && chose && card && !o.ui.cardOpen(),
+                   "Continue, Complete (refused), pick 2nd (its card), Complete ->" + o.ops());
         }
         {   // a quest giver's list (McBride) -> tap the second quest
             Rig r;
@@ -570,18 +577,18 @@ int main(int argc, char** argv) {
         t.tap(GameUi::Act::VendorPick, 2);
         t.tap(GameUi::Act::ItemInfo, 1);
         t.draw("item_vendor");
-        bool vi = t.ui.panel(t.s) == GameUi::Panel::ItemInfo;
+        bool vi = t.ui.cardOpen() && t.ui.panel(t.s) == GameUi::Panel::Vendor;   // 6.91: a mini window over the vendor
         PadOut c;
         c.cancel = true;
         t.pad(c);
-        bool back = t.ui.panel(t.s) == GameUi::Panel::Vendor;
+        bool back = !t.ui.cardOpen() && t.ui.panel(t.s) == GameUi::Panel::Vendor;
         t.s.closeVendor();
         t.tap(GameUi::Act::Tab, (int)GameUi::Tab::Bags);
         t.tap(GameUi::Act::SubView, 1);
         t.tap(GameUi::Act::SelectItem, 0);
         t.tap(GameUi::Act::SelectItem, 0);
         t.draw("item_gear");
-        bool gi = t.ui.panel(t.s) == GameUi::Panel::ItemInfo;
+        bool gi = t.ui.cardOpen();
         result("item_info", got3 && vi && back && gi && t.sent.empty(), "vendor Info, A back, gear tap twice");
         // stage 5.16: START > Buffs, tap Well Fed, Cancel buff -> CMSG_CANCEL_AURA; the debuff cannot be cancelled
         Rig a;
@@ -1053,6 +1060,36 @@ int main(int argc, char** argv) {
         q.tap(GameUi::Act::PetFeed, 1);
         q.draw("pet_feed");
         q.tap(GameUi::Act::PetFeed, 0);
+        {   // 7.07: a hunter who knows Dismiss Pet gets Dismiss (the spell, no confirmation, never PET_ABANDON) beside Abandon
+            Writer sp;
+            std::vector<uint32_t> book = q.s.spells;
+            book.push_back(w3n::GameSession::kSpellDismissPet);
+            sp.u8(0); sp.u16((uint16_t)book.size());
+            for (uint32_t b : book) { sp.u16((uint16_t)b); sp.u16(0); }
+            sp.u16(0);
+            q.s.handle(0x12A, sp.b, q.in.nowMs);
+            w3n::WorldObject* self = const_cast<w3n::WorldObject*>(q.s.selfObject());   // the fight log's character made a hunter
+            uint32_t savedBytes0 = 0;
+            if (self && self->fields.size() > w3n::UF::UNIT_BYTES_0) {
+                savedBytes0 = self->fields[w3n::UF::UNIT_BYTES_0];
+                self->fields[w3n::UF::UNIT_BYTES_0] = (savedBytes0 & ~0xFF00u) | (3u << 8);
+            }
+            q.draw("pet_window_hunter");
+            q.sent.clear();
+            const bool tapped = q.tap(GameUi::Act::PetSendAway);
+            bool castOk = false;
+            for (const Sent& x : q.sent) if (x.op == 0x12E) { Reader r(x.data); castOk = r.u32() == w3n::GameSession::kSpellDismissPet; }
+            q.tap(GameUi::Act::PetOpen);
+            q.scratch();
+            bool hasSend = false, hasAbandon = false;
+            for (const GameUi::Button& b : q.ui.buttons()) { hasSend |= b.act == GameUi::Act::PetSendAway; hasAbandon |= b.act == GameUi::Act::PetDismiss; }
+            const bool both = hasSend && hasAbandon;
+            if (self && self->fields.size() > w3n::UF::UNIT_BYTES_0) self->fields[w3n::UF::UNIT_BYTES_0] = savedBytes0;
+            result("pet_dismiss", tapped && castOk && !q.sentOp(0x176) && both,
+                   "hunter: Dismiss casts Dismiss Pet 2641 (0x12E), no PET_ABANDON; Abandon still offered (" + std::to_string(tapped) +
+                       std::to_string(castOk) + std::to_string(both) + ")");
+        }
+        q.tap(GameUi::Act::PetOpen);
         // dismiss asks first
         q.sent.clear();
         q.tap(GameUi::Act::PetDismiss);
@@ -1139,6 +1176,162 @@ int main(int argc, char** argv) {
         result("skills", ok && onPage && sentUnlearn && weaponSafe,
                "page opens, Unlearn asks then 0x202 (186) for a profession, never for a weapon skill (" + std::to_string(ok) + std::to_string(onPage) +
                    std::to_string(sentUnlearn) + std::to_string(weaponSafe) + ")");
+    }
+    {   // 6.38: the profession window - recipes of a skill, reagents counted in the bags, Create / Create All / Enchant
+        Rig q;
+        q.dir = dir;
+        q.replay(fight, [](GameSession&) { return false; });
+        q.in.nowMs += 300;
+        w3n::WorldObject* me = const_cast<w3n::WorldObject*>(q.s.selfObject());
+        bool ok = me != nullptr;
+        bool onPage = false, listed = false, made = false, all = false, stopped = false, enchPick = false, enchSent = false, noReagent = false;
+        if (ok) {
+            FILE* f = fopen("/tmp/w3d_ui/skills.txt", "w");
+            fprintf(f, "S\t185\t9\tCooking\tCook food.\nS\t333\t11\tEnchanting\tEnchant.\n");
+            fclose(f);
+            q.s.skills.load("/tmp/w3d_ui/skills.txt");
+            f = fopen("/tmp/w3d_ui/recipes.txt", "w");
+            fprintf(f, "# test\nR\t185\t2538\t1\t20\t60\t0\t2679\t1\t-\t2672:1\nR\t185\t2540\t10\t60\t100\t0\t2681\t1\t-\t2677:2,2672:1\n"
+                       "R\t333\t7418\t1\t1\t70\t1\t0\t1\t6339:1\t10940:1\n"
+                       "R\t333\t7863\t1\t1\t70\t1\t0\t1\t-\t10940:1\t4:0:256\n");   // 6.90: boots only
+            fclose(f);
+            q.s.recipes.load("/tmp/w3d_ui/recipes.txt");
+            q.s.spellNames.add(2538, "Charred Wolf Meat", "");
+            q.s.spellNames.add(2540, "Roasted Boar Meat", "");
+            q.s.spellNames.add(7418, "Enchant Bracer - Minor Health", "");
+            q.s.spellNames.add(7863, "Enchant Boots - Minor Stamina", "");
+            for (uint32_t sp : {2538u, 2540u, 7418u, 7863u}) q.s.spells.push_back(sp);
+            me->fields.resize(std::max<size_t>(me->fields.size(), w3n::UF::PLAYER_SKILL_INFO_1_1 + 128 * 3));
+            const uint32_t sk[][3] = {{185, 30, 75}, {333, 5, 75}};
+            for (int i = 0; i < 2; ++i) {
+                const int b = w3n::UF::PLAYER_SKILL_INFO_1_1 + i * 3;
+                me->fields[b] = sk[i][0] | (1u << 16);
+                me->fields[b + 1] = sk[i][1] | (sk[i][2] << 16);
+                me->fields[b + 2] = 0;
+            }
+            // 3 pieces of raw wolf meat (2672) in the backpack slot 23, a vellum-like item (4562, equippable) in slot 24
+            auto item = [&](uint64_t guid, uint32_t entry, uint32_t count, int slot) {
+                w3n::WorldObject it;
+                it.guid = guid;
+                it.type = w3n::ObjType::Item;
+                it.fields.assign(w3n::UF::ITEM_FIELD_MAXDURABILITY + 4, 0);
+                it.fields[w3n::UF::OBJECT_ENTRY] = entry;
+                it.fields[w3n::UF::ITEM_FIELD_STACK_COUNT] = count;
+                const_cast<std::unordered_map<uint64_t, w3n::WorldObject>&>(q.s.objects.all())[guid] = it;
+                const int fi = w3n::UF::PLAYER_FIELD_INV_SLOT_HEAD + 2 * slot;
+                me->fields.resize(std::max<size_t>(me->fields.size(), fi + 2));
+                me->fields[fi] = (uint32_t)guid;
+                me->fields[fi + 1] = (uint32_t)(guid >> 32);
+            };
+            item(0x4001, 2672, 3, 23);
+            item(0x4002, 4562, 1, 24);
+            item(0x4003, 4563, 1, 7);    // 6.90: worn boots (feet slot 7)
+            item(0x4004, 4564, 1, 25);   // ... and boots in the bags
+            w3n::ItemInfo info;
+            info.entry = 4562; info.inventoryType = 9; info.name = "Test Bracers"; info.quality = 2; info.cls = 4;
+            q.s.testSetItemInfo(info);
+            info.entry = 4563; info.inventoryType = 8; info.name = "Worn Boots"; info.cls = 4; info.subclass = 2;
+            q.s.testSetItemInfo(info);
+            info.entry = 4564; info.name = "Spare Boots";
+            q.s.testSetItemInfo(info);
+        }
+        q.tap(GameUi::Act::Tab, (int)GameUi::Tab::Spells);
+        onPage = q.tap(GameUi::Act::SubView, 3);
+        q.draw("craft");
+        listed = q.s.knownRecipes(185).size() == 2 && q.s.itemCount(2672) == 3 && q.s.itemCount(2677) == 0;
+        // Charred Wolf Meat: Create casts spell 2538
+        q.tap(GameUi::Act::CraftSkill, 185);
+        q.tap(GameUi::Act::CraftPick, 2538);
+        q.draw("craft_pick");
+        q.sent.clear();
+        q.tap(GameUi::Act::CraftMake);
+        made = q.sentOp(0x12E) && q.s.cast.spell == 2538;
+        // Boar Meat needs 2 x 2677 that we do not have: Create is refused (no packet)
+        q.s.cast = w3n::CastState();
+        q.tap(GameUi::Act::CraftPick, 2540);
+        q.sent.clear();
+        q.tap(GameUi::Act::CraftMake);
+        noReagent = !q.sentOp(0x12E);   // missing reagents: a hint, no packet
+        // Create All: 3 wolf meat -> the first cast now, two more as each goes off
+        q.s.cast = w3n::CastState();
+        q.tap(GameUi::Act::CraftPick, 2538);
+        q.sent.clear();
+        q.tap(GameUi::Act::CraftAll);
+        all = q.sentOp(0x12E);
+        q.draw("craft_all");
+        q.tap(GameUi::Act::CraftStop);
+        stopped = q.sentOp(0x12F);
+        // an enchant: Enchant opens the item picker, the item gives CMSG_CAST_SPELL with TARGET_FLAG_ITEM
+        q.s.cast = w3n::CastState();
+        q.tap(GameUi::Act::CraftSkill, 333);
+        q.tap(GameUi::Act::CraftPick, 7418);
+        q.tap(GameUi::Act::CraftMake);
+        q.draw("craft_enchant");
+        enchPick = true;
+        q.sent.clear();
+        q.tap(GameUi::Act::CraftItem, 0);
+        for (const Sent& x : q.sent)
+            if (x.op == 0x12E) { Reader r(x.data); enchSent = r.u32() == 7418 && r.u16() == 0x0010; }
+        // 6.90: Enchant Boots offers the boots only, the worn pair first; the cast goes at the worn pair
+        bool bootsOnly = false, wornFirst = false, haveMats = false;
+        {
+            q.s.cast = w3n::CastState();
+            q.tap(GameUi::Act::CraftPick, 0);   // back from the picker
+            q.tap(GameUi::Act::CraftPick, 7863);
+            q.tap(GameUi::Act::CraftMake);
+            q.draw("craft_enchant_boots");
+            const std::vector<w3n::InvItem> t = enchantTargets(q.s, q.s.recipes.find(7863));
+            bootsOnly = t.size() == 2 && t[0].entry == 4563 && t[1].entry == 4564;
+            q.sent.clear();
+            q.tap(GameUi::Act::CraftItem, 0);
+            for (const Sent& x : q.sent)
+                if (x.op == 0x12E) { Reader r(x.data); wornFirst = r.u32() == 7863 && r.u16() == 0x0010 && r.packedGuid() == 0x4003; }
+            // "Have mats": Roasted Boar Meat (no 2677) leaves the list, Charred Wolf Meat stays
+            q.s.cast = w3n::CastState();
+            q.tap(GameUi::Act::CraftSkill, 185);
+            q.tap(GameUi::Act::CraftHaveMats);
+            q.draw("craft_have_mats");
+            haveMats = q.tap(GameUi::Act::CraftPick, 2538) && !q.tap(GameUi::Act::CraftPick, 2540);
+            q.tap(GameUi::Act::CraftHaveMats);
+        }
+        {   // 6.88 / 6.91: a group loot roll - the item's mini window on a tap, Need -> CMSG_LOOT_ROLL; a chat link -> its mini window
+            Rig r;
+            r.dir = dir;
+            bool got = r.replay(life, [](GameSession& gs) { return gs.selfObject() != nullptr; });
+            w3n::ItemInfo pick;
+            pick.entry = 1959; pick.name = "Cold Iron Pick"; pick.quality = 2; pick.bonding = 2; pick.inventoryType = 13; pick.cls = 2;
+            r.s.testSetItemInfo(pick);
+            Writer w;
+            w.u64(0xF130000045000101ull); w.u32(0); w.u32(1959); w.u32(0); w.u32(0); w.u32(60000);
+            r.s.handle(0x2A1, w.b, r.in.nowMs);
+            const bool panelRoll = r.ui.panel(r.s) == GameUi::Panel::Roll;
+            r.draw("loot_roll");
+            const bool card = r.tap(GameUi::Act::ItemCard, 1959) && r.ui.cardOpen() && r.ui.cardItem() == 1959;
+            r.draw("loot_roll_card");
+            r.sent.clear();
+            r.tap(GameUi::Act::RollVote, w3n::kRollNeed);   // through the card: closes it and votes
+            bool voted = false;
+            for (const Sent& x : r.sent)
+                if (x.op == 0x2A0 && x.data.size() == 13 && x.data[12] == w3n::kRollNeed) voted = true;
+            result("loot_roll", got && panelRoll && card && voted && r.s.lootRolls.empty() && !r.ui.cardOpen(),
+                   "roll window, tap the item -> its card, Need -> 0x2A0 (" + std::to_string(panelRoll) + std::to_string(card) + std::to_string(voted) + ")");
+            // a link in the chat
+            w3n::ChatLine cl;
+            cl.ms = r.in.nowMs; cl.type = w3n::Chat::Say; cl.sender = 0x99; cl.name = "Linker";
+            cl.text = "WTB |cff1eff00|Hitem:1959:0:0:0|h[Cold Iron Pick]|h|r cheap";
+            r.s.chat.push_back(cl);
+            r.tap(GameUi::Act::Tab, (int)GameUi::Tab::Chat);
+            r.draw("chat_link");
+            const bool linkCard = r.tap(GameUi::Act::ItemCard, 1959) && r.ui.cardItem() == 1959;
+            r.draw("chat_link_card");
+            result("chat_link", linkCard, "a tap on a chat line with an item link shows the item");
+        }
+        result("craft_worn", bootsOnly && wornFirst && haveMats, "Enchant Boots: worn boots first, boots only, cast at the worn pair; Have mats (" +
+               std::to_string(bootsOnly) + std::to_string(wornFirst) + std::to_string(haveMats) + ")");
+        result("craft", ok && onPage && listed && made && all && stopped && enchPick && enchSent && noReagent,
+               "Crafting page, Create -> CAST 2538, Create All, Stop, Enchant -> item picker -> CAST 7418 with an item target (" + std::to_string(ok) +
+                   std::to_string(onPage) + std::to_string(listed) + std::to_string(made) + std::to_string(all) + std::to_string(stopped) +
+                   std::to_string(enchPick) + std::to_string(enchSent) + ")");
     }
     {   // 6.20: spell descriptions (spelldesc.bin) in the spell window and in the Use: lines of an item
         Rig q;

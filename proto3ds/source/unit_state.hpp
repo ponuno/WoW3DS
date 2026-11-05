@@ -4,6 +4,9 @@
 #include "creature_view.hpp"
 #include "game.hpp"
 
+// 6.95: what flies when 'o' fires 'spell' with its ranged weapon: 0 nothing drawn (not a ranged shot, a wand, a thrown
+// weapon), 1 an arrow (bow, crossbow's bolt, creatures), 2 a bullet (gun)
+int rangedAmmoKind(w3n::GameSession& g, const w3n::WorldObject& o, uint32_t spell);
 void fillUnitState(w3n::GameSession& g, const w3n::WorldObject& o, uint32_t nowMs, CreatureSeen& c);
 CreatureWeapon weaponFromSubclass(uint32_t itemClass, uint32_t subclass);
 

@@ -164,7 +164,10 @@ struct Window {
     Acc phase[kPhases];
     Acc passMs[FrameCounters::kPasses], passDraws[FrameCounters::kPasses], passTris[FrameCounters::kPasses];
     Acc draws, tris, binds, batches, lod[3], water, inst, bld, markers, units, bones, pose, fxMs, fxQuads, fxParticles, fxGlows,
-        fxSources, eyes, kicks, kickLead, kickMs, mtxMs, chCull, chTest, fading, mlod0, mlod1, mlod2, farUnits, sharedPoses;
+        fxSources, eyes, kicks, kickLead, kickMs, mtxMs, chCull, chTest, fading, mlod0, mlod1, mlod2, blod0, blod1, blod2, farUnits, sharedPoses, posesFresh, posesReused, poseWait, posesThr, gSplit[4], sbGroups, sbMembers, sbDraws, sbBuilt;
+    Acc dTris[3][4], dDraws[3][4], sbTris[3], sbDrawsBl[3];   // 6.51
+    Acc pvsOn, pvsDood, pvsTerr, pvsRead, pvsBldg, pvsFar;   // 6.54
+    Acc hlodBlocks, hlodHidden, hlodSkip, hlodTris, hlodTiles, hlodKB;   // 6.57
     Acc stUpd, stDone, stPlayers, stUpload, stTiles, stSched, stDefer;
     uint32_t stJobsDone = 0, stUploads = 0;
     uint64_t stUploadBytes = 0;
@@ -243,6 +246,14 @@ void writeHeader() {
              (unsigned long)(__ctru_heap_size / 1024), (unsigned long)(__ctru_linear_heap_size / 1024), (unsigned long)(linearSpaceFree() / 1024),
              (unsigned long)(vramSpaceFree() / 1024), (unsigned long)(vramLargest() / 1024));
     h += b;
+    {   // 6.58c: how it was started - a .3dsx from the Homebrew Launcher gets at most 124 MB on the New 3DS; the CIA asks for 178
+        const unsigned long regionKb = (unsigned long)(osGetMemRegionSize(MEMREGION_APPLICATION) / 1024);
+        const bool hb = envIsHomebrew();
+        snprintf(b, sizeof b, "launch: %s%s\n", hb ? ".3dsx (Homebrew Launcher: 124 MB at most on the New 3DS; install the CIA for 178 MB)" : "CIA / title",
+                 !hb && n3ds && regionKb < 170 * 1024 ? " - WARNING: the system gave less than the 178 MB the CIA asks for "
+                                                         "(an old CIA, one built with CIA_MEMORY=124MB, or started through another title)" : "");
+        h += b;
+    }
     snprintf(b, sizeof b, "rows: one per second in perf.csv (legend: docs/PERFLOG.md); hitch = a frame over %.0f ms (at most %d a second are "
                           "written below)\n\n", kHitchMs, kHitchesPerSecond);
     h += b;
@@ -442,13 +453,23 @@ void endFrame(const FrameCounters& fc) {
     w.draws.add(fc.drawCalls); w.tris.add(fc.tris); w.binds.add(fc.texBinds); w.batches.add(fc.visibleBatches);
     for (int l = 0; l < 3; ++l) w.lod[l].add(fc.lodBatches[l]);
     w.water.add(fc.waterBatches); w.inst.add(fc.visibleInstances); w.bld.add(fc.buildings); w.markers.add(fc.markers);
-    w.units.add(fc.creatures); w.bones.add(fc.boneUploads); w.pose.add(fc.poseMs); w.fxMs.add(fc.fxMs);
+    w.units.add(fc.creatures); w.bones.add(fc.boneUploads); w.pose.add(fc.poseMs); w.poseWait.add(fc.poseWaitMs); for (int k = 0; k < 4; ++k) w.gSplit[k].add(fc.gameSplitMs[k]); w.posesThr.add(fc.posesThreaded); w.fxMs.add(fc.fxMs);
     w.fxQuads.add(fc.fxQuads); w.fxParticles.add(fc.fxParticles); w.fxGlows.add(fc.fxGlows); w.fxSources.add(fc.fxSources);
     w.eyes.add(fc.eyes);
     w.kicks.add(fc.kicks); w.kickLead.add(fc.kickLeadMs); w.kickMs.add(fc.kickMs);
     w.mtxMs.add(fc.matrixMs); w.chCull.add(fc.chunksCulled); w.chTest.add(fc.chunksTested); w.fading.add(fc.fading);
     w.mlod0.add(fc.lodDraws[0]); w.mlod1.add(fc.lodDraws[1]); w.mlod2.add(fc.lodDraws[2]);
-    w.farUnits.add(fc.farUnits); w.sharedPoses.add(fc.sharedPoses);
+    w.blod0.add(fc.bldgLod[0]); w.blod1.add(fc.bldgLod[1]); w.blod2.add(fc.bldgLod[2]);   // 6.47
+    w.farUnits.add(fc.farUnits); w.sharedPoses.add(fc.sharedPoses); w.posesFresh.add(fc.posesFresh); w.posesReused.add(fc.posesReused);
+    w.pvsOn.add(fc.pvsOn); w.pvsDood.add(fc.pvsDood); w.pvsTerr.add(fc.pvsTerr); w.pvsRead.add(fc.pvsRead);   // 6.54
+    w.pvsBldg.add(fc.pvsBldg); w.pvsFar.add(fc.pvsFar);   // 6.54d
+    w.hlodBlocks.add(fc.hlodBlocks); w.hlodHidden.add(fc.hlodHidden); w.hlodSkip.add(fc.hlodSkip); w.hlodTris.add(fc.hlodTris);   // 6.57
+    w.hlodTiles.add(fc.hlodTiles); w.hlodKB.add(fc.hlodKB);
+    for (int b = 0; b < 3; ++b) {   // 6.51
+        for (int c = 0; c < 4; ++c) { w.dTris[b][c].add(fc.dTris[b][c]); w.dDraws[b][c].add(fc.dDraws[b][c]); }
+        w.sbTris[b].add(fc.sbTris[b]); w.sbDrawsBl[b].add(fc.sbDrawsBl[b]);
+    }
+    w.sbGroups.add(fc.sbGroups); w.sbMembers.add(fc.sbMembers); w.sbDraws.add(fc.sbDraws); w.sbBuilt.add(fc.sbBuilt);   // 6.44
     const StreamStats& s = streamerStats();
     w.stUpd.add(s.updateMsLastFrame); w.stDone.add(s.doneMsLastFrame); w.stPlayers.add(s.playersMsLastFrame);
     w.stUpload.add(s.uploadMsLastFrame); w.stTiles.add(s.tilesMsLastFrame); w.stSched.add(s.scheduleMsLastFrame);
@@ -503,9 +524,16 @@ void second(const Context& c) {
     static StreamMemory m;
     static uint32_t walkAt = 0;
     double memMs = 0;
+    // 6.98: VRAM's free bytes read at the very moment of the walk: the books compare the two (the walk is every 5 s, the
+    // free bytes every second - between walks textures come and go, and the old sum of textures with the new free bytes
+    // went over the 6 MB: "VRAM BOOKS BROKEN" on the login screen with nothing broken)
+    bool walked = false;
+    static u32 vFreeAtWalk = 0;
     if (!g_havePrev || g_ses.seconds >= walkAt) {
         const u64 m0 = svcGetSystemTick();
         streamerMemory(&m);
+        vFreeAtWalk = vramSpaceFree();
+        walked = true;
         memMs = ms(svcGetSystemTick() - m0);
         walkAt = g_ses.seconds + 5;
     }
@@ -625,13 +653,38 @@ void second(const Context& c) {
     r.num("r_mtx_ms", w.mtxMs.avg(), 3);   // stage 6.10: the instances' matrices, once a frame
     r.num("r_chunks_cull", w.chCull.avg(), 0); r.num("r_chunks_test", w.chTest.avg(), 0);
     r.num("r_fading", w.fading.avg(), 1);
+    // 6.44: small doodads drawn merged: groups, the doodads in them, their draw calls, groups built (a second's sum shows as avg * frames)
+    r.num("r_sb_groups", w.sbGroups.avg(), 1); r.num("r_sb_members", w.sbMembers.avg(), 0); r.num("r_sb_draws", w.sbDraws.avg(), 0);
+    r.num("r_sb_built", w.sbBuilt.avg(), 2);
+    r.num("r_pvs_on", w.pvsOn.avg(), 2); r.num("r_pvs_dood", w.pvsDood.avg(), 0); r.num("r_pvs_terr", w.pvsTerr.avg(), 0); r.num("r_pvs_reads", w.pvsRead.avg() * w.pvsRead.n, 0);
+    r.num("r_pvs_bldg", w.pvsBldg.avg(), 0); r.num("r_pvs_far", w.pvsFar.avg(), 0);
+    // 6.57: the horizon - blocks drawn as their mesh / hidden by the PVS, members skipped, the meshes' triangles, tiles and KB in memory
+    r.num("r_hlod_blocks", w.hlodBlocks.avg(), 1); r.num("r_hlod_hidden", w.hlodHidden.avg(), 1); r.num("r_hlod_skip", w.hlodSkip.avg(), 0);
+    r.num("r_hlod_tris", w.hlodTris.avg(), 0); r.num("r_hlod_tiles", w.hlodTiles.avg(), 0); r.num("r_hlod_kb", w.hlodKB.avg(), 0);   // 6.54d: WMO groups / far things skipped   // 6.54 (cells read from the SD card that second)
+    {   // 6.51: the doodads by blend (op = opaque, key = alpha-keyed, bl = blended / additive) and size (s < 1.5 yd radius, m < 4, l < 12, x bigger)
+        static const char* const kB[3] = {"op", "key", "bl"};
+        static const char* const kC[4] = {"s", "m", "l", "x"};
+        for (int b = 0; b < 3; ++b)
+            for (int c = 0; c < 4; ++c) {
+                snprintf(name, sizeof name, "rd_%s_%s_tris", kB[b], kC[c]); r.num(name, w.dTris[b][c].avg(), 0);
+                snprintf(name, sizeof name, "rd_%s_%s_draws", kB[b], kC[c]); r.num(name, w.dDraws[b][c].avg(), 1);
+            }
+        for (int b = 0; b < 3; ++b) {
+            snprintf(name, sizeof name, "rd_sb_%s_tris", kB[b]); r.num(name, w.sbTris[b].avg(), 0);
+            snprintf(name, sizeof name, "rd_sb_%s_draws", kB[b]); r.num(name, w.sbDrawsBl[b].avg(), 1);
+        }
+    }
     // stage 6.12: draws of models and units by mesh level (0 = full), far units and how many of them reused a pose
     r.num("r_mlod0", w.mlod0.avg(), 0); r.num("r_mlod1", w.mlod1.avg(), 0); r.num("r_mlod2", w.mlod2.avg(), 0);
-    r.num("r_far_units", w.farUnits.avg(), 1); r.num("r_shared_poses", w.sharedPoses.avg(), 1);   // stage 6.11: instances drawn alpha-blended (appearing / edge of the distance)
+    r.num("r_blod0", w.blod0.avg(), 0); r.num("r_blod1", w.blod1.avg(), 0); r.num("r_blod2", w.blod2.avg(), 0);   // 6.47
+    r.num("r_far_units", w.farUnits.avg(), 1); r.num("r_shared_poses", w.sharedPoses.avg(), 1); r.num("r_poses_fresh", w.posesFresh.avg(), 1); r.num("r_poses_reused", w.posesReused.avg(), 1);   // stage 6.11: instances drawn alpha-blended (appearing / edge of the distance)
     r.num("r_markers", w.markers.avg(), 0);
     r.num("r_units", w.units.avg(), 1);
     r.num("r_bone_uploads", w.bones.avg(), 0);
     r.num("r_pose_ms", w.pose.avg(), 3); r.num("r_pose_max", w.pose.max(), 2);
+    r.num("g_update_ms", w.gSplit[0].avg(), 3); r.num("g_collect_ms", w.gSplit[1].avg(), 3); r.num("g_view_ms", w.gSplit[2].avg(), 3);
+    r.num("g_markers_ms", w.gSplit[3].avg(), 3);   // 7.05: the game phase split
+    r.num("r_pose_wait", w.poseWait.avg(), 3); r.num("r_pose_thr", w.posesThr.avg(), 2);   // 7.05: the main thread waiting for core 2's poses; share of frames posed there
     r.num("r_fxsim_ms", w.fxMs.avg(), 3); r.num("r_fxsim_max", w.fxMs.max(), 2);   // the particle simulation inside the fx pass
     r.num("r_fx_quads", w.fxQuads.avg(), 0); r.num("r_fx_particles", w.fxParticles.avg(), 0);
     r.num("r_fx_glows", w.fxGlows.avg(), 0); r.num("r_fx_sources", w.fxSources.avg(), 0);
@@ -701,6 +754,8 @@ void second(const Context& c) {
     r.num("oom_last_kb", kb(s.oomLastSize), 0);
     r.num("oom_last_free_kb", kb(s.oomLastFree), 0);
     r.integer("tex_vram_miss", s.texVramMiss - ps.texVramMiss);
+    r.integer("tex_promoted", s.texPromoted - ps.texPromoted);   // 6.50
+    r.num("tex_promoted_kb", kb((double)(s.texPromotedBytes - ps.texPromotedBytes)), 0);
     r.num("tex_vram_miss_kb", kb((double)(s.texVramMissBytes - ps.texVramMissBytes)), 0);
     r.integer("tex_waited", s.texOomTotal - ps.texOomTotal);
     r.integer("tex_not_in_pack", s.texNotInPack - ps.texNotInPack);
@@ -836,6 +891,12 @@ void second(const Context& c) {
               (unsigned long)(m.instanceBytes / 1024), (unsigned long)((heapUsed > heapKnown ? heapUsed - heapKnown : 0) / 1024));
     {   // 6.35: CMDL blobs refused (a bone palette over 24 bones or parts outside the blob)
         static u32 bad = 0;
+        static u32 badTex = 0;
+        if (s.badModelTex != badTex) {
+            badTex = s.badModelTex;
+            event("MODEL TEXTURE INDEX BAD: %lu parts so far, last model %08lx (drawn untextured - reconvert it)", (unsigned long)badTex,
+                  (unsigned long)s.lastBadModel);
+        }
         if (s.badCreatureModels != bad) {
             bad = s.badCreatureModels;
             event("CREATURE MODEL REFUSED: %lu so far, last id %08lx (bad bone palette / offsets: not drawn - reconvert, or the pack is damaged)",
@@ -844,11 +905,14 @@ void second(const Context& c) {
         // 6.35: VRAM's books - free + textures + render targets + portraits cannot exceed the 6 MB: if they do, libctru's VRAM
         // allocator was overwritten (7z: 5.7 MB "freed" at once on the character screen, then textures drawn over each other)
         static bool vramBroken = false;
-        const u32 booked = vFree + texVram + c.vramTargets + c.vramPortraits;
-        if (!vramBroken && booked > kVramSize + (64u << 10)) {
+        // 6.98: only in a second with a fresh walk, against the free bytes read with it (see vFreeAtWalk); the portraits'
+        // share is what portrait.cpp really holds. Textures released this frame still hold VRAM for two frames (deferred
+        // frees) while the walk no longer counts them: that errs low, never high.
+        const u32 booked = vFreeAtWalk + texVram + c.vramTargets + c.vramPortraits;
+        if (walked && !vramBroken && booked > kVramSize + (64u << 10)) {
             vramBroken = true;
             event("VRAM BOOKS BROKEN: %lu KB free + %lu KB textures + %lu KB targets + %lu KB portraits > %lu KB - memory corruption (main thread at \"%s\")",
-                  (unsigned long)(vFree / 1024), (unsigned long)(texVram / 1024), (unsigned long)(c.vramTargets / 1024), (unsigned long)(c.vramPortraits / 1024),
+                  (unsigned long)(vFreeAtWalk / 1024), (unsigned long)(texVram / 1024), (unsigned long)(c.vramTargets / 1024), (unsigned long)(c.vramPortraits / 1024),
                   (unsigned long)(kVramSize / 1024), g_state.where ? g_state.where : "?");
         }
     }
@@ -937,10 +1001,11 @@ void shutdown() {
                  kb(s.minLinFree), kb(s.minVramFree), kb(s.minVramLargest), kb(s.minHeapFree), s.maxCmdBuf, s.maxGpu);
         o += b;
         snprintf(b, sizeof b, "shortages (whole session): staging %lu, models %lu, creatures %lu, water %lu, uploads %lu, COLL %lu; "
-                              "textures to linear (VRAM full) %lu (%.0f KB); moved out of VRAM for 3D / wide %lu; white textures peak %lu; read queue peak %lu\n",
+                              "textures to linear (VRAM full) %lu (%.0f KB); moved out of VRAM for 3D / wide %lu, back into VRAM %lu (%.0f KB); white textures peak %lu; read queue peak %lu\n",
                  (unsigned long)st.oomStaging, (unsigned long)st.oomModel, (unsigned long)st.oomCreature, (unsigned long)st.oomWater,
                  (unsigned long)st.oomUpload, (unsigned long)st.collFailed, (unsigned long)st.texVramMiss, kb((double)st.texVramMissBytes),
-                 (unsigned long)st.texEvicted, (unsigned long)s.maxWhite, (unsigned long)s.maxQueue);
+                 (unsigned long)st.texEvicted, (unsigned long)st.texPromoted, kb((double)st.texPromotedBytes), (unsigned long)s.maxWhite,
+                 (unsigned long)s.maxQueue);
         o += b;
         snprintf(b, sizeof b, "SD card: %lu reads, %.1f MB, %.1f s reading (%.0f KB/s while reading), %lu failed\n", (unsigned long)st.ioReads,
                  st.ioBytes / 1048576.0, st.ioReadMs / 1000.0, st.ioReadMs > 1 ? kb((double)st.ioBytes) / (st.ioReadMs / 1000.0) : 0.0,
@@ -961,11 +1026,17 @@ void vramWatch(const char* where) {   // (6.35b; out of the anonymous namespace:
     static const char* lastWhere = "start";
     static int reported = 0;
     const u32 f = vramSpaceFree();
-    // a legitimate step frees at most a few textures / one render target; a pool reset frees nearly all 6 MB at once
+    // a legitimate step frees at most a few textures / one render target - or every texture of the world when leaving it; a pool
+    // re-creation (6.43: libctru re-initialises when both pools ran dry, vram_guard.hpp) leaves nearly all 6 MB free, more than the
+    // render targets (top 400x240 colour + depth, bottom 320x240: ~1 MB) allow
     if (last && f > last + (2u << 20) && reported < 3) {
         ++reported;
-        event("VRAM JUMP: free %lu KB -> %lu KB between \"%s\" and \"%s\" - libctru's VRAM allocator overwritten there", (unsigned long)(last / 1024),
-              (unsigned long)(f / 1024), lastWhere, where);
+        if (f > kVramSize - (600u << 10))
+            event("VRAM JUMP: free %lu KB -> %lu KB between \"%s\" and \"%s\" - libctru's VRAM allocator re-created (all free again over the "
+                  "textures in use)", (unsigned long)(last / 1024), (unsigned long)(f / 1024), lastWhere, where);
+        else
+            event("VRAM: %lu KB freed at once (free %lu KB -> %lu KB) between \"%s\" and \"%s\" (normal when leaving the world)",
+                  (unsigned long)((f - last) / 1024), (unsigned long)(last / 1024), (unsigned long)(f / 1024), lastWhere, where);
     }
     last = f;
     lastWhere = where;

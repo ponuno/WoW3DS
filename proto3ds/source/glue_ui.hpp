@@ -32,6 +32,7 @@ struct GlueModel {
     std::string server, account;
     bool havePassword = false;
     int protocol = 3;
+    bool turtle = false;   // 6.58
     bool packetLog = false;
     std::string wait;              // non-empty: a "Connecting..." dialog over the screen (Cancel unless waitFixed)
     bool waitFixed = false;        // cannot be cancelled (entering the world, creating a character)

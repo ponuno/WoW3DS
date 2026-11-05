@@ -5,6 +5,7 @@
 
 #include "movement.hpp"
 #include "pad.hpp"
+#include "stick_cal.hpp"
 
 static int fails = 0, checks = 0;
 #define CHECK(c, ...) do { ++checks; if (!(c)) { ++fails; std::printf("FAIL %s:%d ", __FILE__, __LINE__); std::printf(__VA_ARGS__); std::printf("\n"); } } while (0)
@@ -141,6 +142,52 @@ int main() {
     r.load("/tmp/w3d_pad_test.txt");
     CHECK(r.scheme == PadScheme::Classic && fabsf(r.runThreshold - 0.3f) < 1e-3f && !r.faceMovement && r.toggleModifiers && r.invertY,
           "pad.txt round trip");
+    // 6.51: the doodad distance keys (defaults, round trip, out-of-range values ignored)
+    {
+        PadConfig d;
+        CHECK(d.doodadRange == 45.0f && d.doodadWide == 1.0f, "doodad distance defaults");
+        w.doodadRange = 30.0f; w.doodadWide = 0.7f;
+        w.save("/tmp/w3d_pad_test.txt");
+        PadConfig q;
+        q.load("/tmp/w3d_pad_test.txt");
+        CHECK(fabsf(q.doodadRange - 30.0f) < 0.06f && fabsf(q.doodadWide - 0.7f) < 0.01f, "doodadrange / doodadwide round trip");
+        CHECK(q.interiorFar, "interiors on by default (6.56d)");
+        if (FILE* fp = fopen("/tmp/w3d_pad_test2.txt", "w")) { fputs("doodadrange 500\ndoodadwide 9\n", fp); fclose(fp); }
+        PadConfig bad;
+        bad.load("/tmp/w3d_pad_test2.txt");
+        CHECK(bad.doodadRange == 45.0f && bad.doodadWide == 1.0f, "out-of-range doodad distance ignored");
+    }
+    {   // 6.71: the frame pacer setting (default auto), round trip, bubbles round trip, an out-of-range value ignored
+        PadConfig d;
+        CHECK(d.pace == 2 && d.chatBubbles && d.autoDetail, "pace auto, bubbles and auto detail on by default");
+        w.pace = 1; w.chatBubbles = false;
+        w.save("/tmp/w3d_pad_test.txt");
+        PadConfig q;
+        q.load("/tmp/w3d_pad_test.txt");
+        CHECK(q.pace == 1 && !q.chatBubbles, "pace / bubbles round trip");
+        if (FILE* fp = fopen("/tmp/w3d_pad_test2.txt", "w")) { fputs("pace 7\n", fp); fclose(fp); }
+        PadConfig bad;
+        bad.load("/tmp/w3d_pad_test2.txt");
+        CHECK(bad.pace == 2, "out-of-range pace ignored");
+    }
+    // 6.57i: the C-Stick's learned rest position
+    {
+        StickCal c;
+        int ox = 0, oy = 0;
+        for (int i = 0; i < 90; ++i) c.apply(28 + (i % 3 == 0), -22, 1.0f / 60, ox, oy);   // rests 28 / -22 over, 1.5 s
+        CHECK(ox >= -1 && ox <= 1 && oy == 0, "a resting stick off centre reads zero after 1 s (%d, %d)", ox, oy);
+        c.apply(28 + 100, -22, 1.0f / 60, ox, oy);
+        CHECK(ox >= 99 && ox <= 101, "a push is measured from the learned centre (%d)", ox);
+        StickCal d;
+        for (int i = 0; i < 300; ++i) d.apply(90, 0, 1.0f / 60, ox, oy);   // held far out for 5 s: never the centre
+        CHECK(ox == 90, "a held push is not learned (%d)", ox);
+        StickCal e;
+        for (int i = 0; i < 300; ++i) e.apply(i % 2 ? 20 : -20, 0, 1.0f / 60, ox, oy);   // wobbling: not still
+        CHECK(e.cx == 0, "a wobble is not learned");
+        StickCal f;
+        for (int i = 0; i < 40; ++i) f.apply(30, 0, 1.0f / 60, ox, oy);   // 0.67 s: not yet
+        CHECK(ox == 30, "not before a second (%d)", ox);
+    }
     std::printf("PAD: %d checks, %d failed\n", checks, fails);
     return fails ? 1 : 0;
 }

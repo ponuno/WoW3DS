@@ -17,6 +17,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <regex>
 #include <set>
 #include <sstream>
 
@@ -200,6 +201,45 @@ bool loadBlp(const DataDir& data, const std::string& paths, Image& out, std::str
         }
     }
     return false;
+}
+
+// 6.98: where each race's picture is on UI-CharacterCreate-Races.blp, the way the game's own CharacterCreate.lua says
+// (RACE_ICON_TCOORDS: ["HUMAN_MALE"] = {left, right, top, bottom}). The vanilla sheet is 4 x 4; TBC-sized ones (512 x 256,
+// Turtle WoW's with the High Elf and the Goblin) are laid out differently - read from the lua, else the TBC layout.
+// Icon id: race * 2 + sex.
+struct Cell { float u0, v0, u1, v1; };
+std::map<int, Cell> raceIconCells(const DataDir& data, const Image& sheet, bool verbose) {
+    std::map<int, Cell> out;
+    static const std::pair<const char*, int> kKeys[] = {{"HUMAN", 1},    {"ORC", 2},    {"DWARF", 3},  {"NIGHTELF", 4}, {"SCOURGE", 5},
+                                                        {"UNDEAD", 5},   {"TAUREN", 6}, {"GNOME", 7},  {"TROLL", 8},    {"GOBLIN", 9},
+                                                        {"BLOODELF", 10}, {"HIGHELF", 10}};
+    std::vector<uint8_t> b;
+    for (const char* f : {"Interface\\GlueXML\\CharacterCreate.lua", "Interface\\FrameXML\\CharacterCreate.lua"}) {
+        if (!data.read(f, b)) continue;
+        const std::string lua(b.begin(), b.end());
+        static const std::regex re(R"re(\[\s*"([A-Z]+)_(MALE|FEMALE)"\s*\]\s*=\s*\{\s*([0-9.]+)\s*,\s*([0-9.]+)\s*,\s*([0-9.]+)\s*,\s*([0-9.]+)\s*\})re");
+        for (auto it = std::sregex_iterator(lua.begin(), lua.end(), re); it != std::sregex_iterator(); ++it) {
+            const std::string key = (*it)[1];
+            const int sex = (*it)[2] == "FEMALE" ? 1 : 0;
+            for (const auto& [k, race] : kKeys)
+                if (key == k && !out.count(race * 2 + sex))
+                    out[race * 2 + sex] = {std::stof((*it)[3]), std::stof((*it)[5]), std::stof((*it)[4]), std::stof((*it)[6])};
+        }
+        if (verbose) std::printf("  ui: race icons from %s: %zu\n", f, out.size());
+        if (!out.empty()) return out;
+    }
+    if (sheet.w == 2 * sheet.h) {   // no lua: the TBC sheet (8 x 4; Draenei / Blood Elf in the fifth column)
+        static const int kCol[11] = {0, 0, 3, 1, 3, 1, 0, 2, 2, 4, 4};   // by race; Goblin has no cell in TBC
+        static const int kRow[11] = {0, 0, 1, 0, 0, 1, 1, 0, 1, 0, 1};
+        for (int race = 1; race <= 10; ++race) {
+            if (race == 9) continue;
+            for (int sex = 0; sex < 2; ++sex) {
+                const float u0 = kCol[race] / 8.0f, v0 = (kRow[race] + 2 * sex) / 4.0f;
+                out[race * 2 + sex] = {u0, v0, u0 + 0.125f, v0 + 0.25f};
+            }
+        }
+    }
+    return out;
 }
 
 Image crop(const Image& s, float u0, float v0, float u1, float v1) {
@@ -432,6 +472,15 @@ bool convertUi(const UiOptions& uo, const DataDir& data, bool verbose) {
                 int size = std::max(4, (int)num(3, 16));
                 Image base = resample(src, size, size);
                 for (int k = 0; k < 16; ++k) sprites.push_back({name + std::to_string(k), rotate(base, k * 3.14159265358979 / 8.0)});
+            } else if (kind == "grid" && name == "race" && !raceIconCells(data, src, verbose).empty()) {
+                for (const auto& [id, c] : raceIconCells(data, src, verbose)) {
+                    std::string key = DataDir::normalize(path) + "#r" + std::to_string(id);
+                    IconSrc& is = iconSrc[key];
+                    is.tried = true;
+                    is.ok = true;
+                    is.img = crop(src, c.u0, c.v0, c.u1, c.v1);
+                    iconKeys.push_back({W3D_UI_KEY(W3D_UIKEY_NAMED, w3dUiHash((name + "_" + std::to_string(id)).c_str())), key});
+                }
             } else if (kind == "grid") {
                 int cols = std::max(1, (int)num(3, 1)), rows = std::max(1, (int)num(4, 1));
                 for (size_t i = 5; i < w.size(); ++i) {
@@ -677,10 +726,13 @@ bool convertUi(const UiOptions& uo, const DataDir& data, bool verbose) {
         bool haveOv = wmo.load(data, "WorldMapOverlay.dbc") && wmo.fields >= 13;
         if (wma.load(data, "WorldMapArea.dbc") && wma.fields >= 8) {
             const int mw = std::clamp(uo.mapWidth - uo.mapWidth % 8, 64, 512), mh = mw * 2 / 3;
-            for (uint32_t r = 0; r < wma.records; ++r) {
-                std::string name = wma.str(r, 3);
+            // 6.69: one more picture after the table's rows: Interface\\WorldMap\\World (both continents) for the "World" view of the
+            // map; it has no row (mapId / areaId are all ones, no bounds)
+            for (uint32_t r = 0; r <= wma.records; ++r) {
+                const bool isWorld = r == wma.records;
+                std::string name = isWorld ? std::string("World") : wma.str(r, 3);
                 if (name.empty()) continue;
-                progress(false, "ui: map %u/%u %s", r + 1, wma.records, name.c_str());
+                progress(false, "ui: map %u/%u %s", r + 1, wma.records + 1, name.c_str());
                 Image full;
                 full.w = 1024;
                 full.h = 768;
@@ -693,8 +745,8 @@ bool convertUi(const UiOptions& uo, const DataDir& data, bool verbose) {
                     blit(full, t, (i % 4) * 256, (i / 4) * 256);
                     ++tiles;
                 }
-                if (tiles < 6) { ++mapsFailed; continue; }
-                if (haveOv)
+                if (tiles < 6) { if (!isWorld) ++mapsFailed; continue; }
+                if (haveOv && !isWorld)
                     for (uint32_t o = 0; o < wmo.records; ++o) {
                         if (wmo.u32(o, 1) != wma.u32(r, 0)) continue;
                         std::string tn = wmo.str(o, 8);
@@ -719,13 +771,19 @@ bool convertUi(const UiOptions& uo, const DataDir& data, bool verbose) {
                     for (int x = 0; x < tex.w; ++x)
                         std::memcpy(&tex.rgba[((size_t)y * tex.w + x) * 4], &pic.rgba[((size_t)std::min(y, mh - 1) * mw + std::min(x, mw - 1)) * 4], 4);
                 W3dUiMap m{};
-                m.id = wma.u32(r, 0);
-                m.mapId = wma.u32(r, 1);
-                m.areaId = wma.u32(r, 2);
-                m.left = wma.f32(r, 4);
-                m.right = wma.f32(r, 5);
-                m.top = wma.f32(r, 6);
-                m.bottom = wma.f32(r, 7);
+                if (isWorld) {
+                    m.id = 0xFFFFFFFFu;
+                    m.mapId = 0xFFFFFFFFu;
+                    m.areaId = 0xFFFFFFFFu;
+                } else {
+                    m.id = wma.u32(r, 0);
+                    m.mapId = wma.u32(r, 1);
+                    m.areaId = wma.u32(r, 2);
+                    m.left = wma.f32(r, 4);
+                    m.right = wma.f32(r, 5);
+                    m.top = wma.f32(r, 6);
+                    m.bottom = wma.f32(r, 7);
+                }
                 m.tex = addTex(tex, W3D_TEX_ETC1, W3D_UITEX_MAP);
                 m.w = (uint16_t)mw;
                 m.h = (uint16_t)mh;

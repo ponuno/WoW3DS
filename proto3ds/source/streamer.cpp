@@ -13,6 +13,8 @@
 // models, water and texture staging use the linear heap; textures go to VRAM
 // first and fall back to linear memory.
 #include "world.h"
+#include "hlod.hpp"
+#include "vram_guard.hpp"
 #include "w3d_collision.h"
 #include "w3d_ground.h"
 #include "w3d_liquid.h"
@@ -31,6 +33,8 @@
 #include <atomic>
 #include <deque>
 #include <unordered_map>
+
+#include "objcoll.hpp"
 
 extern "C" {
 extern u32 __ctru_heap_size;   // (global scope: inside the anonymous namespace GCC took it for a namespace member - 7r link error)
@@ -216,6 +220,7 @@ float tunable(const char* name, float def) {
 float g_cam[3] = {0, 0, 0};
 float g_fwd[2] = {0, 0};
 bool g_haveFwd = false, g_boost = false;
+bool g_worldWanted = true;   // 6.37: streamerSetWorldWanted
 bool groundClass(uint8_t cls) { return cls == kClsTile || cls == kClsColl || cls == kClsTerrainTex; }
 float readKey(const float a[3], uint8_t cls) {
     if (cls == kClsUnit) return 0.0f;
@@ -331,8 +336,10 @@ uint32_t g_slotSize = 0;
 std::vector<int> g_freeSlots;
 int g_slotCount = 0;
 
-enum class FreeKind : uint8_t { Linear, Slot, Texture, ModelStruct, CreatureStruct, DisplayStruct };
+enum class FreeKind : uint8_t { Linear, Slot, Texture, ModelStruct, CreatureStruct, DisplayStruct, TexData, VramBlock };   // VramBlock: 6.52 (the GPU test's reserve)   // TexData: a C3D_Tex (heap copy) whose memory goes (6.50)
 struct Deferred { FreeKind kind; void* p; int slot; u32 frame; };
+void gtvForget(const void* p);   // 6.52 (below): a buffer with a VRAM copy is being freed
+void gtvPump();                  // 6.52 (below): inside the frame, after the uploads: the copies asked for
 std::vector<Deferred> g_deferred;
 u32 g_frame = 0;
 
@@ -586,6 +593,7 @@ void destroyModelNow(Model* m) {
     for (GpuTex* t : m->tex) releaseTex(t);
     m->tex.clear();
     g_stats.geomBytes -= m->size;
+    gtvForget(m->blob);   // 6.52
     deferFree(FreeKind::Linear, m->blob);
     deferFree(FreeKind::ModelStruct, m);
 }
@@ -759,8 +767,8 @@ GpuTex* compositeBody(const PlayerBuild* b) {
     p.maxLevel = 0;
     p.format = GPU_RGB565;
     p.type = GPU_TEX_2D;
-    p.onVram = true;
-    t->vram = C3D_TexInitWithParams(&t->tex, NULL, p);
+    p.onVram = vramRoomFor(A * A * 2);   // 6.43: never the last bytes of VRAM (vram_guard.hpp)
+    t->vram = p.onVram && C3D_TexInitWithParams(&t->tex, NULL, p);
     bool ok = t->vram;
     if (!ok) { p.onVram = false; ok = C3D_TexInitWithParams(&t->tex, NULL, p); }
     if (!ok) noteOom(g_stats.oomUpload, A * A * 2);
@@ -864,6 +872,13 @@ void finishTileRelease(TileExt* t) {
         g_stats.geomBytes -= t->waterSize;
         deferFree(FreeKind::Linear, t->water);
     }
+    for (Tile::StaticBatch& b : t->sbatches) {   // 6.44: the merged doodads' buffers (the GPU may still read them this frame)
+        gtvForget(b.v);   // 6.52
+        gtvForget(b.idx);
+        if (b.v) deferFree(FreeKind::Linear, b.v);
+        if (b.idx) deferFree(FreeKind::Linear, b.idx);
+    }
+    t->sbatches.clear();
     if (t->plcm) free(t->plcm);
     if (t->liq) { free(t->liq); t->liq = nullptr; }
     if (t->grnd) { free(t->grnd); t->grnd = nullptr; }
@@ -1124,9 +1139,29 @@ void onJobDone(Job* j) {
             GSPGPU_FlushDataCache(m->blob, m->size);
             m->h = (const W3dModelHeader*)m->blob;
             m->subs = (const W3dSubmesh*)(m->blob + m->h->offSubmeshes);
+            // 6.99: a submesh whose texture index is past the model's list read whatever lay after the list's end as a texture
+            // pointer - a data abort in C3Di_SetTex (crash on the character screen, render.cpp drawModels). Such a part is drawn
+            // untextured; the blob is ours (linear memory), so the index is fixed in place once.
+            for (uint32_t k = 0; k < m->h->submeshCount; ++k) {
+                W3dSubmesh& sm = const_cast<W3dSubmesh&>(m->subs[k]);
+                if (sm.tex != W3D_NO_TEXTURE && sm.tex >= m->h->texCount) {
+                    sm.tex = W3D_NO_TEXTURE;
+                    ++g_stats.badModelTex;
+                    g_stats.lastBadModel = m->id;
+                }
+            }
             m->building = m->h->submeshCount && (m->subs[0].flags & W3D_SUBF_BUILDING);
             m->interior = m->h->submeshCount && (m->subs[0].flags & W3D_SUBF_INTERIOR);
             m->lods = w3d_model_lods(m->blob, m->size);   // stage 6.12
+            m->foliage = false;   // 6.84
+            if (m->lods && !m->building && !m->interior)
+                for (uint32_t k = 0; k < m->h->submeshCount; ++k)
+                    if (m->subs[k].blend == W3D_BLEND_ALPHAKEY && (m->lods[k].indexCount[0] || m->lods[k].indexCount[1])) { m->foliage = true; break; }
+            m->lodErr[0] = m->lods ? w3d_model_lod_err(m->h, 1) : 0;   // 6.47
+            m->lodErr[1] = m->lods ? w3d_model_lod_err(m->h, 2) : 0;
+            m->uva = w3d_model_uvanim(m->blob, m->size);  // 6.41
+            m->portals = w3d_model_portals(m->blob, m->size);   // 6.42
+            if (m->portals) g_packHasPortals = true;            // 6.57g
             const uint32_t* ids = (const uint32_t*)(m->blob + m->h->offTexIds);
             {   // its textures are read where the model is needed; a building's before a doodad's
                 AnchorScope as(m->anchor, m->cls == kClsUnit ? kClsUnit : m->building ? kClsBuilding : kClsDoodad);
@@ -1252,6 +1287,7 @@ void onJobDone(Job* j) {
                     memcpy(&ph, t->plcm, sizeof ph);
                     const W3dPlacement* p = (const W3dPlacement*)(t->plcm + sizeof ph);
                     t->instances.reserve(ph.count);
+                    t->plToInst.assign(ph.count, -1);   // 6.54: the PVS names doodads by their PLCM index
                     std::unordered_map<uint32_t, Model*> local;
                     std::vector<uint16_t> bldgOf, ownerOf;   // stage 6.11: 1 + the building of each placement, 0 = a lone model; 6.33: owners
                     t->bldgs.clear();
@@ -1277,11 +1313,14 @@ void onJobDone(Job* j) {
                         in.scale = p[i].scale;
                         in.radius = 0;   // filled once the model header is known
                         lightToModel(in.rot, in.lightModel);
+                        in.pl = i;
                         t->instances.push_back(in);
                     }
                     free(t->plcm);
                     t->plcm = nullptr;
                     buildChunks(t);
+                    for (size_t k = 0; k < t->instances.size(); ++k)   // 6.54: after the reordering
+                        if (t->instances[k].pl < t->plToInst.size()) t->plToInst[t->instances[k].pl] = (int32_t)k;
                     buildBuildings(t);
                 }
             }
@@ -1331,9 +1370,9 @@ bool tryUpload(GpuTex* t) {
         default: p.format = GPU_RGB565;
     }
     p.type = GPU_TEX_2D;
-    p.onVram = true;
+    p.onVram = vramRoomFor(th.dataSize);   // 6.43: never the last bytes of VRAM (vram_guard.hpp)
     C3D_Tex tex;
-    bool vram = C3D_TexInitWithParams(&tex, NULL, p);
+    bool vram = p.onVram && C3D_TexInitWithParams(&tex, NULL, p);
     bool ok = vram;
     if (!ok) { p.onVram = false; ok = C3D_TexInitWithParams(&tex, NULL, p); }
     if (!ok) { noteOom(g_stats.oomUpload, th.dataSize); return false; }
@@ -1512,9 +1551,16 @@ void processDeferred() {
                 delete t;
                 break;
             }
+            case FreeKind::TexData: {   // 6.50: the linear copy of a texture moved back to VRAM
+                C3D_Tex* x = (C3D_Tex*)d.p;
+                C3D_TexDelete(x);
+                delete x;
+                break;
+            }
             case FreeKind::ModelStruct: delete (Model*)d.p; break;
             case FreeKind::CreatureStruct: delete (CreatureModel*)d.p; break;
             case FreeKind::DisplayStruct: delete (CreatureDisplay*)d.p; break;
+            case FreeKind::VramBlock: vramFree(d.p); break;   // 6.52
         }
     }
     g_deferred.resize(w);
@@ -1754,6 +1800,7 @@ bool streamerFarObjectDraws(const float cam[3], float maxDist, float detailDist,
                 allBeyond = ox * ox + oy * oy + oz * oz > detailDist * detailDist;
             }
             if (!t || allBeyond) {   // the tile is not there (or all of it is beyond the real buildings): all of its buildings
+                if (hlod::coversTile(tx, ty)) continue;   // 6.57: the horizon's meshes stand for them
                 d.idx = vb.i;
                 d.count = vb.idxCount;
                 if (d.count) out.push_back(d);
@@ -1809,6 +1856,8 @@ bool streamerFarObjectDraws(const float cam[3], float maxDist, float detailDist,
     *zScale = zs;
     return !out.empty();
 }
+
+bool g_packHasPortals = false;   // 6.57g: a model with a portal table was loaded: the pack is from 6.42 on (a group without portals then has no opening)
 
 bool streamerInit(PackIndex* index, char* err, size_t errLen) {
     g_index = index;
@@ -1866,6 +1915,8 @@ bool streamerInit(PackIndex* index, char* err, size_t errLen) {
     return true;
 }
 
+static void objWmoClear();   // 6.59 (below)
+
 void streamerShutdown() {
 #ifndef W3D_PC_TEST
     // Stage 6: texture copies queued in the last frame read staging buffers and write textures that are freed below at
@@ -1882,6 +1933,7 @@ void streamerShutdown() {
     }
     // Complete every outstanding job (unrun ones as failed) through the normal path,
     // so assets orphaned while loading are freed exactly as during play.
+    objWmoClear();    // 6.59
     farObjUnload();   // 6.29
     farUnload();   // 6.24: (the atlas is released before the jobs are drained: a read still running frees it on completion)
     // Completions may submit follow-up jobs (display -> model -> textures): loop until drained.
@@ -1944,15 +1996,66 @@ void streamerSetView(float yaw) {
 }
 
 void streamerSetBoost(bool on) { g_boost = on; }
+void streamerSetWorldWanted(bool on) { g_worldWanted = on; }
 
 // The texture side of the frame: player bodies and texture uploads. Inside a frame the GX copies are queued with the
 // frame's GPU work (no wait); outside one each waits for the GPU (loading loops, where it is idle anyway).
+// 6.50: textures living in linear memory go back to VRAM once there is room, the most wanted (nearest) first. Before, a texture
+// moved out for a render target (3D / 800x240: streamerEvictVram) or uploaded while VRAM was full stayed in the slower memory for the
+// rest of the session - perf log: after switching to 800x240 in the world 3582 KB of textures sat in linear memory with 2.7-3.3 MB
+// of VRAM free, also back in 400x240. Inside the frame only (the GX copy is queued ahead of the frame's drawing, as uploads are), when
+// no upload waits, one texture every other frame, keeping 256 KB of VRAM free for new uploads; the linear copy is freed two frames
+// later (the frame's earlier commands may still sample it).
+static void promoteTextures() {
+#ifndef W3D_PC_TEST
+    if (!g_uploads.empty() || (g_frame & 1) || g_gxCopies >= 6) return;
+    if (g_stats.texLinear == 0) return;
+    constexpr u32 kKeepForUploads = 256 * 1024;
+    GpuTex* best = nullptr;
+    float bestKey = 0;
+    for (const auto& [id, t] : g_tex) {
+        if (t->vram || t->state != AssetState::Ready || !t->bytes || t->retry) continue;
+        const float k = readKey(t->anchor, t->cls);
+        if (!best || k < bestKey) { best = t; bestKey = k; }
+    }
+    if (!best) return;
+    GpuTex* t = best;
+    const u32 total = texTotalSize(t->tex);
+    if (vramSpaceFree() < total + kKeepForUploads + kVramKeep) return;
+    C3D_TexInitParams p{};
+    p.width = t->tex.width;
+    p.height = t->tex.height;
+    p.maxLevel = t->tex.maxLevel;
+    p.format = t->tex.fmt;
+    p.type = GPU_TEX_2D;
+    p.onVram = true;
+    C3D_Tex v;
+    if (!C3D_TexInitWithParams(&v, NULL, p)) return;   // (no block of that size: fragmented - next time)
+    if (texTotalSize(v) != total) { C3D_TexDelete(&v); return; }
+    GSPGPU_FlushDataCache(t->tex.data, total);   // (the linear copy was written by the CPU or a GX copy; nothing dirty expected)
+    C3D_SyncTextureCopy((u32*)t->tex.data, 0, (u32*)v.data, 0, total, 8);   // (in the frame: queued, returns at once)
+    ++g_gxCopies;
+    v.param = t->tex.param;
+    v.border = t->tex.border;
+    v.lodParam = t->tex.lodParam;
+    deferFree(FreeKind::TexData, new C3D_Tex(t->tex));
+    t->tex = v;
+    t->vram = true;
+    g_stats.texLinear -= t->bytes;
+    g_stats.texVram += t->bytes;
+    ++g_stats.texPromoted;
+    g_stats.texPromotedBytes += t->bytes;
+#endif
+}
+
 static void uploadPass(bool inFrame) {
     const u64 a = svcGetSystemTick();
     pumpPlayers();
     const u64 b = svcGetSystemTick();
     g_stats.playersMsLastFrame = ticksToMs(b - a);
     uploadTextures(g_boost ? 14.0 : g_uploads.size() > 24 ? 5.0 : 2.5, !inFrame ? 1 << 30 : g_boost ? 12 : 8);   // (stage 6.3: room for the GPU kicks' entries too)
+    if (inFrame) promoteTextures();   // 6.50
+    if (inFrame) gtvPump();           // 6.52
     g_stats.uploadMsLastFrame = ticksToMs(svcGetSystemTick() - b);
 }
 
@@ -2047,6 +2150,7 @@ void streamerUpdate(const float camPos[3], float drawDist, bool uploadsLater) {
 
     // 3b. Collision near the camera only (load within kCollLoadDist of a tile, drop beyond kCollDropDist).
     for (TileExt* t : g_tiles) {
+        if (!g_worldWanted) break;   // 6.37: login screens (the tiles are released below)
         if (t->doomed || !t->th) continue;
         float x0 = (32.0f - t->ty - 1.0f) * kTileSize, y0 = (32.0f - t->tx - 1.0f) * kTileSize;
         float dx = std::max({x0 - camPos[0], 0.0f, camPos[0] - (x0 + kTileSize)});
@@ -2086,8 +2190,9 @@ void streamerUpdate(const float camPos[3], float drawDist, bool uploadsLater) {
 
     for (TileExt* t : std::vector<TileExt*>(g_tiles)) {
         if (t->doomed) continue;
-        if (abs(t->tx - ctx) > keep || abs(t->ty - cty) > keep) releaseTile(t);
+        if (!g_worldWanted || abs(t->tx - ctx) > keep || abs(t->ty - cty) > keep) releaseTile(t);
     }
+    if (!g_worldWanted) r = -1;   // 6.37: nothing wanted on the login screens
 
     struct Want { int tx, ty; float d2; bool ahead; };
     std::vector<Want> want;
@@ -2102,7 +2207,7 @@ void streamerUpdate(const float camPos[3], float drawDist, bool uploadsLater) {
     // 6.24: read ahead - the tiles around the point 300 yards in front of the camera that lie beyond the wanted ring (still
     // within 'keep', so they are not released again): by the time the walker gets there their ground is in. Only into free
     // terrain slots (never evicting for it), after everything of the ring.
-    if (g_haveFwd && !g_stats.heapShrunk) {
+    if (g_haveFwd && !g_stats.heapShrunk && g_worldWanted) {
         const float px = camPos[0] + g_fwd[0] * 300.0f, py = camPos[1] + g_fwd[1] * 300.0f;
         const int ptx = (int)floorf(32.0f - py / kTileSize), pty = (int)floorf(32.0f - px / kTileSize);
         for (int dx = -1; dx <= 1; ++dx)
@@ -2219,6 +2324,94 @@ uint32_t streamerEntrySize(uint32_t type, uint32_t id) {
     return e ? e->size : 0;
 }
 
+// 6.59: buildings as game objects (Turtle WoW's houses, towers, ruins). The entry is small (parts + collision): read at once on
+// the first ask; the parts' models load as any model does and are drawn once ready.
+static std::unordered_map<uint32_t, ObjWmo*> g_objWmo;
+static std::unordered_map<uint32_t, bool> g_objWmoMissing;
+bool streamerHasObjWmo(uint32_t displayId) { return g_index && g_index->find(W3D_ENTRY_OBJWMO, displayId) != nullptr; }
+const ObjWmo* streamerObjWmo(uint32_t displayId, const float at[3], uint32_t nowMs) {
+    auto it = g_objWmo.find(displayId);
+    if (it != g_objWmo.end()) { it->second->lastUseMs = nowMs; return it->second; }
+    if (g_objWmoMissing.count(displayId)) return nullptr;
+    const uint32_t size = streamerEntrySize(W3D_ENTRY_OBJWMO, displayId);
+    std::vector<uint8_t> b(size);
+    if (!size || !streamerReadEntry(W3D_ENTRY_OBJWMO, displayId, b.data(), size) || !w3d_objwmo_valid(b.data(), size)) {
+        g_objWmoMissing[displayId] = true;
+        return nullptr;
+    }
+    const W3dObjWmoHeader* h = (const W3dObjWmoHeader*)b.data();
+    ObjWmo* o = new ObjWmo;
+    o->radius = h->radius;
+    memcpy(o->bmin, h->bmin, sizeof o->bmin);
+    memcpy(o->bmax, h->bmax, sizeof o->bmax);
+    const W3dPlacement* p = (const W3dPlacement*)(b.data() + sizeof(W3dObjWmoHeader));
+    {
+        AnchorScope as(at, kClsBuilding);
+        for (uint32_t i = 0; i < h->partCount; ++i) {
+            Model* m = acquireModel(p[i].modelId);
+            if (!m) continue;
+            ObjWmoPart part{m, {p[i].pos[0], p[i].pos[1], p[i].pos[2]}, {p[i].rot[0], p[i].rot[1], p[i].rot[2]}, p[i].scale};
+            o->parts.push_back(part);
+        }
+    }
+    const float* c = (const float*)(p + h->partCount);
+    o->coll.assign(c, c + (size_t)h->collTriCount * 9);
+    objcoll::build(o->coll.data(), h->collTriCount, o->collBlob);
+    o->lastUseMs = nowMs;
+    g_objWmo[displayId] = o;
+    return o;
+}
+static void objWmoRelease(ObjWmo* o) {
+    for (ObjWmoPart& part : o->parts) releaseModel(part.model);
+    delete o;
+}
+static std::vector<objcoll::Placed> g_objPlaced;   // this frame's (streamerObjWmoPlace)
+static std::vector<uint64_t> g_objOwner;           // 7.08: whose each one is (parallel to g_objPlaced)
+uint64_t streamerObjFloorOwner(float x, float y, float zFeet) {
+    uint64_t best = 0;
+    float bestZ = 0;
+    for (size_t i = 0; i < g_objPlaced.size(); ++i) {
+        float z;
+        if (!objcoll::floorAt(g_objPlaced[i], x, y, zFeet, kStepHeight, &z) || zFeet - z > 0.6f) continue;   // (under the feet: standing on it)
+        if (!best || z > bestZ) { best = g_objOwner[i]; bestZ = z; }
+    }
+    return best;
+}
+bool streamerObjFloorOf(uint64_t owner, float x, float y, float zFeet, float below, float* z) {
+    for (size_t i = 0; i < g_objPlaced.size(); ++i) {
+        if (g_objOwner[i] != owner) continue;
+        float fz;
+        if (objcoll::floorAt(g_objPlaced[i], x, y, zFeet, kStepHeight, &fz) && zFeet - fz <= below) { *z = fz; return true; }
+    }
+    return false;
+}
+void streamerObjWmoPlace(const ObjWmo* w, const float pos[3], float yaw, float scale, uint64_t owner) {
+    if (!w || w->collBlob.empty()) return;
+    objcoll::Placed pl;
+    pl.coll = w->collBlob.data();
+    memcpy(pl.pos, pos, sizeof pl.pos);
+    pl.yaw = yaw;
+    pl.scale = scale;
+    pl.radius = w->radius * scale;
+    g_objPlaced.push_back(pl);
+    g_objOwner.push_back(owner);
+}
+void streamerObjWmoTick(uint32_t nowMs) {
+    g_objPlaced.clear();
+    g_objOwner.clear();
+    for (auto it = g_objWmo.begin(); it != g_objWmo.end();) {
+        if (nowMs - it->second->lastUseMs > 30000) { objWmoRelease(it->second); it = g_objWmo.erase(it); }
+        else ++it;
+    }
+}
+static void objWmoClear() {
+    g_objPlaced.clear();
+    g_objOwner.clear();
+    for (auto& kv : g_objWmo) objWmoRelease(kv.second);
+    g_objWmo.clear();
+    g_objWmoMissing.clear();
+}
+
 CreatureDisplay* streamerAcquirePlayerDisplay(const W3dLook& look, const uint32_t* equip) {
     uint32_t eq[W3D_BODY_EQ] = {};
     uint64_t key = w3d_look_key(&look);
@@ -2268,6 +2461,9 @@ const StreamStats& streamerStats() { return g_stats; }
 // The blocks fit now: tried with real allocations (VRAM is only allocated on the main thread).
 static bool vramBlocksFit(const uint32_t* blocks, int n) {
     void* got[4] = {};
+    uint32_t sum = 0;
+    for (int i = 0; i < n && i < 4; ++i) sum += blocks[i];
+    if (!vramRoomFor(sum)) return false;   // 6.43: probing them must not take the last bytes of VRAM (vram_guard.hpp)
     bool ok = true;
     for (int i = 0; i < n && i < 4 && ok; ++i) ok = (got[i] = vramAlloc(blocks[i])) != nullptr;
     for (int i = 0; i < n && i < 4; ++i) if (got[i]) vramFree(got[i]);
@@ -2322,6 +2518,109 @@ uint32_t streamerEvictVram(const uint32_t* blocks, int n) {
     return moved;
 #endif
 }
+
+// 6.52: the GPU test's "vertices in VRAM". Every model, building and merged-doodad buffer lives in linear memory (FCRAM);
+// whether the GPU's vertex / index fetch from there is part of the ~0.2-0.3 ms per 1000 triangles is not known. The test holds a
+// reserve of VRAM (textures moved out for it, farthest first, as for a render target) and, in its second phase, copies the
+// buffers the renderer draws into it; the renderer then draws from the copies. The phase before holds the same reserve unused:
+// the difference of the two is what VRAM vertices give (the textures moved out cost both the same).
+// Not for play: the copies are never moved or compacted (a bump allocator over the reserve), a freed buffer just forgets its copy.
+namespace {
+struct GtvBlock { uint8_t* p; u32 size, used; };
+struct GtvCopy { uint8_t* vram; u32 bytes; u32 readyFrame; bool queued; };
+int g_gtvMode = 0;
+std::vector<GtvBlock> g_gtvBlocks;
+std::unordered_map<const void*, GtvCopy> g_gtvCopies;
+std::vector<const void*> g_gtvWant;
+GtVramStats g_gtvStats;
+constexpr u32 kGtvBlock = 512 * 1024, kGtvBlocks = 3;
+
+void gtvForget(const void* p) {
+    if (!p || g_gtvCopies.empty()) return;
+    auto it = g_gtvCopies.find(p);
+    if (it == g_gtvCopies.end()) return;
+    if (it->second.vram) { --g_gtvStats.buffers; g_gtvStats.bytesUsed -= it->second.bytes; }
+    g_gtvCopies.erase(it);   // (its bytes in the reserve stay used: the reserve is a bump allocator)
+}
+
+uint8_t* gtvAlloc(u32 bytes) {
+    bytes = (bytes + 127u) & ~127u;
+    for (GtvBlock& b : g_gtvBlocks)
+        if (b.size - b.used >= bytes) { uint8_t* p = b.p + b.used; b.used += bytes; return p; }
+    return nullptr;
+}
+
+void gtvPump() {
+    if (g_gtvMode != 2 || g_gtvWant.empty()) { g_gtvWant.clear(); return; }
+    int budget = 6;
+    for (const void* src : g_gtvWant) {
+        if (budget <= 0 || g_gxCopies >= 10) break;
+        auto it = g_gtvCopies.find(src);
+        if (it == g_gtvCopies.end() || it->second.vram || !it->second.queued) continue;
+        GtvCopy& c = it->second;
+        c.queued = false;
+        const u32 size = (c.bytes + 15u) & ~15u;   // (GX copies move 16-byte units; the source is linear memory, 16-byte aligned)
+        uint8_t* dst = gtvAlloc(size);
+        if (!dst) { ++g_gtvStats.misses; continue; }   // (stays asked for no more: the reserve is full)
+        GSPGPU_FlushDataCache(src, size);
+        C3D_SyncTextureCopy((u32*)src, 0, (u32*)dst, 0, size, 8);   // (in the frame: queued ahead of its drawing, like uploads)
+        ++g_gxCopies;
+        --budget;
+        c.vram = dst;
+        c.readyFrame = g_frame + 1;   // drawn from the next frame on
+        ++g_gtvStats.buffers;
+        g_gtvStats.bytesUsed += c.bytes;
+        ++g_gtvStats.copiesTotal;
+    }
+    g_gtvWant.clear();
+}
+}  // namespace
+
+const uint8_t* streamerGtVramCopy(const void* src, uint32_t bytes) {
+    if (g_gtvMode != 2 || !src || !bytes) return nullptr;
+    auto it = g_gtvCopies.find(src);
+    if (it == g_gtvCopies.end()) {
+        if (bytes > kGtvBlock) return nullptr;   // (bigger than a block: never)
+        g_gtvCopies.emplace(src, GtvCopy{nullptr, bytes, 0, true});
+        g_gtvWant.push_back(src);
+        return nullptr;
+    }
+    const GtvCopy& c = it->second;
+    if (!c.vram) {
+        if (c.queued && g_gtvWant.size() < 256) g_gtvWant.push_back(src);   // (still waiting for its turn)
+        return nullptr;
+    }
+    return c.readyFrame <= g_frame && c.bytes == bytes ? c.vram : nullptr;
+}
+
+void streamerGtVram(int mode) {
+    if (mode == g_gtvMode) return;
+    if (mode == 0) {   // release: the GPU may still read the copies for two frames
+        for (GtvBlock& b : g_gtvBlocks) deferFree(FreeKind::VramBlock, b.p);
+        g_gtvBlocks.clear();
+        g_gtvCopies.clear();
+        g_gtvWant.clear();
+        g_gtvMode = 0;
+        g_gtvStats.buffers = 0;
+        g_gtvStats.bytesUsed = 0;
+        return;
+    }
+    if (g_gtvBlocks.empty()) {   // take the reserve (outside a frame: the eviction waits for the GPU)
+        g_gtvStats = GtVramStats();
+        for (u32 k = 0; k < kGtvBlocks; ++k) {
+            const uint32_t blocks[1] = {kGtvBlock};
+            g_gtvStats.movedTexBytes += streamerEvictVram(blocks, 1);
+            if (!vramRoomFor(kGtvBlock)) break;
+            uint8_t* p = (uint8_t*)vramAlloc(kGtvBlock);
+            if (!p) break;
+            g_gtvBlocks.push_back({p, kGtvBlock, 0});
+            g_gtvStats.reserveBytes += kGtvBlock;
+        }
+    }
+    g_gtvMode = mode;
+}
+
+const GtVramStats& streamerGtVramStats() { return g_gtvStats; }
 
 double streamerTakeMaxReadMs() {
     const double m = g_ioMaxReadMs;
@@ -2438,9 +2737,22 @@ bool streamerFloorHeight(float wx, float wy, float zFeet, float* out, bool* onFl
     // 6.21: nor where a building's floor lies under the membrane: the opening is open, the walker goes down onto that floor
     if (haveT && hole && !w3d_hole_terrain_usable(coll, wx, wy, zFeet, kStepHeight, terrain)) haveT = false;
     if (held) *held = false;
-    if (!haveT && !coll) return false;
+    // 6.59: floors of game objects that are buildings (Turtle WoW's houses): the highest one within a step of the feet
+    bool haveObj = false;
+    float objZ = 0;
+    for (const objcoll::Placed& pl : g_objPlaced) {
+        float z;
+        if (objcoll::floorAt(pl, wx, wy, zFeet, kStepHeight, &z) && (!haveObj || z > objZ)) { objZ = z; haveObj = true; }
+    }
+    if (!haveT && !coll) {
+        if (!haveObj) return false;
+        *out = objZ;
+        if (onFloor) *onFloor = true;
+        return true;
+    }
     int f = 0;
     *out = w3d_walk_height(coll, wx, wy, zFeet, kStepHeight, haveT ? 1 : 0, terrain, &f);
+    if (haveObj && (objZ > *out || *out > zFeet + kStepHeight)) { *out = objZ; f = 1; }   // (on the object's floor, not lifted past it)
     if (!haveT && f == 0) return false;   // (no terrain and no floor or ceiling of a building here: nothing at all)
     // 6.16: below every surface we know (w3d_walk_height then gives the lowest one ABOVE the feet): only a little sinking is
     // corrected that way. Deeper than that we are in a place whose floor is not there (a city inside a mountain - Ironforge,
@@ -2477,8 +2789,20 @@ bool streamerCollideMove(float fromX, float fromY, float zFeet, float* toX, floa
             for (int i = 0; i < n; ++i) dup |= colls[i] == t->coll;
             if (!dup) colls[n++] = t->coll;
         }
-    if (!n) return false;
-    return w3d_collide_move(colls, n, fromX, fromY, zFeet, toX, toY, r) != 0;
+    bool changed = n && w3d_collide_move(colls, n, fromX, fromY, zFeet, toX, toY, r) != 0;
+    for (const objcoll::Placed& pl : g_objPlaced)   // 6.59: the walls of game objects that are buildings
+        changed = objcoll::collideMove(pl, fromX, fromY, zFeet, r, toX, toY) || changed;
+    return changed;
+}
+
+bool streamerCeilingAbove(float wx, float wy, float zFrom, float* ceil) {
+    Tile* t = tileAt(wx, wy);
+    bool any = t && t->coll && w3d_ceiling_above(t->coll, wx, wy, zFrom, ceil) != 0;
+    for (const objcoll::Placed& pl : g_objPlaced) {   // 6.59
+        float c;
+        if (objcoll::ceilingAbove(pl, wx, wy, zFrom, &c) && (!any || c < *ceil)) { *ceil = c; any = true; }
+    }
+    return any;
 }
 
 bool streamerLiquidAt(float wx, float wy, float zRef, LiquidHere* out) {
@@ -2507,11 +2831,11 @@ bool streamerGroundIsStandIn(float wx, float wy) {
 bool streamerGroundHeight(float wx, float wy, float* out) { return streamerGroundHeightEx(wx, wy, out, nullptr); }
 
 // 6.18c: a move over the terrain that goes uphill onto ground steeper than the walkable slope loses its uphill part.
-bool streamerSlopeMove(float fromX, float fromY, float zFeet, float* toX, float* toY) {
+bool streamerSlopeMove(float fromX, float fromY, float zFeet, float* toX, float* toY, float step) {
     Tile* tb = tileAt(*toX, *toY);
     if (!tb || !tb->grnd) return false;
     Tile* ta = tileAt(fromX, fromY);
-    return w3d_slope_move(ta ? ta->grnd : nullptr, tb->grnd, fromX, fromY, zFeet, kStepHeight, toX, toY) != 0;
+    return w3d_slope_move(ta ? ta->grnd : nullptr, tb->grnd, fromX, fromY, zFeet, step >= 0 ? step : kStepHeight, toX, toY) != 0;
 }
 
 bool streamerGroundHeightEx(float wx, float wy, float* out, bool* inHole) {

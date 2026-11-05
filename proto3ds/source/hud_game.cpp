@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "charsheet.hpp"
@@ -525,6 +526,12 @@ void hudBuildGame(HudList& l, const HudInput& in) {
     const WorldObject* tgt = g.target() ? g.objects.find(g.target()) : nullptr;
     const w3n::MovementInfo& mv = g.mover.info();
 
+    // ---- the spirit world's grey is done by the GPU since 6.77 (render.cpp ghostStages); 6.81: the veil of 6.62 (a translucent
+    // rectangle with stepped dark edges, a frame visible on the screen) is gone. The body before release: a dull red veil over the whole screen.
+    {
+        if (g.life() == w3n::Life::Dead) l.rect(0, 0, kHudW, kHudH, hudRgba(100, 40, 40, 70));
+    }
+
     // ---- name plates and floating numbers (behind the frames)
     {
         struct Plate { float dist; float sx, sy; const WorldObject* o; };
@@ -601,6 +608,92 @@ void hudBuildGame(HudList& l, const HudInput& in) {
             }
             if (in.pad && in.pad->soft && o.guid == in.pad->soft && !o.self)   // interact prompt
                 l.textCentered((int)pl.sx, y - 12 - markUp, std::string("[Y] ") + ui::trText(in.pad->softVerb), kGold);
+        }
+        // 6.67/6.68: chat bubbles over the speakers (Say, Yell, Party, the creatures' say / yell, /e), drawn as the original does:
+        // a dark translucent rounded box with a thin light edge and a small tail, white text (yell red, party blue, emote
+        // orange). One bubble per speaker (the newest line); as WoWee's: 8 s + 60 ms a character (at most 15 s, a yell
+        // 2 s more), fading over the last 2 s.
+        // 6.89: whispers too (pink: the whisperer's bubble when they stand near, ours over our own head), and our own lines in
+        // first person, where there is no head on screen to hang them on: low in the middle of the screen, without a tail.
+        if (in.chatBubbles) {
+            struct Bub { float dist, sx, sy; const w3n::ChatLine* line; uint32_t left, total; bool pinned; };
+            std::vector<Bub> bubs;
+            std::unordered_set<uint64_t> done;
+            for (auto it = g.chat.rbegin(); it != g.chat.rend(); ++it) {
+                const w3n::ChatLine& cl = *it;
+                if (now - cl.ms > 15000) break;
+                const bool yell = cl.type == w3n::Chat::Yell || cl.type == w3n::Chat::MonsterYell;
+                const bool whisperOut = cl.type == w3n::Chat::WhisperInform;
+                if (cl.type != w3n::Chat::Say && !yell && cl.type != w3n::Chat::Party && cl.type != w3n::Chat::MonsterSay && cl.type != w3n::Chat::Emote &&
+                    cl.type != w3n::Chat::Whisper && !whisperOut)
+                    continue;
+                // the speaker: our whisper ("To [X]: ...") is said by us, whatever guid the line carries
+                const uint64_t speaker = whisperOut ? g.selfGuid() : cl.sender;
+                if (!speaker || cl.text.empty()) continue;
+                const uint32_t life = std::min<uint32_t>(15000, 8000 + 60u * (uint32_t)cl.text.size() + (yell ? 2000u : 0u));
+                if (now - cl.ms >= life) continue;
+                if (!done.insert(speaker).second) continue;   // an older line of a speaker that has a newer one
+                const WorldObject* so = g.objects.find(speaker);
+                if (!so || !so->hasPos) continue;
+                if (so->self && !in.selfVisible) {   // first person: pinned low in the middle
+                    bubs.push_back({0.0f, (float)(kHudW / 2), 0.0f, &cl, life - (now - cl.ms), life, true});
+                    continue;
+                }
+                float p[3];
+                so->positionAt(now, p);
+                const float dx = p[0] - mv.x, dy = p[1] - mv.y, dist = sqrtf(dx * dx + dy * dy);
+                if (dist > (yell ? 60.0f : 35.0f)) continue;
+                float scale = so->fieldF(w3n::UF::OBJECT_SCALE_X);
+                if (!(scale > 0.05f && scale < 20.0f)) scale = 1.0f;
+                float head[3] = {p[0], p[1], p[2] + 2.0f * scale + 0.35f}, sx, sy;
+                if (!hudProject(in, head, &sx, &sy)) continue;
+                if (sx < -60 || sx > kHudW + 60 || sy < 20 || sy > kHudH + 10) continue;
+                bubs.push_back({dist, sx, sy, &cl, life - (now - cl.ms), life, false});
+            }
+            std::sort(bubs.begin(), bubs.end(), [](const Bub& a, const Bub& b) { return a.dist > b.dist; });
+            const int savedFade = l.fade;
+            for (const Bub& b : bubs) {
+                const w3n::ChatLine& cl = *b.line;
+                uint32_t tc = hudRgba(255, 255, 255);
+                if (cl.type == w3n::Chat::Yell || cl.type == w3n::Chat::MonsterYell) tc = hudRgba(255, 70, 70);
+                else if (cl.type == w3n::Chat::Party) tc = hudRgba(150, 190, 255);
+                else if (cl.type == w3n::Chat::Emote) tc = hudRgba(255, 150, 60);
+                else if (cl.type == w3n::Chat::Whisper || cl.type == w3n::Chat::WhisperInform) tc = hudRgba(255, 128, 255);   // 6.89
+                std::vector<std::string> lines = HudList::wrap(ascii(w3n::stripWowCodes(cl.text)), 150);   // 6.91: links show as [Name]
+                if (lines.size() > 5) { lines.resize(5); lines.back() = HudList::fit(lines.back() + "...", 150); }
+                int tw = 0;
+                for (const std::string& s : lines) tw = std::max(tw, HudList::width(s));
+                const int lh = HudList::lineHeight();
+                const int bw = tw + 14, bh = (int)lines.size() * lh + 9;
+                int bx = (int)b.sx - bw / 2;
+                bx = std::max(2, std::min(kHudW - bw - 2, bx));
+                const int by = b.pinned ? kHudH - 64 - bh : std::max(2, (int)b.sy - 30 - bh);   // above the name plate, a gap for the tail (pinned: low in the middle, over the cast bar)
+                l.fade = b.left < 2000 ? savedFade * (int)b.left / 2000 : savedFade;
+                const uint32_t edge = hudRgba(215, 215, 215, 235), body = hudRgba(8, 8, 10, 215);
+                // rounded: the edge as a frame with cut corners, the body inside
+                l.rect(bx + 3, by, bw - 6, 1, edge);
+                l.rect(bx + 3, by + bh - 1, bw - 6, 1, edge);
+                l.rect(bx, by + 3, 1, bh - 6, edge);
+                l.rect(bx + bw - 1, by + 3, 1, bh - 6, edge);
+                l.rect(bx + 1, by + 1, 2, 2, edge);   // the four corner steps
+                l.rect(bx + bw - 3, by + 1, 2, 2, edge);
+                l.rect(bx + 1, by + bh - 3, 2, 2, edge);
+                l.rect(bx + bw - 3, by + bh - 3, 2, 2, edge);
+                l.rect(bx + 3, by + 1, bw - 6, bh - 2, body);
+                l.rect(bx + 1, by + 3, bw - 2, bh - 6, body);
+                l.rect(bx + 2, by + 2, bw - 4, bh - 4, body);
+                if (!b.pinned) {
+                    const int tx = std::max(bx + 8, std::min(bx + bw - 12, (int)b.sx - 3));   // the tail points at the speaker
+                    const int ty = by + bh;
+                    l.rect(tx, ty - 1, 7, 1, body);
+                    l.rect(tx, ty, 1, 1, edge); l.rect(tx + 1, ty, 5, 1, body); l.rect(tx + 6, ty, 1, 1, edge);
+                    l.rect(tx + 1, ty + 1, 1, 1, edge); l.rect(tx + 2, ty + 1, 3, 1, body); l.rect(tx + 5, ty + 1, 1, 1, edge);
+                    l.rect(tx + 2, ty + 2, 1, 1, edge); l.rect(tx + 3, ty + 2, 1, 1, body); l.rect(tx + 4, ty + 2, 1, 1, edge);
+                    l.rect(tx + 3, ty + 3, 1, 1, edge);
+                }
+                for (size_t k = 0; k < lines.size(); ++k) l.textCentered(bx + bw / 2, by + 4 + (int)k * lh, lines[k], tc, true);
+            }
+            l.fade = savedFade;
         }
         // a game object the interact button would use (stage 5.18): its name and the prompt
         if (in.pad && in.pad->soft) {
@@ -724,21 +817,25 @@ void hudBuildGame(HudList& l, const HudInput& in) {
         // (the target of the target is on the touch screen, Combat tab)
     }
 
-    // ---- quest tracker (stage 5.14): under the minimap like the original's quest watch - unfinished quests first
-    if (in.questTracker) {
+    // ---- quest tracker (stage 5.14, 6.63): the followed quests under the minimap like the original's quest watch (up to five,
+    // each with the colour its area has on the map)
+    if (in.questTracker && in.followed) {
         std::vector<w3n::QuestLogEntry> log = g.questLog();
-        std::stable_sort(log.begin(), log.end(), [](const w3n::QuestLogEntry& a, const w3n::QuestLogEntry& b) {
-            return (a.complete || a.failed) < (b.complete || b.failed);
-        });
-        const int x = kHudW - 142, yMax = 170;
-        int y = 132, shown = 0;
-        for (const w3n::QuestLogEntry& e : log) {
+        const int x = kHudW - 142, yMax = 196;
+        int y = 132, shown = 0, slot = 0;
+        for (uint32_t qid : *in.followed) {
+            const w3n::QuestLogEntry* ep = nullptr;
+            for (const w3n::QuestLogEntry& e : log) if (e.id == qid) { ep = &e; break; }
+            const int mySlot = slot++;
+            if (!ep) continue;
+            const w3n::QuestLogEntry& e = *ep;
             std::vector<std::string> lines = g.questProgressKnown(e);
-            if (y + 10 * (1 + (int)std::min<size_t>(lines.size(), 3)) > yMax || shown >= 3) break;
+            if (y + 10 * (1 + (int)std::min<size_t>(lines.size(), 3)) > yMax) break;
             std::string t = ascii(g.questTitleKnown(e.id));
-            while (t.size() > 1 && HudList::width(t) > 138) t.pop_back();
-            l.rect(x - 2, y, HudList::width(t) + 4, 10, hudRgba(0, 0, 0, 80));   // a faint strip: readable over the sky
-            l.text(x, y, t, e.failed ? hudRgba(255, 70, 70) : e.complete ? hudRgba(80, 230, 80) : kGold);
+            while (t.size() > 1 && HudList::width(t) > 130) t.pop_back();
+            l.rect(x - 2, y, HudList::width(t) + 14, 10, hudRgba(0, 0, 0, 80));   // a faint strip: readable over the sky
+            l.rect(x, y + 2, 6, 6, questSlotColor(mySlot));
+            l.text(x + 9, y, t, e.failed ? hudRgba(255, 70, 70) : e.complete ? hudRgba(80, 230, 80) : kGold);
             y += 10;
             int k = 0;
             for (const std::string& line : lines) {
@@ -754,6 +851,7 @@ void hudBuildGame(HudList& l, const HudInput& in) {
             y += 3;
             ++shown;
         }
+        (void)shown;
     }
 
     // ---- death (stage 5.10): what to do, in the middle of the screen like the original's dialog
@@ -1011,8 +1109,12 @@ void hudBuildGame(HudList& l, const HudInput& in) {
         char f[16];
         snprintf(f, sizeof f, "%.0f FPS  ", in.fps);
         // stage 6.12: how many objects are fading in / out right now (0 standing still; > 0 while things appear)
-        char fd[16] = "";
+        char fd[40] = "";
         if (in.fading >= 0) snprintf(fd, sizeof fd, "  ~%d", in.fading);
+        if (in.drawDistYd > 0) {   // 6.72: "  320yd 64%" - the shortened draw distance and how much detail is left
+            const size_t n = strlen(fd);
+            snprintf(fd + n, sizeof fd - n, "  %dyd %d%%", in.drawDistYd, in.detailPct);
+        }
         const int x0 = kHudW / 2 - w / 2 - HudList::width(fd) / 2;
         const int fw = l.text(x0, y, f, kWhite);
         const int pw = l.text(x0 + fw, y, t + strlen(f), pc);

@@ -1,7 +1,9 @@
 // w3dconv — offline converter: WoW 1.12 loose files -> W3DP pack for the 3DS client.
 #include "conv.h"
+#include "casc_source.h"
 
 #include <chrono>
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -26,7 +28,11 @@ static void usage() {
         "  --model-tex N         max model texture size (default 64)\n"
         "  --format etc1|rgb565  texture format (default etc1; alpha -> etc1a4/rgba4)\n"
         "  --max-tris N          triangle budget per model (default 400)\n"
-        "  --draw-error YD       how far a simplified model may move from its exact shape (default 0.15; 0 = 2% of its size)\n"
+        "  --draw-error YD       how far a simplified model's floors may move from their exact shape (default 0.15; 0 = 2% of its size)\n"
+        "  --wall-error YD       the same for its walls, roofs and the rest (default 0.5; 0 = as --draw-error)\n"
+        "  --wmo-lod-error A,B   yards a building's LOD 1 / 2 may lie from its full mesh (default 0.2,0.6; 0 = by share as models)\n"
+        "  --wmo-lod-lock        a building's LOD levels keep every open border (no gap between pieces, little simplification)\n"
+        "  --wmo-chunk YD        cut outside WMO groups wider than 1.5x this into pieces of about this size (default 64; 0 = off)\n"
         "  --max-doodads N       limit doodad placements (default all; synthetic 600)\n"
         "  --synthetic-variety N with --synthetic: N distinct models and textures per tile (streaming tests)\n"
         "  --no-wmo              skip buildings (WMO)\n"
@@ -40,9 +46,12 @@ static void usage() {
         "  --no-walls            COLL with floors only (walking passes through walls)\n"
         "  --no-doodad-coll      no collision of doodads (fences, tree trunks, model bridges)\n"
         "  --no-fx               no particle emitters and lamp glows on doodads (stage 5.32)\n"
+        "  --no-portals          WMO interiors without portals (as before 6.42: every interior group near the camera is drawn)\n"
+        "  --no-uv-anim          doodad textures stand still (no M2 texture transforms: lava, falls, portals; 6.41)\n"
         "  --no-spell-fx         no spell effects with the creatures (stage 5.33)\n"
         "  --explain-spell L     print the Spell -> SpellVisual -> Kit -> EffectName chain of these spell ids (comma list)\n"
         "  --spell-fx            only the spell effects into -o pack (normally with the creatures / --all)\n"
+        "  --skybox              only the sky models (LightSkybox.dbc) into -o pack (normally with the creatures / --all)\n"
         "  --doodad-coll-tris N  collision triangle budget per doodad model (default 0 = all; 96 was the limit before 6.18)\n"
         "  --no-exact-ground     no GRND entries (the ground to walk on = the old 129x129 grid of the drawn corners)\n"
         "  --no-terrain-centers  do not draw the centre vertices (cheaper; the walker then sinks up to ~1 yd on rough ground)\n"
@@ -95,12 +104,13 @@ int main(int argc, char** argv) {
     w3d::installCrashGuard();
     Options o;
     std::string info;
-    bool textsOnly = false, uiMode = false, soundMode = false, spellFxMode = false;
+    bool textsOnly = false, uiMode = false, soundMode = false, spellFxMode = false, skyboxMode = false;
     std::vector<uint32_t> explainIds;
     SoundOptions so;
     UiOptions uo;
     AllOptions ao;
     bool allMode = false;
+    std::string cascDir, wdtNames;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         auto next = [&]() -> const char* {
@@ -108,6 +118,8 @@ int main(int argc, char** argv) {
             return argv[++i];
         };
         if (a == "--data") o.dataDir = next();
+        else if (a == "--casc") cascDir = next();
+        else if (a == "--wdt-names") wdtNames = next();
         else if (a == "--map") o.map = next();
         else if (a == "--tile") {
             o.tileX0 = o.tileX1 = std::atoi(next());
@@ -142,11 +154,25 @@ int main(int argc, char** argv) {
         else if (a == "--wmo-tex") o.wmoTex = std::atoi(next());
         else if (a == "--wmo-tris") o.wmoGroupTris = std::atoi(next());
         else if (a == "--draw-error") o.drawMaxError = (float)std::atof(next());
+        else if (a == "--wall-error") o.drawWallError = (float)std::atof(next());
+        else if (a == "--wmo-lod-lock") o.wmoLodLockBorder = true;
+        else if (a == "--wmo-chunk") o.wmoChunk = (float)std::atof(next());
+        else if (a == "--wmo-chunk-min") o.wmoChunkMinTris = std::max(1, std::atoi(next()));
+        else if (a == "--wmo-lod-error") {
+            float e1 = 0, e2 = 0;
+            const char* v = next();
+            const int got = std::sscanf(v, "%f,%f", &e1, &e2);
+            o.wmoLodError[0] = got >= 1 ? std::max(0.0f, e1) : 0.0f;
+            o.wmoLodError[1] = got >= 2 ? std::max(o.wmoLodError[0], e2) : 3.0f * o.wmoLodError[0];
+        }
         else if (a == "--dump-placements") o.dumpPlacements = next();
+        else if (a == "--dump-wmo") o.dumpWmo = next();
         else if (a == "--no-floors") o.noFloors = true;
         else if (a == "--no-walls") o.noWalls = true;
         else if (a == "--no-doodad-coll") o.noDoodadColl = true;
         else if (a == "--no-fx") o.noFx = true;
+        else if (a == "--no-uv-anim") o.noUvAnim = true;
+        else if (a == "--no-portals") o.noPortals = true;
         else if (a == "--no-spell-fx") o.spellFx = false;
         else if (a == "--doodad-coll-tris") o.doodadCollTris = std::atoi(next());
         else if (a == "--no-exact-ground") o.exactGround = false;
@@ -200,6 +226,7 @@ int main(int argc, char** argv) {
         else if (a == "--ui") uiMode = true;
         else if (a == "--sound") soundMode = true;
         else if (a == "--spell-fx") spellFxMode = true;
+        else if (a == "--skybox") skyboxMode = true;
         else if (a == "--explain-spell") {   // 5.35f: comma list of Spell.dbc ids
             for (const char* q = next(); *q;) {
                 char* e = nullptr;
@@ -241,9 +268,14 @@ int main(int argc, char** argv) {
     if (o.synthetic) {
         if (o.out == "test.w3dp") o.out = "synth.w3dp";
     } else {
-        if (o.dataDir.empty()) { usage(); return 1; }
+        if (o.dataDir.empty() && cascDir.empty()) { usage(); return 1; }
+        if (!cascDir.empty()) {   // WoW Forever: the modern client's CASC storage (files by FileDataID)
+            std::string cerr_;
+            progress(true, "opening the WoW Forever client in %s ...", cascDir.c_str());
+            if (!openForever(data, cascDir, wdtNames, cerr_)) { std::fprintf(stderr, "%s\n", cerr_.c_str()); return 1; }
+        } else
         progress(true, "opening the game data in %s ...", o.dataDir.c_str());
-        if (!data.open(o.dataDir)) { std::fprintf(stderr, "no files under %s\n", o.dataDir.c_str()); return 1; }
+        if (cascDir.empty() && !data.open(o.dataDir)) { std::fprintf(stderr, "no files under %s\n", o.dataDir.c_str()); return 1; }
     }
     auto textDir = [&]() {
         size_t cut = o.out.find_last_of("\\/");
@@ -270,6 +302,15 @@ int main(int argc, char** argv) {
         std::printf("wrote %s\n", o.out.c_str());
         return 0;
     }
+    if (skyboxMode) {   // 6.61: a pack with the sky models only (tests; --all puts them into the pool)
+        if (o.synthetic) { std::fputs("--skybox needs --data\n", stderr); return 1; }
+        PackWriter pack;
+        ConvStats st;
+        if (!convertSkyboxes(o, data, pack, st)) return 4;
+        if (!pack.write(o.out)) { std::fprintf(stderr, "cannot write %s\n", o.out.c_str()); return 3; }
+        std::printf("wrote %s\n", o.out.c_str());
+        return 0;
+    }
     if (soundMode) {
         if (o.synthetic) { std::fputs("--sound needs --data\n", stderr); return 1; }
         so.outDir = o.out == "test.w3dp" ? std::string("sound") : o.out;
@@ -288,10 +329,12 @@ int main(int argc, char** argv) {
         exportFactions(data, textDir() + "factions.txt", o.verbose);
         exportTalents(data, textDir() + "talents.txt", o.verbose);
         exportSkills(data, textDir() + "skills.txt", o.verbose);
+        exportRecipes(data, textDir() + "recipes.txt", o.verbose);
         exportTaxi(data, textDir() + "taxi.txt", o.verbose);
         exportLocks(data, textDir() + "locks.txt", o.verbose);
         exportAreaTriggers(data, textDir() + "areatriggers.txt", o.verbose);
         exportEmotes(data, textDir() + "emotes.txt", o.verbose);
+        exportSky(data, textDir() + "sky.txt", o.verbose);
         exportGlueTexts(data, textDir() + "glue.txt", o.verbose);
         exportTransports(data, textDir() + "transports.txt", o.verbose);
         double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -305,10 +348,12 @@ int main(int argc, char** argv) {
         bool facts = exportFactions(data, textDir() + "factions.txt", o.verbose);
         exportTalents(data, textDir() + "talents.txt", o.verbose);
         exportSkills(data, textDir() + "skills.txt", o.verbose);
+        exportRecipes(data, textDir() + "recipes.txt", o.verbose);
         exportTaxi(data, textDir() + "taxi.txt", o.verbose);
         exportLocks(data, textDir() + "locks.txt", o.verbose);
         exportAreaTriggers(data, textDir() + "areatriggers.txt", o.verbose);
         exportEmotes(data, textDir() + "emotes.txt", o.verbose);
+        exportSky(data, textDir() + "sky.txt", o.verbose);
         exportGlueTexts(data, textDir() + "glue.txt", o.verbose);
         exportTransports(data, textDir() + "transports.txt", o.verbose);
         return spells || facts ? 0 : 4;
@@ -378,6 +423,7 @@ int main(int argc, char** argv) {
         convertCreatures(o, data, pack, st);
         if (o.players) convertGlueScenes(o, data, pack, st);   // stage 5.29: the login / character screen scenes
         if (o.spellFx) convertSpellEffects(o, data, pack, st);   // stage 5.33
+        convertSkyboxes(o, data, pack, st);   // 6.61
     }
     if (o.creatures && !o.synthetic) {   // the 3DS action bar reads spells.txt next to the pack, the reactions factions.txt
         exportSpellNames(data, textDir() + "spells.txt", o.verbose);
@@ -385,10 +431,12 @@ int main(int argc, char** argv) {
         exportFactions(data, textDir() + "factions.txt", o.verbose);
         exportTalents(data, textDir() + "talents.txt", o.verbose);
         exportSkills(data, textDir() + "skills.txt", o.verbose);
+        exportRecipes(data, textDir() + "recipes.txt", o.verbose);
         exportTaxi(data, textDir() + "taxi.txt", o.verbose);
         exportLocks(data, textDir() + "locks.txt", o.verbose);
         exportAreaTriggers(data, textDir() + "areatriggers.txt", o.verbose);
         exportEmotes(data, textDir() + "emotes.txt", o.verbose);
+        exportSky(data, textDir() + "sky.txt", o.verbose);
         exportGlueTexts(data, textDir() + "glue.txt", o.verbose);
     }
     if ((o.creatures || o.transports) && !o.synthetic) exportTransports(data, textDir() + "transports.txt", o.verbose);
@@ -407,6 +455,11 @@ int main(int argc, char** argv) {
     std::printf("  draw error (6.19b): %.2f yd; %zu models kept more triangles than their budget to stay on their collision\n", o.drawMaxError, g_errorBoundModels);
     std::printf("  model LODs (6.12): %zu submeshes, level 1 for %zu (%zu of %zu tris), level 2 for %zu (%zu tris), %zu levels refused (a part would vanish)\n", (size_t)g_lodStats.subs,
                 (size_t)g_lodStats.lod1, (size_t)g_lodStats.tris1, (size_t)g_lodStats.tris0, (size_t)g_lodStats.lod2, (size_t)g_lodStats.tris2, (size_t)g_lodStats.rejected);
+    std::printf("  wall error (6.47): %.2f yd; building LOD errors %.2f / %.2f yd, borders %s\n", o.drawWallError, o.wmoLodError[0],
+                o.wmoLodError[1], o.wmoLodLockBorder ? "locked" : "free (6.47b)");
+    std::printf("  big WMO groups (6.48): %zu outside groups cut into %zu pieces of about %.0f yd\n", st.wmoGroupsCut, st.wmoChunks, o.wmoChunk);
+    printSimplifyReport();
+    printHeavyGroups(15);
     std::printf("  terrain: %zu verts, %zu tris (grid %d); water: %zu tris\n", st.terrainVerts, st.terrainTris, o.grid,
                 st.waterTris);
     std::printf("  ground (6.18a): GRND for %zu tiles, %.1f MB%s\n", st.groundTiles, st.groundBytes / 1048576.0,
@@ -421,6 +474,13 @@ int main(int argc, char** argv) {
                     "             %zu group instances, %zu WMO tris, %zu doodads inside buildings\n",
                     st.wmoPlacements, st.wmoOk, st.wmoFailed, st.wmoGroups, st.wmoGroupsFailed, st.wmoGroupsSkipped,
                     st.wmoPlacedGroups, st.wmoTris, st.wmoDoodads);
+    if (st.doodadsPosed)
+        std::printf("  posed doodads (6.45): %zu models with a skeleton stand in their Stand pose (roosts' gryphons / wind riders)\n", st.doodadsPosed);
+    if (g_m2TracksFixed)
+        std::printf("  M2 key ranges (6.43): %zu bone tracks of 1.12 models read again (held poses / closing keys WoWee dropped)\n",
+                    (size_t)g_m2TracksFixed);
+    if (st.wmoPortals)
+        std::printf("  portals (6.42): %zu portal sides in %zu groups\n", st.wmoPortals, st.wmoPortalGroups);
     if (st.collSource || st.m2CollSource)
         std::printf("  floors: %zu collision triangles in buildings, %zu walkable, %zu walls; doodads: %zu models with\n"
                     "          collision (%zu simplified), %zu placements, %zu triangles (%zu walkable, %zu walls); %zu pieces after clipping\n"
@@ -438,6 +498,8 @@ int main(int argc, char** argv) {
                     st.displaysOk, st.displaysFailed, st.creatureModelsOk, st.creatureModelsFailed, st.creatureTris,
                     st.creatureBones, st.creaturePalettes, st.creatureSeqs, st.creatureKeyBytes / 1048576.0,
                     st.creatureLossyVerts, st.creatureSrcVerts);
+    if (o.creatures) std::printf("  creature sizes (6.60): %zu of %zu displays take the model's own scale (CreatureModelData.ModelScale) on top of the display's\n",
+                                 st.displaysModelScaled, st.displaysOk);
     if (o.creatures) std::printf("  npc equipment: %zu humanoid displays with geometry from their items (robes, boots, gloves...)\n",
                                  st.npcEquipGeosets);
     if (o.players)
@@ -448,6 +510,7 @@ int main(int argc, char** argv) {
         std::printf("  items: %zu displays, %zu body layers (%.1f MB), %zu models (%zu failed, %zu tris), %zu helmets, %zu cloaks\n",
                     st.itemDisplays, st.itemLayers, st.itemLayerBytes / 1048576.0, st.itemModels, st.itemModelsFailed,
                     st.itemModelTris, st.itemHelms, st.itemCapes);
+    std::printf("  moving textures: %zu texture transforms baked into doodad models\n", st.uvAnims);
     std::printf("  winding: %zu M2 and %zu WMO submeshes flipped to match their normals\n", st.m2SubsFlipped, st.wmoSubsFlipped);
     std::printf("  effects: %zu models with %zu particle emitters and %zu glow sprites (%zu animated), %zu emitters dropped (no rate / life)\n", st.fxModels, st.fxEmitters, st.fxGlows, st.fxAnimated, st.fxEmittersDropped);
     if (st.duplicatesSkipped) std::printf("  %zu duplicate placements skipped (same uniqueId listed by several tiles)\n", st.duplicatesSkipped);

@@ -183,16 +183,9 @@ MapView Assets::view(const W3dUiMap& m) const {
     return v;
 }
 
-MapView Assets::zoneAt(uint32_t mapId, float x, float y) const {
-    const W3dUiMap* best = nullptr;
-    float bestArea = 0;
-    for (const W3dUiMap& m : maps_) {
-        if (m.mapId != mapId || !m.areaId) continue;
-        if (y > m.left || y < m.right || x > m.top || x < m.bottom) continue;
-        float area = (m.left - m.right) * (m.top - m.bottom);
-        if (!best || area < bestArea) { best = &m; bestArea = area; }
-    }
-    return best ? view(*best) : continent(mapId);
+MapView Assets::zoneAt(uint32_t mapId, float x, float y, uint32_t zone) const {
+    const int i = w3dUiPickZoneMap(maps_.data(), maps_.size(), mapId, zone, x, y);
+    return i >= 0 ? view(maps_[(size_t)i]) : continent(mapId);
 }
 
 Image Assets::loadingScreen(uint32_t mapId) const {
@@ -205,6 +198,19 @@ Image Assets::loadingScreen(uint32_t mapId) const {
             return im;
         }
     return im;
+}
+
+MapView Assets::zoneByArea(uint32_t areaId) const {
+    if (!areaId) return MapView();
+    for (const W3dUiMap& m : maps_)
+        if (m.areaId == areaId && m.mapId != 0xFFFFFFFFu) return view(m);
+    return MapView();
+}
+
+MapView Assets::world() const {
+    for (const W3dUiMap& m : maps_)
+        if (m.mapId == 0xFFFFFFFFu) return view(m);
+    return MapView();
 }
 
 MapView Assets::continent(uint32_t mapId) const {

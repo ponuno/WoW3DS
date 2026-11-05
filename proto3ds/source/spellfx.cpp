@@ -172,6 +172,38 @@ EventResult Director::event(const Event& ev, uint32_t nowMs, const float cam[3],
     return stats_.started != startedBefore ? kEvStarted : kEvNothing;
 }
 
+bool Director::startedMissile(uint64_t caster, uint32_t nowMs) const {
+    for (const Active& a : active_)
+        if (a.stage == W3D_SFX_MISSILE && a.unit == caster && a.bornMs == nowMs) return true;
+    return false;
+}
+
+bool Director::shoot(uint64_t caster, uint64_t target, uint16_t effect, uint32_t nowMs, const float cam[3], const Resolver& where) {
+    const W3dSpellEffect* ef = table_ ? table_->effect(effect) : nullptr;
+    if (!ef || !caster || !target || caster == target) return false;
+    float cp[3], tp[3], yaw = 0;
+    if (!where(caster, W3D_SLOT_CHEST, cp, &yaw) || !where(target, W3D_SLOT_CHEST, tp, &yaw)) return false;
+    const float cx = cp[0] - cam[0], cy = cp[1] - cam[1], cz = cp[2] - cam[2];
+    if (cx * cx + cy * cy + cz * cz > kRange * kRange) { ++stats_.skippedFar; return false; }
+    Active a{};
+    a.effect = effect;
+    a.stage = W3D_SFX_MISSILE;
+    a.slot = W3D_SLOT_NONE;
+    a.unit = caster;
+    a.target = target;
+    a.startMs = nowMs;
+    a.endMs = nowMs + 4000;
+    if (!where(caster, W3D_SLOT_RHAND, a.pos, &yaw)) memcpy(a.pos, cp, sizeof cp);
+    const float d[3] = {tp[0] - a.pos[0], tp[1] - a.pos[1], tp[2] - a.pos[2]};
+    const float dist = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    a.speed = dist / std::clamp(dist / 35.0f, 0.12f, 0.8f);
+    a.scale = ef->scale;
+    a.impact[0] = a.impact[1] = W3D_SFX_NONE;
+    if (!add(a)) return false;
+    ++stats_.missiles;
+    return true;
+}
+
 void Director::update(uint32_t nowMs, const Resolver& where, std::vector<Placed>& out) {
     out.clear();
     std::vector<Active> arrivals;

@@ -16,6 +16,7 @@ enum : uint16_t {
     CMSG_LOGOUT_REQUEST = 0x04B, SMSG_LOGOUT_RESPONSE = 0x04C, SMSG_LOGOUT_COMPLETE = 0x04D, CMSG_LOGOUT_CANCEL = 0x04E,
     CMSG_PING = 0x1DC, SMSG_PONG = 0x1DD, SMSG_AUTH_CHALLENGE = 0x1EC, CMSG_AUTH_SESSION = 0x1ED,
     SMSG_AUTH_RESPONSE = 0x1EE, SMSG_LOGIN_VERIFY_WORLD = 0x236, SMSG_WARDEN_DATA = 0x2E6,
+    SMSG_TRIGGER_CINEMATIC = 0x0FA, CMSG_COMPLETE_CINEMATIC = 0x0FC,
 };
 const uint8_t AUTH_OK = 0x0C, AUTH_WAIT_QUEUE = 0x1B;
 
@@ -29,6 +30,7 @@ bool pump(TcpSocket& s, Bytes& buf) {
 }
 
 const uint64_t kTimeoutMs = 15000;
+const uint64_t kConnectMs = 15000;   // 6.55: the TCP connect
 
 }  // namespace
 
@@ -52,9 +54,14 @@ bool AuthClient::start(const std::string& hostPort, const std::string& account, 
     uint16_t port;
     if (!splitHostPort(hostPort, 3724, host, port)) { fail("bad server address"); return false; }
     t0_ = nowMs();
-    if (!sock_.connect(host, port, err_)) { state_ = State::Failed; return false; }
-    t_.authConnect = (double)(nowMs() - t0_);
+    if (!sock_.beginConnect(host, port, err_)) { state_ = State::Failed; return false; }
+    state_ = State::Connecting;   // 6.55: update() waits for it
+    deadline_ = nowMs() + kConnectMs;
+    return true;
+}
 
+bool AuthClient::sendChallenge() {
+    t_.authConnect = (double)(nowMs() - t0_);
     // CMD_AUTH_LOGON_CHALLENGE
     Writer w;
     w.u8(0x00);
@@ -78,6 +85,16 @@ bool AuthClient::start(const std::string& hostPort, const std::string& account, 
 
 void AuthClient::update() {
     if (state_ == State::Idle || state_ == State::Done || state_ == State::Failed) return;
+    if (state_ == State::Connecting) {   // 6.55
+        const int r = sock_.pollConnect(err_);
+        if (r < 0) { fail(err_); return; }
+        if (r == 0) {
+            if (nowMs() > deadline_) fail("the login server does not answer (" + std::to_string(kConnectMs / 1000) + " s)");
+            return;
+        }
+        sendChallenge();
+        return;
+    }
     bool alive = pump(sock_, buf_);
     for (;;) {
         bool progressed = false;
@@ -233,10 +250,9 @@ bool WorldClient::start(const std::string& hostPort, const std::string& account,
     uint16_t port;
     if (!splitHostPort(hostPort, 8085, host, port)) { fail("bad realm address"); return false; }
     t0_ = nowMs();
-    if (!sock_.connect(host, port, err_)) { state_ = State::Failed; return false; }
-    t_.worldConnect = (double)(nowMs() - t0_);
-    state_ = State::WaitChallenge;
-    deadline_ = nowMs() + kTimeoutMs;
+    if (!sock_.beginConnect(host, port, err_)) { state_ = State::Failed; return false; }
+    state_ = State::Connecting;   // 6.55: update() waits for it
+    deadline_ = nowMs() + kConnectMs;
     return true;
 }
 
@@ -267,6 +283,9 @@ void WorldClient::createCharacter(const CharCreateInfo& c) {
     w.cstr(c.name);
     w.u8(c.race); w.u8(c.cls); w.u8(c.gender);
     w.u8(c.skin); w.u8(c.face); w.u8(c.hairStyle); w.u8(c.hairColor); w.u8(c.facialHair); w.u8(c.outfit);
+    // 6.99: the 1.12.1 client (and Turtle WoW's) sends four more zero bytes after the outfit; servers that check the length
+    // (Turtle WoW / OctoWoW) drop a shorter packet without a word - "the server did not answer" (as WoWee's CharCreatePacket)
+    w.u32(0);
     createResult_ = -1;
     send(CMSG_CHAR_CREATE, w.b);
     deadline_ = nowMs() + kTimeoutMs;
@@ -310,6 +329,18 @@ bool WorldClient::cancelLogout() {
 
 void WorldClient::update() {
     if (state_ == State::Idle || state_ == State::Done || state_ == State::Failed) return;
+    if (state_ == State::Connecting) {   // 6.55
+        const int r = sock_.pollConnect(err_);
+        if (r < 0) { fail(err_); return; }
+        if (r == 0) {
+            if (nowMs() > deadline_) fail("the realm does not answer (" + std::to_string(kConnectMs / 1000) + " s)");
+            return;
+        }
+        t_.worldConnect = (double)(nowMs() - t0_);
+        state_ = State::WaitChallenge;
+        deadline_ = nowMs() + kTimeoutMs;
+        return;
+    }
     bool alive = pump(sock_, inBuf_);
     // Frame packets: server header = uint16 size (BE, includes opcode) + uint16 opcode,
     // the 4 header bytes encrypted once the session is authenticated.
@@ -328,6 +359,7 @@ void WorldClient::update() {
         inBuf_.erase(inBuf_.begin(), inBuf_.begin() + 2 + (long)size);
         headerDecrypted_ = 0;
         bytesIn_ += 2 + size;
+        lastRecvMs_ = nowMs();
         ++packetsIn_;
         opCounts_[p.opcode]++;
         const State before = state_;
@@ -346,13 +378,26 @@ void WorldClient::update() {
         send(CMSG_PING, w.b);
         lastPing_ = pingSent_ = now;
     }
-    if (!alive) { fail(state_ == State::LoggingOut ? "logged out" : "server closed the connection"); return; }
+    if (!alive) {
+        if (state_ == State::LoggingOut) { fail("logged out"); return; }
+        // 6.66: say why - the exact socket error, how long the server had been silent, how many hiccups were ridden out
+        std::string why = sock_.closeReason().empty() ? "server closed the connection" : sock_.closeReason();
+        why += " (silent " + std::to_string(lastRecvMs_ ? (nowMs() - lastRecvMs_) / 1000 : 0) + " s, last ping " +
+               std::to_string(latency_) + " ms, " + std::to_string(sock_.transientErrors()) + " socket hiccups)";
+        fail(why);
+        return;
+    }
     bool waiting = state_ == State::WaitChallenge || state_ == State::WaitAuthResponse ||
                    state_ == State::WaitCharEnum || state_ == State::WaitLogin || state_ == State::LoggingOut;
     if (waiting && now > deadline_) {
         if (state_ == State::LoggingOut) { sock_.close(); state_ = State::Done; }
         else fail("timed out waiting for the world server");
     }
+}
+
+void WorldClient::completeCinematic() {   // 7.04
+    send(CMSG_COMPLETE_CINEMATIC, {});
+    ++cinematicsPlayed_;
 }
 
 void WorldClient::handle(Packet& p) {
@@ -379,7 +424,7 @@ void WorldClient::handle(Packet& p) {
             Writer ad;
             for (const char* a : addons) { ad.cstr(a); ad.u8(1); ad.u32(0x4C1C776D); ad.u32(0); }
             Writer w;
-            w.u32(ver_.build);
+            w.u32(ver_.worldBuild ? ver_.worldBuild : ver_.build);
             w.u32(0);   // server id
             w.cstr(account_);
             w.u32(clientSeed);
@@ -451,6 +496,21 @@ void WorldClient::handle(Packet& p) {
             state_ = State::InWorld;
             lastPing_ = nowMs();
             return;
+        case SMSG_TRIGGER_CINEMATIC:
+            // 6.86: a new character's intro. We do not play it: say it is over at once. Until CMSG_COMPLETE_CINEMATIC the server
+            // (vmangos Player::UpdateCinematic) keeps the player's view on a camera far away along the intro's path, so the
+            // creatures next to the player behave as if he were not there: they evade and heal at once when attacked. Relogging
+            // "fixed" it because the intro only plays on the first login.
+            // 7.04: a client that plays intros (playCinematics, the 3DS with cinematics.txt) takes the sequence id and says
+            // it is over itself (completeCinematic) - when the flight ends or is skipped
+            if (playCinematics && p.data.size() >= 4) {
+                cinematicPending_ = p.data[0] | (p.data[1] << 8) | (p.data[2] << 16) | ((uint32_t)p.data[3] << 24);
+                if (!cinematicPending_) cinematicPending_ = ~0u;
+                break;
+            }
+            send(CMSG_COMPLETE_CINEMATIC, {});
+            ++cinematicsSkipped_;
+            break;   // passed on to onPacket too
         case SMSG_WARDEN_DATA:
             wardenSeen_ = true;
             break;   // passed on to onPacket; deliberately not answered
@@ -492,8 +552,8 @@ void WorldClient::handle(Packet& p) {
 
 // ================================================================== text
 const char* raceName(uint8_t r) {
-    static const char* n[] = {"?", "Human", "Orc", "Dwarf", "Night Elf", "Undead", "Tauren", "Gnome", "Troll"};
-    return r < 9 ? n[r] : "?";
+    static const char* n[] = {"?", "Human", "Orc", "Dwarf", "Night Elf", "Undead", "Tauren", "Gnome", "Troll", "Goblin", "High Elf"};
+    return r < 11 ? n[r] : "?";
 }
 
 const char* className(uint8_t c) {
@@ -509,7 +569,7 @@ const char* authResultText(uint8_t code) {
         case 0x06: return "account already online";
         case 0x07: return "no game time";
         case 0x08: return "server busy";
-        case 0x09: return "client version not accepted (build 5875)";
+        case 0x09: return "client version not accepted (try the other Protocol setting: 1.12 / Turtle 1.18)";
         case 0x0A: return "client needs an update";
         case 0x0C: return "account suspended";
         case 0x0D: return "access denied";

@@ -35,10 +35,13 @@ def sref(t):
     global strings
     off = len(strings); strings += t.encode() + b"\0"; return off
 spells = []
-def spell(i, name, rank, effect=0, trigger=0, attr=0, targets=0, rng=0, implA=0, radius=0, rec=0, cat=0, catRec=0, desc='', tip='', base=0, die=0, dur=0):
+def spell(i, name, rank, effect=0, trigger=0, attr=0, targets=0, rng=0, implA=0, radius=0, rec=0, cat=0, catRec=0, desc='', tip='', base=0, die=0, dur=0, cast=0, dmg=0, attr2=0, eqClass=-1, eqSub=0, eqInv=0, itemType=0, reagent=0):
     r = [0] * 173
     r[0] = i; r[120] = sref(name); r[129] = sref(rank) if rank else 0
     r[61] = effect; r[109] = trigger; r[6] = attr
+    r[18] = cast                                                   # 6.64: CastingTimeIndex
+    r[164] = dmg; r[8] = attr2                                     # 6.87: DmgClass, AttributesEx2
+    r[58] = eqClass & 0xFFFFFFFF; r[59] = eqSub; r[60] = eqInv; r[103] = itemType; r[42] = reagent; r[50] = 1 if reagent else 0   # 6.90
     r[13] = targets; r[36] = rng; r[82] = implA; r[88] = radius   # UI stage 10: Targets, RangeIndex, ImplicitTargetA, radius
     r[19] = rec; r[2] = cat; r[20] = catRec                        # UI stage 12: RecoveryTime, Category, CategoryRecoveryTime
     r[138] = sref(desc) if desc else 0; r[147] = sref(tip) if tip else 0   # 6.20: Description, ToolTip
@@ -63,10 +66,24 @@ spell(6343, "Thunder Clap", "Rank 1", effect=2, implA=36)
 spell(100, "Charge", "Rank 1", effect=2, rec=15000)
 spell(439, "Healing Potion", "", effect=10, cat=4, catRec=120000)
 spell(1784, "Stealth", "Rank 1", effect=2, attr=0x02000000, rec=10000)
+spell(133, "Fireball", "Rank 1", effect=2, rng=4, implA=6, cast=4, dmg=1)     # 6.64: 3.5 s cast
+spell(2060, "Instant Thing", "", effect=2, rng=4, implA=6, cast=1)     # SpellCastTimes row 1 = 0 ms: no @cast line
+# 6.87: auto-attack - a melee ability at the enemy (starts it), one that stops it (Gouge), a hunter's shot and Auto Shot
+# (ranged), an NPC's Shoot (ranged, not learnable), Thunder Clap (melee class but around the caster: does not start it)
+spell(1752, "Sinister Strike", "Rank 1", effect=2, implA=6, dmg=2)
+spell(1776, "Gouge", "Rank 1", effect=2, implA=6, dmg=2, attr=0x100000)
+spell(3044, "Arcane Shot", "Rank 1", effect=2, implA=6, dmg=3, attr=0x2, rng=35)
+spell(75, "Auto Shot", "", effect=2, implA=6, dmg=3, attr=0x2, attr2=0x20)
+spell(6660, "Shoot", "", effect=2, implA=6, dmg=3, attr=0x2)
+spells[[r[0] for r in spells].index(6343)][164] = 2
+# 6.90: recipes - an enchant for boots (armour class 4, inventory type 8 = feet) and a plain item (no requirement)
+spell(7863, "Enchant Boots - Minor Stamina", "", effect=53, eqClass=4, eqInv=1 << 8, reagent=10940)
+spell(2657, "Smelt Copper", "", effect=24, itemType=2840, reagent=2770)
+open(os.path.join(out, "DBFilesClient", "SpellCastTimes.dbc"), "wb").write(dbc(4, [[1, 0, 0, 0], [4, 3500, 0, 0]], b"\0"))
 open(os.path.join(out, "DBFilesClient", "Spell.dbc"), "wb").write(dbc(173, spells, strings))
 open(os.path.join(out, "DBFilesClient", "SpellDuration.dbc"), "wb").write(dbc(4, [[21, 120000, 0, 120000], [5, 15000, 0, 15000]], b"\0"))
 open(os.path.join(out, "DBFilesClient", "SpellRange.dbc"), "wb").write(
-    dbc(3, [[1, 0.0, 0.0], [4, 0.0, 30.0], [5, 0.0, 15.0]], b"\0"))
+    dbc(3, [[1, 0.0, 0.0], [4, 0.0, 30.0], [5, 0.0, 15.0], [35, 8.0, 35.0]], b"\0"))
 open(os.path.join(out, "DBFilesClient", "SpellRadius.dbc"), "wb").write(dbc(4, [[13, 10.0, 0.0, 10.0], [8, 5.0, 0.0, 5.0]], b"\0"))
 # 6.19: SkillLine.dbc (ID, Category, Costs, Name[8] + flags, Description[8] + flags, Icon = 22 fields): Swords (weapon), Mining
 # (profession) with a description, Common (language), and one row with no name that must be skipped
@@ -78,5 +95,6 @@ _rows = []
 for _id, _cat, _name, _desc in ((43, 6, "Swords", ""), (186, 11, "Mining", "Ore\tand\nrock"), (98, 10, "Language: Common", ""), (77, 12, "", "")):
     _rows.append([_id, _cat, 0] + [_s(_name) if _name else 0] + [0] * 7 + [0xFF] + [_s(_desc) if _desc else 0] + [0] * 7 + [0xFF, 1])
 open(os.path.join(out, "DBFilesClient", "SkillLine.dbc"), "wb").write(dbc(22, _rows, _sk))
+# SkillLineAbility: 12 fields (1.12; recipes.txt reads MinSkillLineRank 7, trivial high 10 / low 11)
 open(os.path.join(out, "DBFilesClient", "SkillLineAbility.dbc"), "wb").write(
-    dbc(3, [[1, 26, 78], [2, 26, 284], [3, 26, 6673]], b"\0"))
+    dbc(12, [r + [0] * 9 for r in [[1, 26, 78], [2, 26, 284], [3, 26, 6673], [4, 38, 1752], [5, 38, 1776], [6, 51, 3044], [7, 51, 75], [8, 186, 7863], [9, 186, 2657]]], b"\0"))

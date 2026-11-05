@@ -142,7 +142,7 @@ static glm::vec3 apply(const W3dMat34& M, const glm::vec3& p) {
 int main() {
     int bad = 0;
     double worstSample = 0, worstBetween = 0, worstSkin2 = 0, worst4vs2 = 0;
-    size_t models = 0, verts = 0, palettes = 0;
+    size_t models = 0, verts = 0, palettes = 0, uploads = 0, pieces = 0, farModels = 0, farVerts = 0;
     for (int seed = 1; seed <= 150; ++seed) {
         M2Model m = makeModel(seed);
         w3d::CreatureBuildInfo info;
@@ -236,6 +236,54 @@ int main() {
                 ++verts;
             }
         }
+        // 7.0: palette uploads when every piece is drawn in order (the renderer skips an unchanged palette)
+        {
+            int cur = -1;
+            for (uint32_t s = 0; s < h->submeshCount; ++s) if (sm[s].palette != cur) { cur = sm[s].palette; ++uploads; }
+            pieces += h->submeshCount;
+        }
+        // 7.0: the far skeleton - every LOD-2 vertex is a copy of a full one whose bones follow a kept ancestor (or themselves)
+        if (h->farPalette) {
+            ++farModels;
+            const W3dSubLod* lv = w3d_creature_lods(blob.data(), (uint32_t)blob.size());
+            const W3dBone* bo = (const W3dBone*)(blob.data() + h->offBones);
+            const W3dBonePalette& fp = pal[h->farPalette - 1];
+            if (!lv || fp.count > W3D_PALETTE_BONES) { std::printf("seed %d: far palette broken\n", seed); ++bad; }
+            auto ancestorOrSelf = [&](uint16_t a, uint16_t b) {   // a above (or =) b
+                for (int x = b; x >= 0; x = bo[x].parent) if (x == a) return true;
+                return false;
+            };
+            for (uint32_t s = 0; lv && s < h->submeshCount; ++s) {
+                const W3dBonePalette& p = pal[sm[s].palette];
+                const uint32_t f0 = lv[s].firstIndex[W3D_MODEL_LODS - 1], fn = lv[s].indexCount[W3D_MODEL_LODS - 1];
+                if (!fn) { std::printf("seed %d: piece %u has no far copy\n", seed, s); ++bad; continue; }
+                for (uint32_t q = f0; q < f0 + fn; ++q) {
+                    const W3dSkinVertex& v = vx[ix[q]];
+                    // the full vertex it copies: same position and uv among the piece's own
+                    const W3dSkinVertex* src = nullptr;
+                    for (uint32_t r = sm[s].firstIndex; r < sm[s].firstIndex + sm[s].indexCount && !src; ++r) {
+                        const W3dSkinVertex& o = vx[ix[r]];
+                        if (o.x == v.x && o.y == v.y && o.z == v.z && o.u == v.u && o.v == v.v) src = &o;
+                    }
+                    if (!src) {   // (from a lighter level: still one of the piece's vertices, which share its palette)
+                        for (uint32_t k = 0; k < W3D_MODEL_LODS - 1 && !src; ++k)
+                            for (uint32_t r = lv[s].firstIndex[k]; r < lv[s].firstIndex[k] + lv[s].indexCount[k] && !src; ++r) {
+                                const W3dSkinVertex& o = vx[ix[r]];
+                                if (o.x == v.x && o.y == v.y && o.z == v.z && o.u == v.u && o.v == v.v) src = &o;
+                            }
+                    }
+                    if (!src) { ++bad; std::printf("seed %d: far vertex without its source\n", seed); break; }
+                    for (int j = 0; j < 2; ++j) {
+                        if (!src->weight[j] && j) continue;
+                        const uint16_t g = p.bones[src->bone[j] / 3];
+                        const int jj = v.bone[0] == v.bone[1] ? 0 : j;
+                        const uint16_t f = fp.bones[v.bone[jj] / 3];
+                        if (!ancestorOrSelf(f, g)) { ++bad; std::printf("seed %d: far bone %u is not above %u\n", seed, f, g); }
+                    }
+                    ++farVerts;
+                }
+            }
+        }
         // the same blob through the pack validator
         if (seed <= 10) {
             w3d::PackWriter pw;
@@ -245,6 +293,9 @@ int main() {
         }
     }
     std::printf("%zu models, %zu skinned vertices checked, %zu palettes\n", models, verts, palettes);
+    std::printf("7.0: %zu pieces drawn with %zu palette uploads; %zu models with a far skeleton, %zu far vertices checked\n", pieces,
+                uploads, farModels, farVerts);
+    if (!farModels) { std::printf("no model got a far skeleton\n"); ++bad; }
     std::printf("bone pose error vs WoWee (relative): at baked samples %.6f, between samples %.4f\n", worstSample, worstBetween);
     std::printf("skinned vertex error vs WoWee (2 strongest weights): %.5f yd; 2 vs all 4 weights: %.3f yd\n",
                 worstSkin2, worst4vs2);

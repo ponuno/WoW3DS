@@ -206,6 +206,51 @@ int main() {
         CHECK(!s.stable.open, "closed");
     }
 
+    // ---- 7.07: Call Pet's answers (SMSG_PET_TAME_FAILURE), the pet running away, Dismiss Pet for a hunter
+    {
+        auto lastRed = [&]() { return s.uiErrors.empty() ? std::string() : s.uiErrors.back().text; };
+        Writer t; t.u8(7);
+        s.handle(0x173, t.b, 10700);
+        CHECK(lastRed().find("do not have a pet") != std::string::npos, "tame failure 7: no pet to call (%s)", lastRed().c_str());
+        Writer d; d.u8(10);
+        s.handle(0x173, d.b, 10710);
+        CHECK(lastRed().find("Revive Pet") != std::string::npos, "tame failure 10: dead, Revive Pet (%s)", lastRed().c_str());
+        Writer b; s.handle(0x2AF, b.b, 10720);
+        CHECK(lastRed().find("run away") != std::string::npos, "SMSG_PET_BROKEN: a red line (%s)", lastRed().c_str());
+        // Dismiss Pet: only when it is in the book; CMSG_CAST_SPELL 2641 with no target
+        CHECK(!s.petCanDismissHunter(), "Dismiss Pet not known yet");
+        Writer sp; sp.u8(0); sp.u16(2); sp.u16(883); sp.u16(0); sp.u16(2641); sp.u16(0); sp.u16(0);
+        s.handle(0x12A, sp.b, 10730);
+        CHECK(s.knowsSpell(2641) && s.petCanDismissHunter(), "Dismiss Pet in the book");
+        sent.clear();
+        CHECK(s.petDismissHunter(10740), "dismiss sent");
+        CHECK(sent.size() == 1 && sent[0].first == 0x12E && sent[0].second.size() == 6, "CMSG_CAST_SPELL 2641, mask 0");
+        if (sent.size() == 1 && sent[0].second.size() == 6) { Reader r(sent[0].second); CHECK(r.u32() == 2641 && r.u16() == 0, "bytes"); }
+        bool abandoned = false;
+        for (auto& p : sent) abandoned = abandoned || p.first == 0x176;
+        CHECK(!abandoned, "Dismiss never abandons");
+    }
+    // ---- 7.07: an unhappy pet warns (red line, again after 90 s); the bar stays while UNIT_FIELD_SUMMON names the pet
+    {
+        GameSession h;
+        h.objects.setSelf(me);
+        create(h, me, 4, true, {{UF::UNIT_FIELD_SUMMON, (uint32_t)petG}, {UF::UNIT_FIELD_SUMMON + 1, (uint32_t)(petG >> 32)},
+                                {UF::UNIT_BYTES_0, (kClassHunter << 8) | 1}, {UF::UNIT_HEALTH, 100}, {UF::UNIT_MAXHEALTH, 100}}, 100);
+        h.handle(0x179, petSpells(petG, 1, 1, 0, bar, {}, {}), 200);
+        // the pet's object has not come yet (after logging in): the bar must not be dropped
+        h.update(300); h.update(9000); h.update(20000);
+        CHECK(h.pet.active && h.pet.guid == petG, "bar kept while the summon field names the pet");
+        create(h, petG, 3, false, {{UF::UNIT_HEALTH, 50}, {UF::UNIT_MAXHEALTH, 80}, {UF::UNIT_POWER1 + 4, 166500},
+                                   {UF::UNIT_MAXPOWER1 + 4, 1050000}, {UF::UNIT_BYTES_1, 1u << 8}}, 20100);
+        auto warnedAt = [&]() { return h.uiErrors.empty() || h.uiErrors.back().text.find("unhappy") == std::string::npos ? 0u : h.uiErrors.back().ms; };
+        h.update(20200);
+        CHECK(warnedAt() == 20200 && h.uiErrors.back().text.find("run away") != std::string::npos, "unhappy, loyalty 1: warned");
+        h.update(21000);
+        CHECK(warnedAt() == 20200, "not every frame");
+        h.update(20200 + 91000);
+        CHECK(warnedAt() == 20200 + 91000, "again after 90 s");
+    }
+
     // ---- the bar goes away
     {
         Writer w; w.u64(0);

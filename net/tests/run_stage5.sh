@@ -250,6 +250,12 @@ g++ -std=c++20 $SAN -Wall "$N/tests/water_test.cpp" $SRC -o "$OUT/water_test"
 g++ -std=c++20 $SAN -Wall "$N/tests/areatrigger_test.cpp" $SRC -o "$OUT/areatrigger_test"
 # Stage 5.40: cooldowns computed by the client (spells.txt @cd, item numbers, categories, COOLDOWN_EVENT)
 g++ -std=c++20 $SAN -Wall "$N/tests/cooldown_test.cpp" $SRC -o "$OUT/cooldown_test"
+g++ -std=c++20 $SAN -Wall "$N/tests/autoattack_test.cpp" $SRC -o "$OUT/autoattack_test"   # 6.87
+g++ -std=c++20 $SAN -Wall "$N/tests/lootroll_test.cpp" $SRC -o "$OUT/lootroll_test"   # 6.88
+g++ -std=c++20 $SAN -Wall "$N/tests/recipe_test.cpp" "$N/tables.cpp" -o "$OUT/recipe_test"   # 6.90
+# 6.64: cast prediction (bar and animation start on send)
+g++ -std=c++20 $SAN -Wall "$N/tests/castpredict_test.cpp" $SRC -o "$OUT/castpredict_test"
+"$OUT/castpredict_test"
 g++ -std=c++20 $SAN -Wall "$N/tests/useitem_test.cpp" $SRC -o "$OUT/useitem_test"
 g++ -std=c++20 $SAN -Wall "$N/tests/channels_test.cpp" $SRC -o "$OUT/channels_test"
 # UI stage 14: the character window's stats and the average item level
@@ -259,6 +265,9 @@ g++ -std=c++20 $SAN -Wall -I"$N" "$N/tests/taxi_mask_test.cpp" $SRC -o "$OUT/tax
 "$OUT/taxi_mask_test"
 "$OUT/charsheet_test"
 "$OUT/cooldown_test"
+"$OUT/autoattack_test"
+"$OUT/lootroll_test"
+"$OUT/recipe_test" "$OUT/recipes.txt"
 "$OUT/useitem_test"
 "$OUT/channels_test"
 "$OUT/areatrigger_test"
@@ -287,3 +296,10 @@ grep -q "RELOG: entered the world again" "$OUT/relog.log"
 grep -q "logged out OK" "$OUT/relog.log"
 [ "$(grep -c 'character list sent' "$OUT/relog_server.log")" -ge 2 ]
 echo "LOGOUT TO THE CHARACTER LIST: PASS"
+# 6.86: a new character's intro cinematic is answered at once (else vmangos keeps the view on the intro camera: mobs evade)
+PORT8=$((PORT + 70))
+(cd "$N/tests" && timeout 30 python3 -u fake_server.py --port $PORT8 --cinematic > "$OUT/cine_server.log" 2>&1 &)
+sleep 1
+"$OUT/w3dlogin" 127.0.0.1:$PORT8 TEST PASSWORD --char 0 --stay 1 > "$OUT/cine.log" 2>&1
+grep -q "intro cinematic completed by the client" "$OUT/cine_server.log"
+echo "INTRO CINEMATIC COMPLETED: PASS"

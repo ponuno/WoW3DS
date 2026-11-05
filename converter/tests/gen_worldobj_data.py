@@ -73,12 +73,17 @@ def sref(t):
 rows = []
 for did, name in ((4001, ELEV), (4002, DOOR), (4003, MAIL), (4004, ROCK), (4005, TRAM), (4006, BRIDGE), (4007, POST), (4008, RUG)):
     rows.append([did, sref(name + ".mdx")] + [0] * 10 + [0.0] * 6)
+# 6.59: a game object whose model is a building (Turtle WoW's houses): gen_wmo_data.py's house (2 groups, doodad set 0 of 2 lamps)
+rows.append([4009, sref("World\\wmo\\Test\\House.wmo")] + [0] * 10 + [0.0] * 6)
+# 6.59c: two buildings too big for an object (gen_wmo_data.py's Giant and Wide), and the house again under another display
+rows.append([4010, sref("World\\wmo\\Test\\Giant.wmo")] + [0] * 10 + [0.0] * 6)
+rows.append([4011, sref("World\\wmo\\Test\\Wide.wmo")] + [0] * 10 + [0.0] * 6)
 os.makedirs(os.path.join(out, "DBFilesClient"), exist_ok=True)
 open(os.path.join(out, "DBFilesClient", "GameObjectDisplayInfo.dbc"), "wb").write(dbc(18, rows, strings))
 
 anim = [[1, 20650, 0, 0.0, 0.0, 0.0, 0], [2, 20650, 4000, 0.0, 0.0, 0.0, 0], [3, 20650, 10000, 2.0, 0.0, -40.0, 0],
         [4, 20651, 0, 0.0, 0.0, 0.0, 0], [5, 20651, 8000, 0.0, 5.0, 0.0, 0]]
 open(os.path.join(out, "DBFilesClient", "TransportAnimation.dbc"), "wb").write(dbc(7, anim, b"\0"))
-json.dump({"elevator": 4001, "door": 4002, "mailbox": 4003, "boulder": 4004, "tram": 4005, "bridge": 4006, "post": 4007, "rug": 4008,
+json.dump({"elevator": 4001, "door": 4002, "mailbox": 4003, "boulder": 4004, "tram": 4005, "bridge": 4006, "post": 4007, "rug": 4008, "houseObj": 4009, "giantObj": 4010, "wideObj": 4011,
            "deckZ": 0.4, "tramZ": 0.3, "bridgeZ": 1.0, "animRows": 5, "animEntries": 2,
            "doorSeqs": [0, 146, 147, 148, 149]}, open(exp_path, "w"))

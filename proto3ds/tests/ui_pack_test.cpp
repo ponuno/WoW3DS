@@ -94,6 +94,8 @@ int main(int argc, char** argv) {
     ui::MapView c = a.zoneAt(0, 5000.0f, 5000.0f);
     check(c.ok() && c.name == "Azeroth", "outside every zone: the continent");
     check(!a.zoneAt(1, 0, 0).ok(), "no map for Kalimdor in this pack");
+    check(a.world().ok() && a.world().name == "World" && a.world().m->mapId == 0xFFFFFFFFu, "6.69: the world picture");
+    check(!a.zoneByArea(0xFFFFFFFFu).ok() && a.continent(0).name == "Azeroth", "the world entry is neither a zone nor a continent");
 
     // picture
     Canvas cv(400, 340, 0xFF202020u);

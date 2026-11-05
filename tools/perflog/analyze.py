@@ -125,6 +125,19 @@ def main():
     p("  всего: вызовов %.0f (макс %.0f), треугольников %.0f (макс %.0f), смен текстур %.0f; юнитов %.1f, костей %.0f, поза %.2f мс" % (
         wavg(sel, "r_draws"), max(num(r, "r_draws_max") for r in sel), wavg(sel, "r_tris"), max(num(r, "r_tris_max") for r in sel),
         wavg(sel, "r_binds"), wavg(sel, "r_units"), wavg(sel, "r_bone_uploads"), wavg(sel, "r_pose_ms")))
+    if "r_pvs_on" in sel[0]:   # 6.54
+        p("  PVS (map<ID>.pvs): включён в %.0f%% кадров; пропущено доодадов %.0f, групп WMO %.0f, кусков земли %.0f, дальнего %.0f на кадр" % (
+            100.0 * wavg(sel, "r_pvs_on"), wavg(sel, "r_pvs_dood"), wavg(sel, "r_pvs_bldg") if "r_pvs_bldg" in sel[0] else 0,
+            wavg(sel, "r_pvs_terr"), wavg(sel, "r_pvs_far") if "r_pvs_far" in sel[0] else 0))
+    if "r_hlod_blocks" in sel[0]:   # 6.57
+        p("  горизонт (map<ID>.hlod): блоков-моделей %.1f на кадр (%.0f треуг.), скрыто PVS %.1f, заменено объектов %.0f; тайлов в памяти %.0f (%.0f КБ)" % (
+            wavg(sel, "r_hlod_blocks"), wavg(sel, "r_hlod_tris"), wavg(sel, "r_hlod_hidden"), wavg(sel, "r_hlod_skip"),
+            wavg(sel, "r_hlod_tiles"), wavg(sel, "r_hlod_kb")))
+    if "rd_op_s_tris" in sel[0]:   # 6.51: доодады по смешиванию и размеру (радиус: s < 1.5 ярда, m < 4, l < 12, x больше)
+        p("  доодады по одному / слитые (6.44) - треугольников и вызовов на кадр:")
+        for b, bn in (("op", "непрозрачные"), ("key", "с альфа-ключом"), ("bl", "полупрозрачные")):
+            cells = ["%s %5.0f/%4.1f" % (c, wavg(sel, "rd_%s_%s_tris" % (b, c)), wavg(sel, "rd_%s_%s_draws" % (b, c))) for c in "smlx"]
+            p("    %-15s %s | слитые %5.0f/%4.1f" % (bn, "  ".join(cells), wavg(sel, "rd_sb_%s_tris" % b), wavg(sel, "rd_sb_%s_draws" % b)))
     p("  частицы: квадов %.0f, живых до %.0f, отброшено %.0f/с; эффекты %.2f мс" % (
         wavg(sel, "r_fx_quads"), max(num(r, "r_fx_alive") for r in sel), max(num(r, "r_fx_drop_s") for r in sel), wavg(sel, "r_fxsim_ms")))
     p("  интерфейс: квадов %.0f, пакетов %.0f на кадр; страниц прочитано с SD %d (%.0f мс), из них в основном потоке %d (%.0f мс); не влезло квадов %d" % (

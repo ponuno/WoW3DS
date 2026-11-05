@@ -80,10 +80,12 @@ int convertAll(const Options& oIn, const DataDir& data, const AllOptions& ao, Ui
         exportFactions(data, folder + "factions.txt", o.verbose);
         exportTalents(data, folder + "talents.txt", o.verbose);
         exportSkills(data, folder + "skills.txt", o.verbose);
+        exportRecipes(data, folder + "recipes.txt", o.verbose);
         exportTaxi(data, folder + "taxi.txt", o.verbose);
         exportLocks(data, folder + "locks.txt", o.verbose);
         exportAreaTriggers(data, folder + "areatriggers.txt", o.verbose);
         exportEmotes(data, folder + "emotes.txt", o.verbose);
+        exportSky(data, folder + "sky.txt", o.verbose);
         exportGlueTexts(data, folder + "glue.txt", o.verbose);
     }
     // ---- 2. sound
@@ -205,6 +207,7 @@ int convertAll(const Options& oIn, const DataDir& data, const AllOptions& ao, Ui
     convertCreatures(o, data, pool, st);
     convertGlueScenes(o, data, pool, st);   // stage 5.29: login / character screen scenes
     if (o.spellFx) convertSpellEffects(o, data, pool, st);   // stage 5.33: what spells look like
+    convertSkyboxes(o, data, pool, st);   // 6.61: the zones' sky models
     exportTransports(data, folder + "transports.txt", o.verbose);
 
     // ---- 5. the pool
@@ -232,8 +235,16 @@ int convertAll(const Options& oIn, const DataDir& data, const AllOptions& ao, Ui
                 pool.count(W3D_ENTRY_TEXTURE), pool.count(W3D_ENTRY_MODEL), pool.count(W3D_ENTRY_CREATURE),
                 pool.count(W3D_ENTRY_DISPLAY), pool.storedBytes() / 1048576.0, pool.keyCollisions());
     std::printf("  draw error (6.19b): %zu models kept more triangles than their budget to stay on their collision\n", g_errorBoundModels);
+    std::printf("  posed doodads (6.45): %zu models with a skeleton stand in their Stand pose (roosts' gryphons / wind riders)\n", st.doodadsPosed);
+    std::printf("  M2 key ranges (6.43): %zu bone tracks of 1.12 models read again (held poses / closing keys WoWee dropped)\n",
+                (size_t)g_m2TracksFixed);
     std::printf("  model LODs (6.12): %zu submeshes, level 1 for %zu (%zu of %zu tris), level 2 for %zu (%zu tris), %zu levels refused (a part would vanish)\n", (size_t)g_lodStats.subs,
                 (size_t)g_lodStats.lod1, (size_t)g_lodStats.tris1, (size_t)g_lodStats.tris0, (size_t)g_lodStats.lod2, (size_t)g_lodStats.tris2, (size_t)g_lodStats.rejected);
+    std::printf("  wall error (6.47): %.2f yd; building LOD errors %.2f / %.2f yd, borders %s\n", oIn.drawWallError, oIn.wmoLodError[0],
+                oIn.wmoLodError[1], oIn.wmoLodLockBorder ? "locked" : "free (6.47b)");
+    std::printf("  big WMO groups (6.48): %zu outside groups cut into %zu pieces of about %.0f yd\n", st.wmoGroupsCut, st.wmoChunks, oIn.wmoChunk);
+    printSimplifyReport();
+    printHeavyGroups(20);
     std::printf("  copy everything in %s to sdmc:/3ds/w3dproto/ (map0.w3dp is the Eastern Kingdoms, map1.w3dp Kalimdor)\n",
                 folder.c_str());
     std::printf("== checking the packs\n");

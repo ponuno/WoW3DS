@@ -561,21 +561,22 @@ void GlueUi::topCreate(HudList& l, const GlueModel& m) {
     for (int i = 0; i < nr; ++i) {
         const glue::RaceInfo& r = rs[i];
         const bool alliance = r.faction == glue::Faction::Alliance;
-        const int x = alliance ? 10 : 58, y = 16 + (alliance ? ai++ : hi++) * 32;
+        const int step = nr > 8 ? 30 : 32, sz = 30;
+        const int x = alliance ? 10 : 58, y = 14 + (alliance ? ai++ : hi++) * step;
         char icon[16];
         snprintf(icon, sizeof icon, "race_%d", r.id * 2 + create.sex);
-        iconButton(l, x, y, 30, icon, g_lang ? r.ru : r.en, create.race == r.id, focused(kRace, GlueAction::None, r.id), true);
-        addTop(x, y, 30, 30, GlueAction::None, r.id, kRace);
+        iconButton(l, x, y, sz, icon, g_lang ? r.ru : r.en, create.race == r.id, focused(kRace, GlueAction::None, r.id), true);
+        addTop(x, y, sz, sz, GlueAction::None, r.id, kRace);
     }
     for (int s = 0; s < 2; ++s) {
-        const int x = s ? 56 : 16;
+        const int x = s ? 56 : 16, sy = nr > 8 ? 166 : 148, ss = nr > 8 ? 22 : 28;
         char icon[12];
         snprintf(icon, sizeof icon, "gender_%d", s);
-        iconButton(l, x, 148, 28, icon, s ? tr("Female", "Жен.") : tr("Male", "Муж."), create.sex == s,
+        iconButton(l, x, sy, ss, icon, s ? tr("Female", "Жен.") : tr("Male", "Муж."), create.sex == s,
                    focused(kSex, GlueAction::None, s), true);
-        addTop(x, 148, 28, 28, GlueAction::None, s, kSex);
+        addTop(x, sy, ss, ss, GlueAction::None, s, kSex);
     }
-    l.textCentered(50, 178, create.sex ? tr("Female", "Женский") : tr("Male", "Мужской"), kGlueGold, true, Font::Small);
+    if (nr <= 8) l.textCentered(50, 178, create.sex ? tr("Female", "Женский") : tr("Male", "Мужской"), kGlueGold, true, Font::Small);
     button(l, 6, 190, 88, 20, tr("Randomize", "Случайно"), true, focused(kButton, GlueAction::None, 1), "X");
     addTop(6, 190, 88, 20, GlueAction::None, 1, kButton);
     button(l, 6, 214, 88, 22, tr("Back", "Назад"), true, focused(kButton, GlueAction::CreateBack, 0), "B");
@@ -656,7 +657,8 @@ void GlueUi::bottomLogin(HudList& l, const GlueModel& m) {
     button(l, 90, 130, 140, 30, tr("Login", "Войти"), true, false);
     addBottom(90, 130, 140, 30, GlueAction::Login, 0, kButton);
     char p[32], g[32];
-    snprintf(p, sizeof p, "%s %d", tr("Protocol", "Протокол"), m.protocol);
+    if (m.turtle) snprintf(p, sizeof p, "Turtle 1.18");   // 6.58: Turtle WoW clones (build 7272)
+    else snprintf(p, sizeof p, "%s %d", tr("Protocol", "Протокол"), m.protocol);
     snprintf(g, sizeof g, "%s %s", tr("Log", "Журнал"), m.packetLog ? tr("on", "вкл") : tr("off", "выкл"));
     button(l, 8, 172, 98, 24, tr("Offline", "Без сети"), true, false);
     addBottom(8, 172, 98, 24, GlueAction::Offline, 0, kButton);

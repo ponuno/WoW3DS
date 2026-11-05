@@ -20,6 +20,7 @@
 #include <cmath>
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <set>
@@ -170,8 +171,25 @@ Region underwearRegion(const std::string& path, int column) {
 }
 
 const char* raceFolder(uint32_t race) {
-    static const char* k[] = {"", "Human", "Orc", "Dwarf", "NightElf", "Scourge", "Tauren", "Gnome", "Troll"};
-    return race >= 1 && race <= 8 ? k[race] : "";
+    static const char* k[] = {"", "Human", "Orc", "Dwarf", "NightElf", "Scourge", "Tauren", "Gnome", "Troll", "Goblin", "BloodElf"};
+    return race >= 1 && race <= 10 ? k[race] : "";
+}
+// 6.95: the Turtle WoW races (9 Goblin, 10 High Elf): the folder of the model; a High Elf wears the Blood Elf model or, if the
+// client has a folder of its own, "HighElf". The first folder whose model exists is used.
+const char* const* raceFolderAlternatives(uint32_t race) {
+    static const char* const g[] = {"Goblin", nullptr}, * const h[] = {"BloodElf", "HighElf", nullptr};
+    static const char* const none[] = {nullptr};
+    static const char* const* single[9];
+    static const char* one[9][2];
+    if (race == 9) return g;
+    if (race == 10) return h;
+    if (race >= 1 && race <= 8) {
+        one[race][0] = raceFolder(race);
+        one[race][1] = nullptr;
+        single[race] = one[race];
+        return single[race];
+    }
+    return none;
 }
 
 }  // namespace
@@ -179,6 +197,41 @@ const char* raceFolder(uint32_t race) {
 // One CHRS entry per playable race/sex: CharSections rows -> CIMG layers (RGBA4 at half the
 // atlas size, placed at their region) and hair TEX entries; CharHairGeosets/FacialHairStyles
 // -> style table. The 3DS composites the body texture per player (w3d_char_composite).
+// 6.98: WoWee's magenta key (isMagentaKeyCandidate / bleedAndStripMagentaKey)
+static void stripMagentaKey(Image& im) {
+    const size_t n = (size_t)im.w * im.h;
+    if (im.rgba.size() < n * 4) return;
+    std::vector<uint8_t> mask(n, 0);
+    size_t count = 0;
+    for (size_t p = 0; p < n; ++p) {
+        const uint8_t* c = &im.rgba[p * 4];
+        const int r = c[0], g = c[1], b = c[2], rb = r > b ? r - b : b - r;
+        if (r >= 170 && b >= 170 && g <= 120 && r >= g + 70 && b >= g + 70 && rb <= 96) { mask[p] = 1; ++count; }
+    }
+    if (!count) return;
+    const std::vector<uint8_t> src = im.rgba;
+    for (int y = 0; y < im.h; ++y)
+        for (int x = 0; x < im.w; ++x) {
+            const size_t p = (size_t)y * im.w + x;
+            if (!mask[p]) continue;
+            uint32_t sum[3] = {0, 0, 0}, k = 0;
+            for (int rad = 1; rad <= 8 && !k; ++rad)
+                for (int dy = -rad; dy <= rad; ++dy)
+                    for (int dx = -rad; dx <= rad; ++dx) {
+                        if (std::abs(dx) != rad && std::abs(dy) != rad) continue;
+                        const int nx = x + dx, ny = y + dy;
+                        if (nx < 0 || ny < 0 || nx >= im.w || ny >= im.h) continue;
+                        const size_t q = (size_t)ny * im.w + nx;
+                        if (mask[q] || src[q * 4 + 3] == 0) continue;
+                        for (int c = 0; c < 3; ++c) sum[c] += src[q * 4 + c];
+                        ++k;
+                    }
+            uint8_t* o = &im.rgba[p * 4];
+            for (int c = 0; c < 3; ++c) o[c] = k ? (uint8_t)(sum[c] / k) : 0;
+            o[3] = 0;
+        }
+}
+
 template <class ModelFor>
 static void convertCharactersImpl(const Options& o, const DataDir& data, PackWriter& pack, ConvStats& st,
                                   const Dbc* sections, const Dbc* hair, const Dbc* facial, const Dbc& cdi,
@@ -197,9 +250,16 @@ static void convertCharactersImpl(const Options& o, const DataDir& data, PackWri
             if (o.verbose) std::fprintf(stderr, "  character layer missing: %s\n", path.c_str());
             return 0;
         }
-        int w = rg.w * A / 256, h = rg.h * A / 256;
+        // 6.98 (as WoWee's character renderer): magenta marks "no paint" in some characters' art (custom servers' layers):
+        // made transparent, its colour bled in from the neighbours so the filtering shows no pink fringe
+        stripMagentaKey(im);
+        // a square layer for a region that is not square is a whole-atlas layer (a later client's underwear / face drawn
+        // at full size with the rest transparent): placed over the whole atlas, not squeezed into the region
+        Region at = rg;
+        if (im.w == im.h && rg.w != rg.h) at = kBase;
+        int w = at.w * A / 256, h = at.h * A / 256;
         if (im.w != w || im.h != h) im = resizeImage(im, w, h);
-        W3dCharImage ci{(uint16_t)w, (uint16_t)h, (uint16_t)(rg.x * A / 256), (uint16_t)(rg.y * A / 256)};
+        W3dCharImage ci{(uint16_t)w, (uint16_t)h, (uint16_t)(at.x * A / 256), (uint16_t)(at.y * A / 256)};
         Blob b;
         b.put(ci);
         std::vector<uint16_t> px((size_t)w * h);
@@ -214,14 +274,24 @@ static void convertCharactersImpl(const Options& o, const DataDir& data, PackWri
         ++st.charImages;
         return id;
     };
-    for (uint32_t race = 1; race <= 8; ++race)
+    for (uint32_t race = 1; race <= 10; ++race)
         for (uint32_t sex = 0; sex <= 1; ++sex) {
             const char* folder = raceFolder(race);
             const char* sx = sex ? "Female" : "Male";
-            progress(true, "players: %s %s (%u/16), %zu layers so far", folder, sx, (race - 1) * 2 + sex + 1, st.charImages);
-            std::string m2 = std::string("Character\\") + folder + "\\" + sx + "\\" + folder + sx + ".m2";
-            const ModelInfo& mi = modelFor(m2);
-            if (!mi.ok) { ++st.charRacesFailed; continue; }
+            progress(true, "players: race %u %s (%u/20), %zu layers so far", race, sx, (race - 1) * 2 + sex + 1, st.charImages);
+            std::string m2;
+            const ModelInfo* miP = nullptr;
+            for (const char* const* f = raceFolderAlternatives(race); *f; ++f) {
+                std::string cand = std::string("Character\\") + *f + "\\" + sx + "\\" + *f + sx + ".m2";
+                const ModelInfo& tried = modelFor(cand);
+                if (tried.ok) { folder = *f; m2 = cand; miP = &tried; break; }
+            }
+            if (!miP) {   // races 9 / 10 exist only in a Turtle WoW client: their absence is not a failure of a vanilla one
+                if (race <= 8) ++st.charRacesFailed;
+                else if (o.verbose) std::printf("  player race %u %s: no model in this client (not a Turtle WoW client?)\n", race, sx);
+                continue;
+            }
+            const ModelInfo& mi = *miP;
             W3dCharHeader hdr{};
             hdr.race = race;
             hdr.sex = sex;
@@ -374,6 +444,48 @@ static void convertTransports(const Options& o, const DataDir& data, PackWriter&
         if (!hit) continue;
         const uint64_t bytesBefore = stored();
         progress(false, "transports: display %u/%u, %zu ok", r + 1, gdi.records, st.transportDisplays);
+        if (lm.size() > 4 && lm.compare(lm.size() - 4, 4, ".wmo") == 0) {
+            // 6.59: a building as a game object (Turtle WoW's new houses, towers, ruins): its groups + furniture as parts and its
+            // collision, in an OWMO entry; no CDSP (the creature path cannot draw a WMO)
+            std::vector<W3dPlacement> parts;
+            std::vector<float> coll;
+            auto doodad = [&](const std::string& m2) { return addModelFromGame(pack, data, m2, o, st); };
+            bool tooBig = false;
+            if (o.noWmo || !wmoObjectParts(pack, data, mdx, o, st, doodad, parts, coll, &tooBig)) {
+                ++st.objWmoFailed;
+                if (tooBig) ++st.objWmoTooBig;
+                if (o.verbose)
+                    std::fprintf(stderr, tooBig ? "  object WMO too big for an object (a city / dungeon, skipped): %s\n"
+                                                : "  object WMO failed: %s\n", mdx.c_str());
+                continue;
+            }
+            W3dObjWmoHeader h{};
+            h.partCount = (uint32_t)parts.size();
+            h.collTriCount = (uint32_t)(coll.size() / 9);
+            float r2 = 0;
+            for (int k = 0; k < 3; ++k) { h.bmin[k] = 1e9f; h.bmax[k] = -1e9f; }
+            for (size_t i = 0; i + 2 < coll.size(); i += 3) {
+                for (int k = 0; k < 3; ++k) { h.bmin[k] = std::min(h.bmin[k], coll[i + k]); h.bmax[k] = std::max(h.bmax[k], coll[i + k]); }
+                r2 = std::max(r2, coll[i] * coll[i] + coll[i + 1] * coll[i + 1] + coll[i + 2] * coll[i + 2]);
+            }
+            if (coll.empty()) for (int k = 0; k < 3; ++k) h.bmin[k] = h.bmax[k] = 0;
+            float rad = std::sqrt(r2);
+            for (const W3dPlacement& p : parts)   // (a part's own size is not known here: its centre plus a margin)
+                rad = std::max(rad, std::sqrt(p.pos[0] * p.pos[0] + p.pos[1] * p.pos[1] + p.pos[2] * p.pos[2]) + 10.0f);
+            h.radius = rad;
+            Blob b;
+            b.put(h);
+            for (const W3dPlacement& p : parts) b.put(p);
+            for (float f : coll) b.put(f);
+            if (!pack.add(W3D_ENTRY_OBJWMO, 0x80000000u | gdi.u32(r, 0), std::move(b.data))) continue;
+            ++st.objWmoDisplays;
+            st.objWmoParts += parts.size();
+            st.objWmoCollTris += coll.size() / 9;
+            if (isDef) { ++st.defaultObjectDisplays; st.defaultObjectBytes += (size_t)(stored() - bytesBefore); }
+            if (o.verbose) std::printf("  object WMO display %u: %s, %zu parts, %zu collision triangles, radius %.0f yd\n", gdi.u32(r, 0),
+                                       mdx.c_str(), parts.size(), coll.size() / 9, rad);
+            continue;
+        }
         const ModelInfo& mi = modelFor(mdx);
         if (!mi.ok) { ++st.transportDisplaysFailed; continue; }
         W3dDisplay d{};
@@ -405,6 +517,10 @@ static void convertTransports(const Options& o, const DataDir& data, PackWriter&
     }
     progressDone("transports: %zu displays (%zu failed), %zu with a deck (%zu from the drawn mesh), %zu platforms among the objects",
                  st.transportDisplays, st.transportDisplaysFailed, st.transportDecks, st.transportDecksFromMesh, st.staticDecks);
+    if (st.objWmoDisplays || st.objWmoFailed)
+        std::printf("  object WMOs (6.59): %zu game object displays are buildings (%zu parts, %zu collision triangles), %zu failed "
+                    "(%zu too big: cities / dungeons)\n",
+                    st.objWmoDisplays, st.objWmoParts, st.objWmoCollTris, st.objWmoFailed, st.objWmoTooBig);
     for (const std::string& n : transportsWithoutDeck())
         std::printf("  transport model WITHOUT a deck (nobody can stand on it): %s\n", n.c_str());
     if (o.creatures && o.defaultObjects)
@@ -430,6 +546,15 @@ bool convertCreatures(const Options& o, const DataDir& data, PackWriter& pack, C
 
     std::map<uint32_t, std::string> modelPath;   // CreatureModelData id -> path
     for (uint32_t r = 0; r < cmd.records; ++r) modelPath[cmd.u32(r, 0)] = cmd.str(r, 2);
+    // 6.60: the model's own scale (CreatureModelData.ModelScale, column 4): the game draws a creature at the model's scale x the
+    // display's (CreatureDisplayInfo.Scale) x the unit's (OBJECT_FIELD_SCALE_X). Only the last two were used, so every creature
+    // whose model asks for more than 1 came out small (and those under 1 too big). WoWee's EntitySpawner multiplies all three.
+    std::map<uint32_t, float> modelScale;
+    if (cmd.fields > 4)
+        for (uint32_t r = 0; r < cmd.records; ++r) {
+            const float ms = cmd.f32(r, 4);
+            if (ms > 0.01f && ms < 50.0f && std::fabs(ms - 1.0f) > 1e-3f) modelScale[cmd.u32(r, 0)] = ms;
+        }
     std::map<uint32_t, uint32_t> extraRow;        // CreatureDisplayInfoExtra id -> row
     uint32_t bakeField = cdie.fields <= 19 ? 18 : 20;
     if (haveExtra) for (uint32_t r = 0; r < cdie.records; ++r) extraRow[cdie.u32(r, 0)] = r;
@@ -469,7 +594,7 @@ bool convertCreatures(const Options& o, const DataDir& data, PackWriter& pack, C
         ModelInfo& mi = models[key];
         std::vector<uint8_t> bytes;
         if (!data.read(m2, bytes)) { mi.info.error = "missing"; ++st.creatureModelsFailed; return mi; }
-        wowee::pipeline::M2Model m = wowee::pipeline::M2Loader::load(bytes);
+        wowee::pipeline::M2Model m = loadM2(bytes);
         if (m.batches.empty() || m.indices.empty()) {
             std::vector<uint8_t> skin;
             if (data.read(wowee::pipeline::skinPathForM2(m2), skin)) wowee::pipeline::M2Loader::loadSkin(skin, m);
@@ -533,6 +658,12 @@ bool convertCreatures(const Options& o, const DataDir& data, PackWriter& pack, C
         W3dDisplay d{};
         d.modelId = mi.id;
         d.scale = cdi.f32(r, 4) > 0 ? cdi.f32(r, 4) : 1.0f;
+        d.modelScaleMilli = 1000;
+        if (auto ms = modelScale.find(cdi.u32(r, 1)); ms != modelScale.end()) {
+            d.scale *= ms->second;
+            d.modelScaleMilli = (uint16_t)std::clamp((int)std::lround(ms->second * 1000.0f), 1, 65535);
+            ++st.displaysModelScaled;
+        }
         std::string dir = dirOf(wowee::pipeline::modelPathToM2(mp->second));
         auto tex = [&](const std::string& path, int kind) -> uint32_t {
             if (path.empty()) return 0;

@@ -9,7 +9,8 @@ int main() {
     s.data = "E:\\Wow Classic\\Data"; s.out = "D:\\sd\\w3dproto";
     CHECK(validate(s).empty());
     auto st = buildSteps(s);
-    CHECK(st.size() == 3 && st[0].logFile == "log_ui.txt" && st[1].logFile == "log_sound.txt" && st[2].logFile == "log_world.txt");
+    CHECK(st.size() == 4 && st[0].logFile == "log_ui.txt" && st[1].logFile == "log_sound.txt" && st[2].logFile == "log_world.txt" &&
+          st[3].logFile == "log_hlod_test.txt");   // (6.57: the horizon after the world)
     const auto& w = st[2].args;
     auto has = [&](const char* a) { for (auto& x : w) if (x == a) return true; return false; };
     CHECK(has("--creatures") && has("--players") && has("--transports") && !has("--no-items") && !has("--world") && has("--tiles"));
@@ -37,8 +38,29 @@ int main() {
     CHECK(validate(ev).empty());
     auto es = buildSteps(ev);
     auto hasE = [&](const char* a) { for (auto& x : es[0].args) if (x == a) return true; return false; };
-    CHECK(es.size() == 1 && es[0].args[2] == "--all" && hasE("--no-sound-step") && hasE("--no-ui") && hasE("--no-items") && !hasE("--map"));
+    CHECK(es.size() == 3 && es[0].args[2] == "--all" && hasE("--no-sound-step") && hasE("--no-ui") && hasE("--no-items") && !hasE("--map"));
     CHECK(es[0].args[es[0].args.size() - 2] == "O" && parse(serialize(ev)).everything && !parse(serialize(dg)).everything);
+    // 6.54e: the capitals' PVS after the packs (w3docc.exe), skipped when a pack step failed
+    CHECK(!parse(serialize(ev)).pvs);
+    ev.pvs = true;
+    auto ps = buildSteps(parse(serialize(ev)));
+    CHECK(ps.size() == 5 && ps[3].exe == "w3docc.exe" && ps[3].needsPack && ps[3].args[0] == "--pvs" && ps[3].args[1] == "O\\map0.w3dp" &&
+          ps[4].args[1] == "O\\map1.w3dp" && ps[3].logFile == "log_pvs_map0.txt");
+    int arounds = 0;
+    for (auto& a : ps[3].args) arounds += a == "--around";
+    CHECK(arounds == 3 && ps[3].args[3] == "-8700" && ps[3].args[4] == "700" && ps[3].args[5] == "550");
+    CHECK(commandLine("C:\\t\\w3docc.exe", ps[4]).find("--pvs O\\map1.w3dp --around 1600 -4400 400") != std::string::npos);
+    Settings pw; pw.data = "D"; pw.out = "O"; pw.ui = pw.sound = false; pw.pvs = true; pw.map = "Kalimdor";
+    auto pws = buildSteps(pw);
+    CHECK(pws.size() == 3 && pws[2].exe == "w3docc.exe" && pws[2].args[0] == "--pvs" && pws[2].args[1] == "O\\map1.w3dp" && pws[1].args[0] == "--hlod");
+    pw.map = "Azeroth"; CHECK(buildSteps(pw)[2].args[1] == "O\\test.w3dp");
+    pw.map = "Kalidar"; CHECK(buildSteps(pw).size() == 2);   // (no capitals there: the horizon only)
+    pw.pvs = false; pw.map = "Azeroth"; CHECK(buildSteps(pw).size() == 2 && buildSteps(pw)[0].exe.empty() && buildSteps(pw)[1].args[0] == "--hlod");
+    pw.hlod = false; CHECK(buildSteps(pw).size() == 1);
+    // 6.57: the horizon after the packs, before the PVS; saved
+    CHECK(ps.size() == 5 && ps[1].args[0] == "--hlod" && ps[1].args[1] == "O\\map0.w3dp" && ps[2].args[1] == "O\\map1.w3dp" && ps[3].args[0] == "--pvs" &&
+          ps[1].logFile == "log_hlod_map0.txt" && ps[1].needsPack);
+    CHECK(!parse(serialize(pw)).hlod && parse(serialize(ev)).hlod);
     printf("GUI CORE: %s\n", fails ? "FAIL" : "PASS");
     return fails != 0;
 }

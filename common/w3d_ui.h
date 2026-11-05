@@ -86,6 +86,26 @@ typedef struct {
     uint32_t nameOff;                   // into strings (the WorldMapArea name, e.g. "Elwynn")
 } W3dUiMap;                             // 40 bytes
 
+// 6.94: which zone map shows the player. The zone rectangles of WorldMapArea.dbc overlap their neighbours' (a point of
+// Eastern Plaguelands near the border lies inside Western Plaguelands' rectangle too), so "the smallest rectangle that holds
+// the point" put the character at the edge of the wrong map. The zone the character stands in (the AreaTable top parent of the
+// terrain's area id) decides when the pack has a map for it; else the smallest rectangle, as before. -1 = none (the continent).
+static inline int w3dUiPickZoneMap(const W3dUiMap* maps, size_t n, uint32_t mapId, uint32_t zone, float x, float y) {
+    if (zone)
+        for (size_t i = 0; i < n; ++i)
+            if (maps[i].mapId == mapId && maps[i].areaId == zone) return (int)i;
+    int best = -1;
+    float bestArea = 0;
+    for (size_t i = 0; i < n; ++i) {
+        const W3dUiMap& m = maps[i];
+        if (m.mapId != mapId || !m.areaId) continue;
+        if (y > m.left || y < m.right || x > m.top || x < m.bottom) continue;
+        const float area = (m.left - m.right) * (m.top - m.bottom);
+        if (best < 0 || area < bestArea) { best = (int)i; bestArea = area; }
+    }
+    return best;
+}
+
 // The in-game loading screen of a map (Map.dbc -> LoadingScreens.dbc): the picture is the top-left w x h of texture tex;
 // several maps may share one texture.
 typedef struct {

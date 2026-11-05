@@ -1,7 +1,8 @@
 // client.hpp — vanilla 1.12.1 (build 5875) login: realmd auth + world session.
 //
 // Both clients are polled state machines: call update() every frame, read
-// state()/error(). Connecting is the only blocking step (TCP connect).
+// state()/error(). 6.55: nothing blocks - the TCP connect too is polled (state Connecting, 15 s at most); only a server
+// given by name waits for its lookup.
 #pragma once
 #include <cstdint>
 #include <functional>
@@ -18,6 +19,9 @@ struct ClientVersion {
     uint8_t major = 1, minor = 12, patch = 1;
     uint16_t build = 5875;
     uint8_t authProtocol = 3;     // what the real 1.12.1 client sends; vMaNGOS also accepts 8
+    uint16_t worldBuild = 0;      // CMSG_AUTH_SESSION's build; 0 = 'build'. 6.58: Turtle-type servers (1.18.1) log in with 7272
+                                  // and keep 5875 for the world (turtle-agent, tortoise-wow realmd)
+    static ClientVersion turtle() { ClientVersion v; v.minor = 18; v.build = 7272; v.worldBuild = 5875; return v; }
     std::string locale = "enUS";
 };
 
@@ -37,7 +41,7 @@ struct Timings {                  // milliseconds, for the stage-4 handshake mea
 // ------------------------------------------------------------------ realmd
 class AuthClient {
 public:
-    enum class State { Idle, WaitChallenge, WaitProof, WaitRealms, Done, Failed };
+    enum class State { Idle, Connecting, WaitChallenge, WaitProof, WaitRealms, Done, Failed };
 
     bool start(const std::string& hostPort, const std::string& account, const std::string& password,
                const ClientVersion& ver = ClientVersion());
@@ -54,6 +58,7 @@ public:
 
 private:
     void fail(const std::string& e);
+    bool sendChallenge();
     bool handleChallenge();
     bool handleProof();
     bool handleRealms();
@@ -99,7 +104,8 @@ struct Packet {
 
 class WorldClient {
 public:
-    enum class State { Idle, WaitChallenge, WaitAuthResponse, InQueue, WaitCharEnum, CharSelect, WaitLogin,
+    const ClientVersion& version() const { return ver_; }   // 6.58
+    enum class State { Idle, Connecting, WaitChallenge, WaitAuthResponse, InQueue, WaitCharEnum, CharSelect, WaitLogin,
                        InWorld, LoggingOut, Done, Failed };
 
     bool start(const std::string& hostPort, const std::string& account, const Bytes& sessionKey,
@@ -146,6 +152,13 @@ public:
     // True once the server sent SMSG_WARDEN_DATA (anticheat). We do not answer
     // it, so such servers usually disconnect the client shortly afterwards.
     bool wardenSeen() const { return wardenSeen_; }
+    int cinematicsSkipped() const { return cinematicsSkipped_; }
+    // 7.04: intros played by the caller. With playCinematics on, SMSG_TRIGGER_CINEMATIC is not answered here: takeCinematic()
+    // gives its CinematicSequences id once (0: none; ~0u: the server sent 0), completeCinematic() answers when it is over.
+    bool playCinematics = false;
+    uint32_t takeCinematic() { const uint32_t c = cinematicPending_; cinematicPending_ = 0; return c; }
+    void completeCinematic();
+    int cinematicsPlayed() const { return cinematicsPlayed_; }
     // Called for every packet not consumed by the session itself.
     std::function<void(const Packet&)> onPacket;
     uint32_t pingIntervalMs = 30000;   // keep-alive period (the real client uses 30 s)
@@ -170,8 +183,11 @@ private:
     uint64_t t0_ = 0, tStep_ = 0, lastPing_ = 0, pingSent_ = 0, deadline_ = 0;
     Timings t_;
     std::map<uint16_t, uint32_t> opCounts_;
-    uint64_t bytesIn_ = 0, packetsIn_ = 0, packetsOut_ = 0, bytesOut_ = 0;
+    uint64_t bytesIn_ = 0, packetsIn_ = 0, packetsOut_ = 0, bytesOut_ = 0, lastRecvMs_ = 0;   // 6.66: lastRecvMs_ = when the last packet arrived
     bool wardenSeen_ = false;
+    int cinematicsSkipped_ = 0;   // 6.86: SMSG_TRIGGER_CINEMATIC answered with CMSG_COMPLETE_CINEMATIC
+    uint32_t cinematicPending_ = 0;   // 7.04
+    int cinematicsPlayed_ = 0;
     bool logoutToChars_ = false, logoutRefused_ = false;
     int createResult_ = -1, deleteResult_ = -1;
 };

@@ -30,6 +30,22 @@ inline std::string stripWowCodes(const std::string& s) {
     return o;
 }
 
+// 6.91: the item links of a chat line, in order: the entry and the visible "[Name]" (|Hitem:ENTRY:...|h[Name]|h).
+struct ItemLink { uint32_t entry = 0; std::string shown; };
+inline std::vector<ItemLink> itemLinks(const std::string& s) {
+    std::vector<ItemLink> out;
+    for (size_t i = s.find("|Hitem:"); i != std::string::npos; i = s.find("|Hitem:", i + 1)) {
+        ItemLink l;
+        for (size_t k = i + 7; k < s.size() && s[k] >= '0' && s[k] <= '9'; ++k) l.entry = l.entry * 10 + (uint32_t)(s[k] - '0');
+        const size_t h = s.find("|h", i + 2);
+        if (h == std::string::npos) break;
+        const size_t e = s.find("|h", h + 2);
+        l.shown = s.substr(h + 2, (e == std::string::npos ? s.size() : e) - h - 2);
+        if (l.entry) out.push_back(l);
+    }
+    return out;
+}
+
 inline std::string utf8ToConsole(const std::string& in) {
     static const char* kRu[64] = {   // U+0410..U+044F
         "A", "B", "V", "G", "D", "E", "Zh", "Z", "I", "Y", "K", "L", "M", "N", "O", "P",

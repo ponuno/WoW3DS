@@ -1,5 +1,6 @@
 // spell_view.cpp — see spell_view.hpp.
 #include "spell_view.hpp"
+#include "unit_state.hpp"
 
 #include <math.h>
 #include <string.h>
@@ -102,6 +103,12 @@ void SpellView::update(w3n::GameSession& g, uint32_t nowMs, const float cam[3], 
         l.targets = e.nTargets;
         l.hasVisual = table_.visualOf(e.spell, nullptr) != nullptr;
         l.result = (uint8_t)dir_.event(e, nowMs, cam, where, &l.dist);
+        if (e.kind == sfx::Event::Go && e.nTargets && !dir_.startedMissile(e.caster, nowMs)) {   // 6.95: arrows and bullets
+            const w3n::WorldObject* co = g.objects.find(e.caster);
+            const int kind = co ? rangedAmmoKind(g, *co, e.spell) : 0;
+            const uint16_t fx = kind == 1 ? table_.arrow() : kind == 2 ? table_.bullet() : (uint16_t)W3D_SFX_NONE;
+            if (fx != W3D_SFX_NONE) dir_.shoot(e.caster, e.targets[0], fx, nowMs, cam, where);
+        }
         logAt_ = (logAt_ + 1) % kLog;
         if (logN_ < kLog) ++logN_;
     }

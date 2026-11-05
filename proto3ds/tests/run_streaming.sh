@@ -27,3 +27,7 @@ echo "STREAMING ORDER: PASS"
 HEAP_EXPECT=full PACE_US=2000 "$OUT/streamer_asan" "$OUT/wide.w3dp" 1500 | grep -E "ring at|HEAP RESERVE|STREAMER"
 W3D_HEAP_FREE_MB=2 HEAP_EXPECT=small PACE_US=2000 "$OUT/streamer_asan" "$OUT/wide.w3dp" 1500 | grep -E "ring at|HEAP RESERVE|STREAMER" | tee "$OUT/heap.log"
 grep -q "HEAP RESERVE (small): PASS" "$OUT/heap.log"
+# 6.37: the login screens stream nothing of the world (frames 300-900), the world comes back after them
+WORLD_OFF=300,900 PACE_US=2000 "$OUT/streamer_asan" "$OUT/wide.w3dp" 1400 | grep -E "WORLD OFF|STREAMER" | tee "$OUT/worldoff.log"
+grep -q "WORLD OFF (login screens): .*PASS" "$OUT/worldoff.log"
+grep -q "STREAMER: PASS" "$OUT/worldoff.log"

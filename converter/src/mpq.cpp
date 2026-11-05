@@ -29,17 +29,18 @@ int mpqPriority(const fs::path& p, bool inLocaleDir) {
     int pr = inLocaleDir ? 1 : 0;
     if (n.rfind("patch", 0) == 0) {
         // "patch.mpq" -> 1, "patch-2.mpq" -> 2, "patch-a.mpq" -> 'a', "patch-enus.mpq" -> 1
-        int level = 1;
+        int level = 1, sub = 0;
         if (n.size() > 6 && n[5] == '-') {
             std::string tag = n.substr(6, n.find('.') - 6);
-            if (tag.size() == 1) level = std::isdigit((unsigned char)tag[0]) ? tag[0] - '0' : tag[0];
+            if (tag == "1") sub = 1;   // Turtle WoW: patch-1.mpq comes after patch.mpq
+            else if (tag.size() == 1) level = std::isdigit((unsigned char)tag[0]) ? tag[0] - '0' : tag[0];
             else if (!tag.empty() && std::all_of(tag.begin(), tag.end(), ::isdigit)) level = std::stoi(tag);
             else if (tag.size() > 4 && tag[4] == '-') {  // patch-enUS-2.mpq
                 char c = tag.back();
                 level = std::isdigit((unsigned char)c) ? c - '0' : c;
             }
         }
-        pr = 1000 + level * 2 + (inLocaleDir ? 1 : 0);
+        pr = 1000 + level * 4 + sub + (inLocaleDir ? 2 : 0);
     }
     return pr;
 }

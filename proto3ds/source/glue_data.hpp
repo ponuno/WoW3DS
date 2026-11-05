@@ -40,6 +40,8 @@ struct ClassInfo {
 // The eight races in the order of the creation screen: Alliance (Human, Dwarf, Night Elf, Gnome), Horde (Orc, Undead,
 // Tauren, Troll); the nine classes in the game's button order.
 const RaceInfo* races(int* count);
+// 6.95: Turtle WoW adds two races (9 Goblin, 10 High Elf) and a few race/class combinations; off for vanilla.
+void setTurtle(bool on);
 const ClassInfo* classes(int* count);
 const RaceInfo* race(uint8_t id);
 const ClassInfo* cls(uint8_t id);

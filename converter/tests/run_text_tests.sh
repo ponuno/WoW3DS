@@ -10,10 +10,19 @@ rm -rf "$OUT" && mkdir -p "$OUT/data" "$OUT/sd"
 python3 "$T/gen_text_dbc.py" "$T/../../net/tests/data/factions_test.txt" "$OUT/data"
 "$B/w3dconv" --data "$OUT/data" --texts-only -o "$OUT/sd/test.w3dp"
 diff <(grep -v '^#' "$OUT/sd/factions.txt") <(grep -v '^#' "$T/../../net/tests/data/factions_test.txt") && echo "FACTIONS ROUND TRIP: PASS"
-printf '78\tHeroic Strike\tRank 1\n284\tHeroic Strike\tRank 2\n6673\tBattle Shout\tRank 1\n7380\tHeroic Strike\tRank 2\n1127\tWell Fed\t\n' > "$OUT/spells.expect"
+printf '78\tHeroic Strike\tRank 1\n284\tHeroic Strike\tRank 2\n6673\tBattle Shout\tRank 1\n1752\tSinister Strike\tRank 1\n1776\tGouge\tRank 1\n3044\tArcane Shot\tRank 1\n75\tAuto Shot\t\n7863\tEnchant Boots - Minor Stamina\t\n2657\tSmelt Copper\t\n7380\tHeroic Strike\tRank 2\n1127\tWell Fed\t\n' > "$OUT/spells.expect"
 diff <(grep -v "^@" "$OUT/sd/spells.txt") "$OUT/spells.expect" && echo "SPELL NAMES + TRAINER SPELLS: PASS"
 printf '@cd\t100\t15000\t0\t0\t0\n@cd\t439\t0\t4\t120000\t0\n@cd\t1784\t10000\t0\t0\t1\n' > "$OUT/cd.expect"
 diff <(grep "^@cd" "$OUT/sd/spells.txt") "$OUT/cd.expect" && echo "SPELL COOLDOWNS: PASS"
+printf '@cast\t133\t3500\n' > "$OUT/cast.expect"
+diff <(grep "^@cast" "$OUT/sd/spells.txt") "$OUT/cast.expect" && echo "SPELL CAST TIMES: PASS"
+# 6.87: auto-attack kinds (1 melee ability starts it, 2 ranged weapon, 4 stops it)
+printf '@combat\t1752\t1\n@combat\t1776\t4\n@combat\t3044\t2\n@combat\t75\t2\n@combat\t6660\t2\n' > "$OUT/combat.expect"
+diff <(grep "^@combat" "$OUT/sd/spells.txt") "$OUT/combat.expect" && echo "AUTO-ATTACK SPELLS: PASS"
+# 6.87: ranges of learnable spells at a unit (Arcane Shot 8-35; the bolts are not learnable here)
+[ "$(grep "^@range" "$OUT/sd/spells.txt")" = "$(printf "@range\t3044\t8.0\t35.0")" ] && echo "SPELL RANGES: PASS"
+# 6.90: recipes.txt - the enchant names what it fits (armour, feet), the smelting none
+grep -q "^R	186	7863	0	0	0	1	0	1	-	10940:1	4:0:256$" "$OUT/sd/recipes.txt" && grep -q "^R	186	2657	0	0	0	0	2840	1	-	2770:1	-1:0:0$" "$OUT/sd/recipes.txt" && echo "RECIPE ITEM REQUIREMENTS: PASS"
 # 6.19: skills.txt - the category is kept, the nameless row skipped, tabs / newlines of a description flattened
 printf 'S\t43\t6\tSwords\t\nS\t186\t11\tMining\tOre and rock\nS\t98\t10\tLanguage: Common\t\n' > "$OUT/skills.expect"
 diff <(grep "^S" "$OUT/sd/skills.txt") "$OUT/skills.expect" && echo "SKILLS: PASS"

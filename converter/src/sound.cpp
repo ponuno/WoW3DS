@@ -30,7 +30,7 @@ namespace {
 
 // event -> SoundEntries names tried in order (the first that exists wins); --sound-events overrides / adds
 const std::vector<std::pair<std::string, std::vector<std::string>>> kDefaultEvents = {
-    {"click", {"igMainMenuOptionCheckBoxOn", "igMainMenuOption"}},
+    {"click", {"igMainMenuOptionCheckBoxOn", "igMainMenuOption", "@Sound\\Interface\\iUiInterfaceButtonA.wav"}},
     {"tab", {"igCharacterInfoTab"}},
     {"open", {"igCharacterInfoOpen", "igMainMenuOpen"}},
     {"close", {"igCharacterInfoClose", "igMainMenuClose"}},
@@ -43,10 +43,22 @@ const std::vector<std::pair<std::string, std::vector<std::string>>> kDefaultEven
     {"npcopen", {"igQuestListOpen", "igCharacterInfoOpen"}},
     {"npcclose", {"igQuestListClose", "igCharacterInfoClose"}},
     {"questaccept", {"igQuestListSelect", "igQuestListOpen"}},
-    {"questcomplete", {"igQuestListComplete"}},
+    {"questcomplete", {"igQuestListComplete", "@Sound\\Interface\\iQuestComplete.wav"}},
     {"questabandon", {"igQuestLogAbandonQuest"}},
-    {"coin", {"LOOTWINDOWCOINSOUND"}},
-    {"levelup", {"LevelUp", "LEVELUPSOUND"}},
+    {"coin", {"LOOTWINDOWCOINSOUND", "LootWindowCoinSound", "*coinsound", "@Sound\\Interface\\LootCoinSmall.wav"}},
+    // 6.39: an item landing in the bags / being put on (the names are guesses; the built-in blip fills in when this client has none)
+    {"lootitem", {"PickUpCloth_Leather01", "PickUpMetalSmall", "PickUpGems", "@Sound\\Interface\\igLootCreature.wav", "@Sound\\Interface\\PickUp\\PickUpBag.wav"}},
+    {"equip", {"PickUpMetalLarge", "PickUpCloth_Leather01", "@Sound\\Interface\\PickUp\\PickUpBag.wav"}},
+    {"error", {"@Sound\\Interface\\Error.wav"}},
+    {"questupdate", {"@Sound\\Interface\\iQuestUpdate.wav"}},
+    // our own spell going off by its school of magic, for spells whose data gave no sound (the files WoWee plays)
+    {"spellcast_fire", {"@Sound\\Spells\\Cast\\FireCast.wav"}},
+    {"spellcast_frost", {"@Sound\\Spells\\Cast\\IceCast.wav"}},
+    {"spellcast_holy", {"@Sound\\Spells\\Cast\\HolyCast.wav"}},
+    {"spellcast_nature", {"@Sound\\Spells\\Cast\\NatureCast.wav"}},
+    {"spellcast_shadow", {"@Sound\\Spells\\Cast\\ShadowCast.wav"}},
+    {"spellcast_arcane", {"@Sound\\Spells\\Arcane_Form_Precast.wav"}},
+    {"levelup", {"LevelUp", "LEVELUPSOUND", "@Sound\\Interface\\LevelUp.wav"}},
     // an area explored for the first time (stage 5.45): the exact names are a guess; "*word" takes the first SoundEntries name
     // containing the word (alphabetical), so an odd spelling in this client is still found (the log says which one it took)
     {"discover", {"DiscoverArea", "AreaDiscovered", "ZoneDiscovered", "UI_DiscoverArea", "Discovery", "*discover", "*explor"}},
@@ -59,6 +71,22 @@ const std::vector<std::pair<std::string, std::vector<std::string>>> kDefaultEven
     {"targetneutral", {"igCreatureNeutralSelect"}},
     {"targetlost", {"INTERFACESOUND_LOSTTARGETUNIT", "igCreatureAggroDeselect"}},
     {"mail", {"igMainMenuOptionCheckBoxOn"}},
+    // 7.03: a ranged weapon going off (Auto Shot, Shoot, Throw): those spells have no sound of their own, the original plays the
+    // weapon's. The SoundEntries names of 1.12 are not known for sure: "*word" = a row whose name has the word, "%word" = a row
+    // whose file path has it (the folder Sound\Item\Weapons\Gun\ ...), "@file" = that file; the log says which one it took.
+    // The last resort is a weapon whoosh (it exists in every 1.12 client) rather than the built-in blip.
+    {"shoot_gun", {"*gunfire", "%gunfire", "%gunshot", "%weapons\\gun\\", "*rifle", "@Sound\\Item\\Weapons\\WeaponSwings\\mWooshMedium1.wav"}},
+    {"shoot_bow", {"*bowrelease", "%bowrelease", "%arrowrelease", "%bowshoot", "%bowfire", "%weapons\\bow\\",
+                   "@Sound\\Item\\Weapons\\WeaponSwings\\mWooshMedium1.wav"}},
+    {"shoot_crossbow", {"*crossbowshoot", "*crossbowfire", "%crossbowshoot", "%crossbowfire", "%weapons\\crossbow\\", "*bowrelease",
+                        "%bowrelease", "%weapons\\bow\\", "@Sound\\Item\\Weapons\\WeaponSwings\\mWooshMedium1.wav"}},
+    {"shoot_wand", {"*wandshoot", "*wandfire", "%wand", "@Sound\\Spells\\Arcane_Form_Precast.wav"}},
+    {"shoot_throw", {"*throwrelease", "%thrown", "%throw", "@Sound\\Item\\Weapons\\WeaponSwings\\mWooshSmall1.wav"}},
+    // 7.07: the fight's sounds the 3DS played as built-in blips when the pack had none (it now plays nothing then): a miss / dodge /
+    // parry whooshes, a cast that fails fizzles, a blow with no weapon / creature sound thuds. Real files of the client only.
+    {"swing", {"@Sound\\Item\\Weapons\\WeaponSwings\\mWooshMedium1.wav", "%weaponswings\\"}},
+    {"spellfail", {"*fizzle", "%fizzle"}},
+    {"hit", {"%hitflesh"}},
 };
 
 std::string lower(std::string s) {
@@ -441,10 +469,38 @@ void exportWorldTables(const DataDir& data, WorldCtx& w, bool verbose) {
         uint32_t c = 2, ok = 0, nz = 0;
         for (uint32_t r = 0; r < cdi.records; ++r)
             if (uint32_t v = cdi.u32(r, c)) { ++nz; ok += csdIds.count(v) ? 1 : 0; }
+        // 6.60: a fixed-skin creature keeps its sound set on its model (CreatureModelData.SoundDataID, column 13: 1.12, TBC, WotLK),
+        // its display's column 2 is 0 - WoWee's NpcVoiceManager falls back to it. Without that fallback these creatures had no
+        // fight sounds at all (no aggro, wound, attack or death).
+        std::map<uint32_t, uint32_t> modelSound;
+        {
+            DbcTable cmd;
+            if (cmd.load(data, "CreatureModelData.dbc") && cmd.fields > 13) {
+                uint32_t mnz = 0, mok = 0;
+                for (uint32_t r = 0; r < cmd.records; ++r)
+                    if (uint32_t v = cmd.u32(r, 13)) { ++mnz; mok += csdIds.count(v) ? 1 : 0; }
+                if (mnz && mok * 2 >= mnz)   // (checked against the CreatureSoundData ids, like column 2 above)
+                    for (uint32_t r = 0; r < cmd.records; ++r)
+                        if (uint32_t v = cmd.u32(r, 13); csdIds.count(v)) modelSound[cmd.u32(r, 0)] = v;
+            }
+        }
+        size_t viaModel = 0, direct = 0;
         if (nz && ok * 2 >= nz)
-            for (uint32_t r = 0; r < cdi.records; ++r)
-                if (uint32_t v = cdi.u32(r, c); csdIds.count(v))
-                    w.txt += "D\t" + std::to_string(cdi.u32(r, 0)) + "\t" + std::to_string(v) + "\n";
+            for (uint32_t r = 0; r < cdi.records; ++r) {
+                uint32_t v = cdi.u32(r, c);
+                if (!csdIds.count(v)) {
+                    auto m = modelSound.find(cdi.u32(r, 1));
+                    if (m == modelSound.end()) continue;
+                    v = m->second;
+                    ++viaModel;
+                } else {
+                    ++direct;
+                }
+                w.txt += "D\t" + std::to_string(cdi.u32(r, 0)) + "\t" + std::to_string(v) + "\n";
+            }
+        if (verbose)
+            std::printf("  creature sounds: %zu displays with their own sound set, %zu through their model (6.60), %zu of %u without\n",
+                        direct, viaModel, (size_t)cdi.records - direct - viaModel, cdi.records);
     }
     // weapon impacts: ID, WeaponSubClassID, ParrySoundType, ImpactSoundID[10] 3-12, CritImpactSoundID[10] 13-22
     DbcTable wis;
@@ -779,6 +835,218 @@ bool writeWorldBank(const DataDir& data, const SoundOptions& so, WorldCtx& w, co
 
 }  // namespace
 
+// ---- 7.04: intro cinematics (cinematics.txt + the narration in music/). SMSG_TRIGGER_CINEMATIC names a CinematicSequences row
+// (1.12: ID, SoundID, Camera[8]); each camera (CinematicCamera 1.12: ID, Model, SoundID, Origin x y z, Facing) is the camera of
+// an M2 (Cameras\FlyBy*.mdx) flown along its position and target tracks. The 3DS gets the flight baked in world coordinates
+// every 100 ms (as TrinityCore's M2Stores: base + spline value, turned by Facing, moved to Origin):
+//   Q seq totalMs | S seq startMs file vol*100 | K seq tMs x y z tx ty tz
+namespace {
+struct CamTrack { std::vector<uint32_t> t; std::vector<float> v; uint16_t interp = 0; uint32_t stride = 36; };
+
+// How jagged a path is: the summed length of its second differences (a camera's flight is smooth; values read with the wrong key
+// size alternate between a position and its tangents and zig-zag).
+double roughness(const std::vector<float>& v) {
+    double r = 0;
+    for (size_t k = 1; k + 1 < v.size() / 3; ++k) {
+        double d2 = 0;
+        for (int c = 0; c < 3; ++c) {
+            const double d = (double)v[(k + 1) * 3 + c] - 2.0 * v[k * 3 + c] + v[(k - 1) * 3 + c];
+            d2 += d * d;
+        }
+        r += std::sqrt(d2);
+    }
+    double len = 0;   // per yard flown: a long smooth flight is not rougher than a short one
+    for (size_t k = 1; k < v.size() / 3; ++k) {
+        double d2 = 0;
+        for (int c = 0; c < 3; ++c) { const double d = (double)v[k * 3 + c] - v[(k - 1) * 3 + c]; d2 += d * d; }
+        len += std::sqrt(d2);
+    }
+    return r / (len + 1e-3);
+}
+
+bool readCamTrack(const std::vector<uint8_t>& m, size_t at, CamTrack& tr) {
+    if (at + 28 > m.size()) return false;
+    tr.interp = rd16(&m[at]);
+    const uint32_t nR = rd32(&m[at + 4]), oR = rd32(&m[at + 8]), nT = rd32(&m[at + 12]), oT = rd32(&m[at + 16]);
+    const uint32_t nK = rd32(&m[at + 20]), oK = rd32(&m[at + 24]);
+    if (!nT || !nK || nT > 100000 || nK > 100000) return false;
+    if ((uint64_t)oT + nT * 4ull > m.size()) return false;
+    const uint32_t nAll = std::min(nT, nK);
+    // 7.09: which keys make the flight. The longest of the animations' ranges (vanilla: inclusive, as the bones' 6.43c) with at least
+    // two keys; else all keys. 7.08 took the first range as it was - a range of one key (0, 0) left a single key: the intro's camera
+    // stood still at its start.
+    uint32_t a = 0, b = nAll;
+    if (nR && nR < 1000 && (uint64_t)oR + (uint64_t)nR * 8 <= m.size()) {
+        uint32_t bestN = 0;
+        for (uint32_t i = 0; i < nR; ++i) {
+            const uint32_t ra = rd32(&m[oR + i * 8]), rb = rd32(&m[oR + i * 8 + 4]);
+            if (ra >= rb || rb >= nAll) continue;
+            if (rb - ra + 1 > bestN) { bestN = rb - ra + 1; a = ra; b = rb + 1; }
+        }
+    }
+    // the longest run of rising times in it (a track whose clock restarts - several animations in one - jumped back)
+    std::vector<uint32_t> keep, run;
+    for (uint32_t k = a; k < b; ++k) {
+        const uint32_t tk = rd32(&m[oT + k * 4]);
+        if (!run.empty() && tk <= rd32(&m[oT + run.back() * 4])) {
+            if (run.size() > keep.size()) keep = run;
+            run.clear();
+        }
+        run.push_back(k);
+    }
+    if (run.size() > keep.size()) keep = run;
+    if (keep.empty()) return false;
+    auto f = [&](size_t o) { float x; std::memcpy(&x, &m[o], 4); return x; };
+    // 7.08: the key size from the data, not from what fits in the file: M2SplineKey<C3Vector> (value, in, out: 36 bytes) or a bare
+    // C3Vector (12). Read with the wrong size the camera zig-zagged between positions and tangents ("flies back and forth").
+    std::vector<float> best;
+    double bestR = 0;
+    for (uint32_t stride : {36u, 12u}) {
+        if ((uint64_t)oK + (uint64_t)nK * stride > m.size()) continue;
+        std::vector<float> v;
+        for (uint32_t k : keep) {
+            if (k >= nK) break;
+            for (int c = 0; c < 3; ++c) v.push_back(f(oK + (size_t)k * stride + c * 4));
+        }
+        if (v.size() != keep.size() * 3) continue;
+        bool finite = true;
+        for (float x : v) finite = finite && std::isfinite(x) && std::fabs(x) < 1e5f;
+        if (!finite) continue;
+        const double r = roughness(v);
+        if (best.empty() || r < bestR * 0.5) {   // (the 36-byte key of the format unless bare vectors are clearly smoother)
+            best = std::move(v); bestR = r; tr.stride = stride; }
+    }
+    if (best.empty()) return false;
+    for (uint32_t k : keep) tr.t.push_back(rd32(&m[oT + k * 4]) - rd32(&m[oT + keep[0] * 4]));
+    tr.v = std::move(best);
+    return true;
+}
+
+// 7.08: between keys the camera follows a Catmull-Rom curve through the key values, timed by the keys (the tangents of the file
+// were used before as Hermite tangents / Bezier control points - their meaning was a guess, and a wrong one threw the camera
+// about). Interpolation 0 holds each key, 1 is linear.
+void evalCamTrack(const CamTrack& tr, uint32_t t, float out[3]) {
+    const size_t n = tr.t.size();
+    if (t <= tr.t[0] || n == 1) { for (int c = 0; c < 3; ++c) out[c] = tr.v[c]; return; }
+    if (t >= tr.t[n - 1]) { for (int c = 0; c < 3; ++c) out[c] = tr.v[(n - 1) * 3 + c]; return; }
+    size_t k = 0;
+    while (k + 1 < n && tr.t[k + 1] <= t) ++k;
+    const float span = (float)(tr.t[k + 1] - tr.t[k]);
+    const float u = span > 0 ? (float)(t - tr.t[k]) / span : 0.0f;
+    for (int c = 0; c < 3; ++c) {
+        const float p0 = tr.v[k * 3 + c], p1 = tr.v[(k + 1) * 3 + c];
+        if (tr.interp == 0) { out[c] = p0; continue; }
+        if (tr.interp == 1) { out[c] = p0 + (p1 - p0) * u; continue; }
+        // velocities at both keys from their neighbours (one-sided at the ends), in units per ms, scaled to this segment
+        auto vel = [&](size_t i) {
+            const size_t lo = i ? i - 1 : i, hi = i + 1 < n ? i + 1 : i;
+            const float dt = (float)(tr.t[hi] - tr.t[lo]);
+            return dt > 0 ? (tr.v[hi * 3 + c] - tr.v[lo * 3 + c]) / dt : 0.0f;
+        };
+        const float m0 = vel(k) * span, m1 = vel(k + 1) * span, u2 = u * u, u3 = u2 * u;
+        out[c] = (2 * u3 - 3 * u2 + 1) * p0 + (u3 - 2 * u2 + u) * m0 + (-2 * u3 + 3 * u2) * p1 + (u3 - u2) * m1;
+    }
+}
+}  // namespace
+
+size_t exportCinematics(const DataDir& data, const DbcTable& se, const std::unordered_map<uint32_t, uint32_t>& byId, const SoundOptions& so,
+                        const std::string& base, bool verbose) {
+    DbcTable seq, cam;
+    if (!seq.load(data, "CinematicSequences.dbc") || !cam.load(data, "CinematicCamera.dbc") || seq.fields < 3 || cam.fields < 7) {
+        std::printf("  cinematics: CinematicSequences / CinematicCamera.dbc not found\n");
+        return 0;
+    }
+    std::unordered_map<uint32_t, uint32_t> camRow;
+    for (uint32_t r = 0; r < cam.records; ++r) camRow[cam.u32(r, 0)] = r;
+    std::string txt = "# wow3ds intro cinematics (7.04): Q seq totalMs | S seq startMs file vol | K seq tMs x y z tx ty tz\n";
+    size_t done = 0;
+    auto narration = [&](uint32_t soundId, const std::string& name, int* vol) -> std::string {
+        auto it = byId.find(soundId);
+        if (!soundId || it == byId.end()) return std::string();
+        SoundRow s = soundRow(se, it->second);
+        *vol = (int)std::lround(s.volume * 100);
+        for (const std::string& path : s.files) {
+            std::vector<uint8_t> f;
+            if (!data.read(path, f) || f.size() < 256) continue;
+            const std::string lp = lower(path);
+            if (lp.size() > 4 && lp.substr(lp.size() - 4) == ".mp3") {
+                if (writeFile(base + "music/" + name + ".mp3", f.data(), f.size())) return name + ".mp3";
+                continue;
+            }
+            Pcm p;
+            if (!decodeSound(f, p)) continue;
+            resample(p, so.streamRate);
+            std::vector<uint8_t> ima;
+            imaEncode(p, ima);
+            if (writeFile(base + "music/" + name + ".ima", ima.data(), ima.size())) return name + ".ima";
+        }
+        return std::string();
+    };
+    for (uint32_t r = 0; r < seq.records; ++r) {
+        const uint32_t sid = seq.u32(r, 0);
+        uint32_t at = 0;
+        std::string keys;
+        std::string sounds;
+        int vol = 100;
+        if (std::string f = narration(seq.u32(r, 1), "cin" + std::to_string(sid), &vol); !f.empty())
+            sounds += "S\t" + std::to_string(sid) + "\t0\t" + f + "\t" + std::to_string(vol) + "\n";
+        for (uint32_t c = 2; c < seq.fields && c < 10; ++c) {
+            auto it = camRow.find(seq.u32(r, c));
+            if (!seq.u32(r, c) || it == camRow.end()) continue;
+            const uint32_t cr = it->second;
+            std::string model = cam.str(cr, 1);
+            if (model.size() > 4 && lower(model.substr(model.size() - 4)) == ".mdx") model = model.substr(0, model.size() - 4) + ".m2";
+            std::vector<uint8_t> m;
+            if (!data.read(model, m) || m.size() < 0x130 || std::memcmp(m.data(), "MD20", 4)) {
+                if (verbose) std::printf("  cinematic %u: camera model %s not readable\n", sid, model.c_str());
+                continue;
+            }
+            const uint32_t nCam = rd32(&m[0x124]), oCam = rd32(&m[0x128]);   // vanilla header (version 256)
+            if (!nCam || (uint64_t)oCam + 124 > m.size()) continue;
+            CamTrack pos, tgt;
+            if (!readCamTrack(m, oCam + 16, pos)) continue;
+            const bool haveTgt = readCamTrack(m, oCam + 56, tgt);
+            float pb[3], tb[3];
+            std::memcpy(pb, &m[oCam + 44], 12);
+            std::memcpy(tb, &m[oCam + 84], 12);
+            const float ox = cam.f32(cr, 3), oy = cam.f32(cr, 4), oz = cam.f32(cr, 5), fo = cam.f32(cr, 6);
+            const float co = std::cos(fo), so_ = std::sin(fo);
+            auto world = [&](const float l[3], float w[3]) {
+                w[0] = ox + l[0] * co - l[1] * so_;
+                w[1] = oy + l[1] * co + l[0] * so_;
+                w[2] = oz + l[2];
+            };
+            const uint32_t len = std::max(pos.t.back(), haveTgt ? tgt.t.back() : 0u);
+            if (std::string f = narration(cam.u32(cr, 2), "cin" + std::to_string(sid) + "_" + std::to_string(c - 2), &vol); !f.empty())
+                sounds += "S\t" + std::to_string(sid) + "\t" + std::to_string(at) + "\t" + f + "\t" + std::to_string(vol) + "\n";
+            char line[200];
+            for (uint32_t t = 0;; t += 100) {
+                const uint32_t tt = std::min(t, len);
+                float lp[3], lt[3], wp[3], wt[3];
+                evalCamTrack(pos, tt, lp);
+                for (int k = 0; k < 3; ++k) lp[k] += pb[k];
+                if (haveTgt) { evalCamTrack(tgt, tt, lt); for (int k = 0; k < 3; ++k) lt[k] += tb[k]; }
+                else for (int k = 0; k < 3; ++k) lt[k] = tb[k];
+                world(lp, wp);
+                world(lt, wt);
+                std::snprintf(line, sizeof line, "K\t%u\t%u\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\n", sid, at + tt, wp[0], wp[1], wp[2], wt[0], wt[1], wt[2]);
+                keys += line;
+                if (tt >= len) break;
+            }
+            if (verbose)
+                std::printf("  cinematic %u camera %u: %s, %.1f s, %zu position keys (interpolation %u, %u-byte keys), %zu target keys, origin %.0f %.0f %.0f\n",
+                            sid, seq.u32(r, c), model.c_str(), len / 1000.0, pos.t.size(), pos.interp, pos.stride, tgt.t.size(), ox, oy, oz);
+            at += len;
+        }
+        if (!at) continue;
+        txt += "Q\t" + std::to_string(sid) + "\t" + std::to_string(at) + "\n" + sounds + keys;
+        ++done;
+    }
+    writeFile(base + "cinematics.txt", txt.data(), txt.size());
+    std::printf("  cinematics: %zu of %u sequences\n", done, seq.records);
+    return done;
+}
+
 bool convertSound(const SoundOptions& so, const DataDir& data, bool verbose) {
     namespace fs = std::filesystem;
     std::error_code ec;
@@ -830,13 +1098,31 @@ bool convertSound(const SoundOptions& so, const DataDir& data, bool verbose) {
                 it = best.empty() ? byName.end() : byName.find(best);
                 used = best;
             }
-            if (it == byName.end()) continue;
-            SoundRow s = soundRow(se, it->second);
+            if (!nm.empty() && nm[0] == '%') {   // 7.03: "%word": the first row (by name) one of whose files has the word in its path
+                const std::string w = lower(nm.substr(1));
+                std::string best;
+                for (const auto& [k, r] : byName) {
+                    if (!best.empty() && k >= best) continue;
+                    for (const std::string& f : soundRow(se, r).files)
+                        if (lower(f).find(w) != std::string::npos) { best = k; break; }
+                }
+                it = best.empty() ? byName.end() : byName.find(best);
+                used = best.empty() ? nm : nm + " (" + best + ")";
+            }
+            SoundRow s;
+            if (!nm.empty() && nm[0] == '@') {   // 6.40: "@Sound\\Interface\\Error.wav": a file of the client itself, not a SoundEntries name
+                s.files.push_back(nm.substr(1));
+                s.volume = 1.0f;
+                used = nm;
+            } else {
+                if (it == byName.end()) continue;
+                s = soundRow(se, it->second);
+            }
             for (size_t k = 0; k < s.files.size() && k < 3; ++k) {
                 std::vector<uint8_t> f;
                 Pcm p;
                 if (!data.read(s.files[k], f) || !decodeSound(f, p)) {
-                    if (verbose) std::fprintf(stderr, "  sound %s: cannot decode %s\n", ev.c_str(), s.files[k].c_str());
+                    if (verbose && nm[0] != '@') std::fprintf(stderr, "  sound %s: cannot decode %s\n", ev.c_str(), s.files[k].c_str());
                     continue;
                 }
                 resample(p, so.sfxRate);
@@ -1029,6 +1315,7 @@ bool convertSound(const SoundOptions& so, const DataDir& data, bool verbose) {
     progressDone("music: %zu music + %zu ambience sounds, %zu files, %.0f MB", musicSounds.size(), ambSounds.size(), files,
                  bytes / 1048576.0);
 
+    if (so.music) exportCinematics(data, se, byId, so, base, verbose);   // 7.04
     // ---- which area each terrain chunk belongs to
     DbcTable maps;
     if (maps.load(data, "Map.dbc")) {

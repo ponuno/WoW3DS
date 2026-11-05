@@ -17,6 +17,7 @@ namespace w3d {
 struct CreatureBuildInfo {
     size_t tris = 0, verts = 0, palettes = 0, bones = 0, seqs = 0, keyBytes = 0, flippedSubs = 0, droppedSeqs = 0;
     size_t srcVerts = 0, lossyVerts = 0;   // vertices whose 3rd+4th influences carried > 10% of the weight
+    size_t farSkeletons = 0;               // 7.0: 1 when the blob has a far palette (header.farPalette)
     std::set<uint16_t> geosets;            // submesh ids present (for per-display geoset selection)
     bool needsAlpha[W3D_CTEX_KINDS] = {};   // per W3dCreatureTexKind 0..6
     std::string error;

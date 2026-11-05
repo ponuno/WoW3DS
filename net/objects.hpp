@@ -81,6 +81,11 @@ struct WorldObject {
     // A unit standing on a transport (MoveFlag::OnTransport): ObjectTable::tickTransports keeps mv at the world position
     // computed from the transport's pose and the unit's offset, and 'carried' turns the usual extrapolation off.
     bool carried = false;
+    // 6.83: a new server path starts where the server says the unit is, not where we drew it: the difference (drawn - server) is
+    // carried along and fades out over kBlendMs, so a chasing monster whose path is renewed every few hundred ms does not jump back and forth.
+    float blend[3] = {0, 0, 0};
+    uint32_t blendMs = 0;            // local time of the renewal (0 = none)
+    static constexpr uint32_t kBlendMs = 350;
     uint32_t carriedStamp = 0, carriedBaseMs = 0;   // mv.time of the last packet seen, local time it was seen
     float carriedBase[3] = {0, 0, 0}, carriedO = 0;               // offset (x, y, z) in that packet
     std::vector<uint32_t> fields;    // update fields (index -> value), grown on demand
@@ -102,6 +107,7 @@ struct WorldObject {
     // so the door / chest animation plays only for a change we saw happen.
     uint32_t stateChangeMs = 0;
     bool castGoDirected = false;     // at someone else (the hands point) or around itself
+    bool castGoAtObject = false;     // 6.36: at a game object (opening, gathering): the caster kneels instead of casting
     bool taxiFlight() const { return isUnitLike() && (field(UF::UNIT_FLAGS) & 0x00100000u) != 0; }   // UNIT_FLAG_TAXI_FLIGHT
     uint8_t standState() const { return (uint8_t)(field(UF::UNIT_BYTES_1) & 0xFF); }   // 0 stand, 1 sit, 3 sleep, 8 kneel ...
     uint32_t emoteState() const { return field(UF::UNIT_NPC_EMOTESTATE); }             // looping Emotes.dbc id (work, dance)
@@ -147,6 +153,7 @@ struct ObjectStats {
     uint32_t updatePackets = 0, compressedPackets = 0, failedPackets = 0;
     uint32_t blocks[6] = {0, 0, 0, 0, 0, 0};   // VALUES, MOVEMENT, CREATE, CREATE2, OUT_OF_RANGE, NEAR
     uint32_t destroys = 0, monsterMoves = 0, monsterMoveFails = 0, compressedMoves = 0, playerMoves = 0;
+    uint32_t turtleFallbacks = 0, turtleCompressedMoves = 0;   // 6.58: blocks read with 1.12's layout after Turtle's failed; zlib monster moves
     uint32_t nameAnswers = 0, creatureAnswers = 0, gameobjectAnswers = 0;
     uint64_t inflatedIn = 0, inflatedOut = 0;
     std::string lastError;
@@ -154,6 +161,10 @@ struct ObjectStats {
 
 class ObjectTable {
 public:
+    // 6.58: a Turtle WoW clone's server (WoWee TurtlePacketParsers): a u32 time after the transport position in movement
+    // blocks (1.12 has none; tried first, then 1.12's), the spline also under TBC's flag 0x08000000, SMSG_MONSTER_MOVE with
+    // Animation (u8 + u32) / Parabolic (f32 + u32) parts and at times zlib-compressed.
+    bool turtle = false;
     void clear();
     void setSelf(uint64_t guid) { self_ = guid; }
     uint64_t self() const { return self_; }
@@ -196,7 +207,8 @@ public:
     uint32_t maxFieldsOther = UF::PLAYER_END;   // fields kept for objects other than self
 
 private:
-    bool parseMovementBlock(Reader& r, WorldObject& o, uint32_t nowMs);
+    bool parseMovementBlock(Reader& r, WorldObject& o, uint32_t nowMs, bool transportTime = false);
+    bool parseMovementOrCreate(Reader& r, WorldObject& o, uint32_t nowMs, bool withFields);   // 6.58: Turtle layout, then 1.12's
     bool parseFields(Reader& r, WorldObject* o);
     uint32_t nowMs_ = 0;
     bool parseMonsterMove(Reader& r, uint32_t nowMs);

@@ -311,6 +311,10 @@ void GameSession::error(const std::string& text, Vocal v, uint32_t nowMs, const 
     addLocal(chatLine.empty() ? text : chatLine, nowMs);
     uiLine(text, nowMs, false);
     vocal(v);
+    if (v == Vocal::None) {   // 6.40: a refusal without a voice line gets the error sound (not more than twice a second)
+        static uint32_t last = 0;
+        if (!last || nowMs - last > 500) { last = nowMs ? nowMs : 1; sound("error"); }
+    }
 }
 
 void GameSession::notice(const std::string& text, uint32_t nowMs) {

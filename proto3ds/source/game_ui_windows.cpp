@@ -67,40 +67,49 @@ void GameUi::drawDeath(w3n::GameSession& g, const Input& in) {
     const bool forever = in.cfg && in.cfg->scheme == PadScheme::Forever;
     const char* useKey = forever ? " (Y)" : " (A)";
     char b[96];
-    int y = kTop + 14;
+    int y = kTop + 10;
+    int answerY = y + 100;   // where an offer / the healer's question stands
     if (life == w3n::Life::Dead) {
+        y += 4;
         list_.textCentered(kTouchW / 2, y, tr("You have died.", "Вы погибли."), kRed, true, Font::Large);
         if (!g.resurrectOffer.active) {
             btn(70, y + 30, 180, 30, std::string(tr("Release Spirit", "Освободить дух")) + useKey, Act::Release, 0, Style::Primary);
             list_.textCentered(kTouchW / 2, y + 68, tr("You will return as a ghost at the nearest graveyard.",
                                                        "Вы вернётесь призраком на ближайшем кладбище."), kGrey);
         }
+        answerY = y + 100;
     } else if (life == w3n::Life::Ghost) {
         list_.textCentered(kTouchW / 2, y, tr("You are a ghost.", "Вы — призрак."), kCyan, true, Font::Large);
         float d = g.corpseDistance(in.pos);
         if (d >= 0) snprintf(b, sizeof b, tr("Your corpse: %.0f yd %s", "Ваше тело: %.0f м, %s"), d, compass(g.corpse.x - in.pos[0], g.corpse.y - in.pos[1]));
         else snprintf(b, sizeof b, "%s", g.corpse.known ? tr("Your corpse is on another map.", "Тело на другой карте.") : tr("Looking for your corpse...", "Поиск тела..."));
-        list_.textCentered(kTouchW / 2, y + 22, b, kText, true, Font::Normal);
+        list_.textCentered(kTouchW / 2, y + 20, b, kText, true, Font::Normal);
         if (g.canReclaim(in.pos, in.nowMs)) {
-            btn(80, y + 42, 160, 30, std::string(tr("Resurrect", "Воскреснуть")) + useKey, Act::Reclaim, 0, Style::Primary);
+            btn(80, y + 38, 160, 28, std::string(tr("Resurrect", "Воскреснуть")) + useKey, Act::Reclaim, 0, Style::Primary);
         } else if (d >= 0 && d <= 39.0f) {
             snprintf(b, sizeof b, tr("You can resurrect in %u s", "Воскрешение через %u с"), (unsigned)((g.reclaimDelayLeftMs(in.nowMs) + 999) / 1000));
-            list_.textCentered(kTouchW / 2, y + 50, b, kGrey, true, Font::Normal);
+            list_.textCentered(kTouchW / 2, y + 46, b, kGrey, true, Font::Normal);
         } else {
-            list_.textCentered(kTouchW / 2, y + 50, tr("Run back to your body (within 39 yd)", "Бегите к телу (ближе 39 м)"), kGrey);
+            list_.textCentered(kTouchW / 2, y + 46, tr("Run back to your body (within 39 yd)", "Бегите к телу (ближе 39 м)"), kGrey);
         }
-        list_.textCentered(kTouchW / 2, y + 80, std::string(tr("or talk to a spirit healer", "или поговорите с целителем душ")) + useKey, kGrey);
+        // 6.82: the spirit healer: where it is (kept when it is out of sight) and a button to talk to it
+        const float hd = g.healerDistance(in.pos);
+        if (hd >= 0) snprintf(b, sizeof b, tr("Spirit healer: %.0f yd %s", "Целитель душ: %.0f м, %s"), hd, compass(g.healer.x - in.pos[0], g.healer.y - in.pos[1]));
+        else snprintf(b, sizeof b, "%s", g.healer.known ? tr("The spirit healer is on another map.", "Целитель на другой карте.") : tr("No spirit healer seen yet.", "Целитель душ ещё не виден."));
+        list_.textCentered(kTouchW / 2, y + 74, b, kText, true, Font::Normal);
+        btn(50, y + 90, 220, 26, std::string(tr("Talk to the spirit healer", "Говорить с целителем душ")) + useKey, Act::HealerTalk, 0, Style::Normal);
+        answerY = y + 120;
     }
     if (g.spiritHealerConfirm) {
-        list_.textCentered(kTouchW / 2, y + 100, tr("Return to life now? You will suffer resurrection sickness.",
+        list_.textCentered(kTouchW / 2, answerY, tr("Return to life now? You will suffer resurrection sickness.",
                                                     "Вернуться к жизни? Будет слабость после воскрешения."), kText);
-        btn(40, y + 120, 110, 26, tr("Accept", "Принять"), Act::HealerYes, 0, Style::Primary);
-        btn(170, y + 120, 110, 26, tr("Decline", "Отказать"), Act::HealerNo, 0, Style::Normal);
+        btn(40, answerY + 14, 110, 26, tr("Accept", "Принять"), Act::HealerYes, 0, Style::Primary);
+        btn(170, answerY + 14, 110, 26, tr("Decline", "Отказать"), Act::HealerNo, 0, Style::Normal);
     } else if (g.resurrectOffer.active) {
         std::string who = g.resurrectOffer.name.empty() ? std::string(tr("Someone", "Кто-то")) : g.resurrectOffer.name;
-        list_.textCentered(kTouchW / 2, y + 100, who + tr(" wants to resurrect you.", " хочет воскресить вас."), kText, true, Font::Normal);
-        btn(40, y + 120, 110, 26, tr("Accept", "Принять"), Act::ResAccept, 0, Style::Primary);
-        btn(170, y + 120, 110, 26, tr("Decline", "Отказать"), Act::ResDecline, 0, Style::Normal);
+        list_.textCentered(kTouchW / 2, answerY, who + tr(" wants to resurrect you.", " хочет воскресить вас."), kText, true, Font::Normal);
+        btn(40, answerY + 14, 110, 26, tr("Accept", "Принять"), Act::ResAccept, 0, Style::Primary);
+        btn(170, answerY + 14, 110, 26, tr("Decline", "Отказать"), Act::ResDecline, 0, Style::Normal);
     }
 }
 
@@ -132,6 +141,35 @@ void GameUi::drawLoot(w3n::GameSession& g) {
     if (!w.money && w.items.empty()) list_.text(14, y + 4, tr("(empty)", "(пусто)"), kGrey, true, Font::Normal);
     btn(10, kTabY - 28, 140, 24, tr("Take all", "Взять всё"), Act::LootAll, 0, Style::Primary);
     btn(kTouchW - 100, kTabY - 28, 90, 24, tr("Close", "Закрыть"), Act::LootClose, 0, Style::Normal);
+}
+
+// ------------------------------------------------------------------ group loot roll (6.88)
+// The original's roll frame: the item, the time left, Need / Greed / Pass. Several rolls (a boss) come one after the other.
+void GameUi::drawRoll(w3n::GameSession& g, const Input& in) {
+    if (g.lootRolls.empty()) return;
+    const w3n::LootRoll& r = g.lootRolls.front();
+    window(10, kTop + 20, kTouchW - 20, 130, true);
+    const w3n::ItemInfo* info = g.itemInfo(r.itemId);
+    const uint32_t q = info ? info->quality : 1;
+    iconBox(20, kTop + 30, 32, itemIcon(g, r.itemId), g.itemName(r.itemId), qualityColor(q));
+    list_.textFit(60, kTop + 32, g.itemName(r.itemId), kTouchW - 80, qualityColor(q), true, Font::Normal);
+    region(16, kTop + 26, kTouchW - 32, 40, Act::ItemCard, (int)r.itemId);   // 6.91: a tap on the item shows it
+    if (info) {
+        static const char* kBind[] = {"", "Binds when picked up", "Binds when equipped", "Binds when used", "Quest item"};
+        static const char* kBindRu[] = {"", "Персональный при поднятии", "Персональный при надевании", "Персональный при использовании", "Предмет задания"};
+        if (info->bonding >= 1 && info->bonding <= 4) list_.text(60, kTop + 50, tr(kBind[info->bonding], kBindRu[info->bonding]), kGrey, true, Font::Small);
+    }
+    // the time left: a bar that empties, as in the original
+    const uint32_t left = r.leftMs(in.nowMs);
+    const int bw = kTouchW - 40, filled = r.countdownMs ? (int)((uint64_t)bw * left / r.countdownMs) : 0;
+    list_.rect(20, kTop + 70, bw, 8, kRowAlt);
+    list_.rect(20, kTop + 70, filled, 8, left < 10000 ? hudRgba(200, 60, 40) : kGold);
+    list_.textCentered(kTouchW / 2, kTop + 80, std::to_string((left + 999) / 1000) + tr(" s", " с"), kGrey, true, Font::Small);
+    const bool need = r.voteMask & 2, greed = r.voteMask & 4;
+    btn(20, kTop + 112, 84, 28, tr("Need", "Нужно"), Act::RollVote, w3n::kRollNeed, need ? Style::Primary : Style::Disabled);
+    btn(118, kTop + 112, 84, 28, tr("Greed", "Не откажусь"), Act::RollVote, w3n::kRollGreed, greed ? Style::Normal : Style::Disabled);
+    btn(216, kTop + 112, 84, 28, tr("Pass", "Отказаться"), Act::RollVote, w3n::kRollPass, Style::Normal);
+    // (the page is redrawn every 250 ms anyway: the bar moves without forcing it)
 }
 
 // ------------------------------------------------------------------ gossip
@@ -236,10 +274,20 @@ void GameUi::drawVendor(w3n::GameSession& g, const Input& in) {
             bool unsellable = info && !info->missing && info->sellPrice == 0;
             rowBox(r, idx, it.entry, it.count, g.sellValue(it), false, "", !unsellable);
         }
+        // 6.95: every grey item the vendor buys, in one tap
+        uint32_t junkN = 0;
+        for (const w3n::InvItem& it : items) {
+            const w3n::ItemInfo* ji = g.itemInfoIfKnown(it.entry);
+            if (ji && !ji->missing && ji->quality == 0 && g.sellValue(it)) ++junkN;
+        }
+        // 7.03: left of the pager (it sat under the page arrows on the right): after Sell / Info, or in place of the hint
+        const int jx = vendorSel_ >= 0 ? 132 : 2, jw = pages > 1 ? kTouchW - 96 - jx : kTouchW - 2 - jx;
+        if (junkN) btn(jx, by, std::min(jw, 110), 22, std::string(tr("Sell junk", "Хлам")) + " (" + std::to_string(junkN) + ")",
+                       Act::VendorSellJunk, 0, Style::Normal, Font::Small);
         if (vendorSel_ >= 0) {
             btn(2, by, 70, 22, tr("Sell", "Продать"), Act::VendorSell, 0, Style::Primary, Font::Small);
             btn(76, by, 52, 22, tr("Info", "Инфо"), Act::ItemInfo, 2, Style::Normal, Font::Small);
-        } else {
+        } else if (!junkN) {
             list_.text(6, by + 6, tr("tap an item to sell it", "выберите, что продать"), kGrey);
         }
         pager(by, vendorPage_, pages);
@@ -319,6 +367,50 @@ void GameUi::drawItemInfo(w3n::GameSession& g) {
     btn(10, kTabY - 28, 90, 24, tr("Back", "Назад"), Act::InfoBack, 0, Style::Normal);
 }
 
+// 6.91: the item's mini window, as the original's tooltip: a framed card over a dimmed screen, the name in its quality's colour, the
+// tooltip lines; sized to what it says, centred. A tap on it (or B) closes it; a tap anywhere else closes it and does what it
+// touched (a tooltip, not a dialog: choosing a quest reward shows it, and Complete is one tap away).
+void GameUi::drawItemCard(w3n::GameSession& g) {
+    const w3n::ItemInfo* info = g.itemInfo(infoEntry_);   // asks the server the first time
+    struct Row { std::string text; uint32_t color; Font f; };
+    std::vector<Row> rows;
+    const int cw = kTouchW - 24, textW = cw - 50;
+    if (!info) {
+        rows.push_back({tr("(asking the server...)", "(запрос к серверу...)"), kGrey, Font::Normal});
+    } else {
+        std::vector<std::string> lines = w3n::itemTooltip(*info, infoItem_.guid ? &infoItem_ : nullptr, g.spellNames, &g.spellDesc);
+        for (size_t i = 0; i < lines.size(); ++i) {
+            const std::string& l = lines[i];
+            if (l.empty()) continue;
+            const uint32_t c = i == 0 ? qualityColor(info->quality)
+                             : l.rfind("Use:", 0) == 0 || l.rfind("Equip:", 0) == 0 || l.rfind("Chance", 0) == 0 ? kGreen
+                             : l[0] == '"' ? kYellow : l.rfind("Sell", 0) == 0 || l.rfind("No sell", 0) == 0 ? kGrey
+                             : l.rfind("Requires", 0) == 0 && g.selfObject() && info->requiredLevel > g.selfObject()->level() ? kRed : kText;
+            const Font f = i == 0 ? Font::Normal : Font::Small;
+            for (const std::string& w : HudList::wrap(l, textW, f)) rows.push_back({w, c, f});
+        }
+    }
+    int h = 12;
+    for (const Row& r : rows) h += HudList::lineHeight(r.f);
+    h = std::max(h, 48) + 24;   // 6.94: room for the "To chat" button under the text
+    const int maxH = kTabY - kTop - 8;
+    if (h > maxH) h = maxH;
+    const int x = 12, y = kTop + std::max(4, (maxH - h) / 2);
+    list_.rect(0, 0, kTouchW, kTouchH, hudRgba(0, 0, 0, 120));   // the dimmed screen under it
+    window(x, y, cw, h, true);
+    list_.outline(x, y, cw, h, info ? qualityColor(info->quality) : kFrame);
+    iconBox(x + 8, y + 8, 32, itemIcon(g, infoEntry_), info ? info->name : std::string(), info ? qualityColor(info->quality) : kFrame);
+    int ty = y + 6;
+    for (const Row& r : rows) {
+        const int lh = HudList::lineHeight(r.f);
+        if (ty + lh > y + h - 26) { list_.text(x + 46, ty - 2, "...", kGrey, false, Font::Small); break; }
+        list_.text(x + 46, ty, r.text, r.color, true, r.f);
+        ty += lh;
+    }
+    region(x, y, cw, h, Act::CardClose, 0);   // last drawn: it wins over what it covers
+    if (info && !info->missing) btn(x + cw - 74, y + h - 22, 68, 18, tr("To chat", "В чат"), Act::CardLink, 0, Style::Primary, Font::Small);   // 6.94 (drawn after: it wins over the card's close)
+}
+
 void GameUi::drawSpellInfo(w3n::GameSession& g, const Input& in) {
     window(4, kTop + 2, kTouchW - 8, kContentH - 4, true);
     const uint32_t s = infoSpell_;
@@ -364,7 +456,7 @@ void GameUi::drawSpellInfo(w3n::GameSession& g, const Input& in) {
     const int by = kTabY - 28;
     btn(10, by, 90, 24, tr("Back", "Назад"), Act::InfoBack, 0, Style::Normal);
     if (aura && cancelable) { buffSel_ = s; btn(110, by, 120, 24, tr("Cancel buff", "Снять эффект"), Act::BuffCancel, 0, Style::Primary, Font::Small); }
-    else if (known) btn(110, by, 120, 24, tr("Bind", "Привязать"), Act::BindSpell, (int)s, Style::Primary, Font::Small);
+    else if (known && !g.spellNames.passive(s)) btn(110, by, 120, 24, tr("Bind", "Привязать"), Act::BindSpell, (int)s, Style::Primary, Font::Small);
 }
 
 void GameUi::drawConfirm() {
@@ -447,6 +539,7 @@ void GameUi::drawQuest(w3n::GameSession& g) {
     int maxScroll = 0, acc = 0;
     while (maxScroll < (int)body.size() && hTotal - acc > bottom - top) acc += lineH(body[maxScroll++]);
     questScroll_ = std::min(questScroll_, maxScroll);
+    qsOn_ = true; qsX_ = 0; qsY_ = top; qsW_ = kTouchW; qsH_ = bottom - top;   // 6.94: a finger drag scrolls
     int y = top;
     for (int i = questScroll_; i < (int)body.size(); ++i) {
         const L& l = body[i];
@@ -919,6 +1012,17 @@ void GameUi::drawPet(w3n::GameSession& g, const Input& in) {
     }
     if (pages > 1) pager(kTop + 48 + rows * rowH, page_, pages);
     // ---- bottom row
+    if (g.petCanDismissHunter()) {
+        // 7.07: a hunter's pet: Dismiss (the Dismiss Pet spell - Call Pet brings it back) apart from Abandon (gone for good). Only
+        // Abandon was offered before, and it was taken for the dismiss button: the pet was deleted on the server.
+        btn(8, by, 46, 22, tr("Feed", "Корм"), Act::PetFeed, 1, Style::Normal, Font::Small);
+        if (g.petCanRename()) btn(56, by, 50, 22, tr("Rename", "Имя"), Act::PetRename, 0, Style::Normal, Font::Small);
+        btn(108, by, 60, 22, tr("Dismiss", "Отпустить"), Act::PetSendAway, 0, Style::Normal, Font::Small);
+        btn(170, by, 56, 22, tr("Abandon", "Бросить"), Act::PetDismiss, 0, Style::Danger, Font::Small);
+        if (petSel_ >= 0) btn(228, by, 44, 22, tr("Bind", "Кнопка"), Act::PetBind, petSel_, Style::Normal, Font::Small);
+        btn(kTouchW - 46, by, 42, 22, tr("Close", "Закрыть"), Act::ClosePanel, 0, Style::Normal, Font::Small);
+        return;
+    }
     btn(8, by, 56, 22, tr("Feed", "Корм"), Act::PetFeed, 1, Style::Normal, Font::Small);
     if (g.petCanRename()) btn(68, by, 64, 22, tr("Rename", "Имя"), Act::PetRename, 0, Style::Normal, Font::Small);
     btn(136, by, 72, 22, g.petCanAbandon() ? tr("Abandon", "Бросить") : tr("Dismiss", "Отпустить"), Act::PetDismiss, 0, Style::Danger, Font::Small);

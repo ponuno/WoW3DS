@@ -22,6 +22,17 @@ grep -q "1 of them invisible walls" "$OUT/conv.log"   # 6.14: no drawn batch, st
 python3 "$T/check_wmo_dump.py" "$OUT/dump.txt" "$OUT/expect.json"
 python3 "$T/check_pack_models.py" "$OUT/wmo.w3dp"
 "$B/w3dconv" --info "$OUT/wmo.w3dp" | grep -E "floors|^OK"
+"$B/w3dconv" --info "$OUT/wmo.w3dp" | grep -q "2 groups hold 2 portals"   # 6.42: the house's door, in both of its groups
+# 6.48: the same buildings cut into pieces (4-yd pieces, 2 triangles at least): the world holds the same triangles, in place
+"$B/w3dconv" --data "$OUT/Data" --map Test --tiles 32 48 33 48 -o "$OUT/cut.w3dp" --wmo-chunk 4 --wmo-chunk-min 2 > "$OUT/cut.log"
+grep -E "big WMO groups" "$OUT/cut.log"
+grep -qE "big WMO groups \(6.48\): [1-9]" "$OUT/cut.log"
+python3 "$T/check_pack_models.py" "$OUT/cut.w3dp" | tail -1
+"$B/w3dconv" --info "$OUT/cut.w3dp" | grep -q "2 groups hold 2 portals"   # the house's groups have portals: never cut
+g++ -std=c++20 -O1 -g -fsanitize=address,undefined -I"$T/../../common" "$T/wmo_cut_test.cpp" -o "$OUT/wmo_cut_test"
+"$OUT/wmo_cut_test" "$OUT/wmo.w3dp" "$OUT/cut.w3dp"
+g++ -std=c++20 -O1 -g -fsanitize=address,undefined -I"$T/../../common" "$T/portal_pack_test.cpp" -o "$OUT/portal_pack_test"
+"$OUT/portal_pack_test" "$OUT/wmo.w3dp"
 g++ -std=c++20 -O1 -g -fsanitize=address,undefined -I"$T/../../common" "$T/coll_test.cpp" -o "$OUT/coll_test"
 "$OUT/coll_test" "$OUT/wmo.w3dp" "$OUT/expect.json" "$OUT/walks.txt" | grep -E "FAIL|FLOORS|wall case|random|WALLS"
 python3 "$T/check_walls.py" "$OUT/expect.json" "$OUT/walks.txt"

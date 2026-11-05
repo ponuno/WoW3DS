@@ -50,6 +50,11 @@ uint32_t g_map = 0;
 float g_x = 0, g_y = 0;
 bool g_inWorld = false;
 float g_musicVol = 0.6f, g_sfxVol = 0.8f, g_ambVol = 0.5f;
+// 7.04: an intro cinematic's narration on the music voice (under g_lock): the file (music/), its volume, a new one asked for,
+// the last one played out
+std::string g_cine;
+float g_cineVol = 1.0f;
+bool g_cineNew = false, g_cineDone = false;
 uint32_t g_area = 0;
 char g_status[128] = "sound: off";
 std::string g_soundsTxt;
@@ -253,6 +258,10 @@ void threadMain(void*) {
         const float x = g_x, y = g_y, mv = g_musicVol, av = g_ambVol;
         const bool inWorld = g_inWorld;
         const float sfxVol = g_sfxVol;
+        const std::string cine = g_cine;
+        const float cineVol = g_cineVol;
+        const bool cineNew = g_cineNew;
+        g_cineNew = false;
         Req batch[64];
         int nb = 0;
         while (g_reqHead != g_reqTail) {
@@ -273,6 +282,10 @@ void threadMain(void*) {
             Voice& m = g_voice[0];
             Voice& a = g_voice[1];
             m.wanted = inWorld && mv > 0 ? g_dir.music() : std::string();
+            if (!cine.empty()) {   // 7.04: a cinematic's narration: at once (no fade), full volume, once
+                if (cineNew) { stopVoice(m); m.playing.clear(); }
+                m.wanted = g_music.path(cine);
+            }
             a.wanted = inWorld && av > 0 ? g_dir.ambience() : std::string();
             m.gain = mv * g_dir.musicVolume();
             if (!inWorld && mv > 0 && g_music.glue()) {   // the login / character screens: their theme, looping
@@ -280,11 +293,21 @@ void threadMain(void*) {
                 m.wanted = m.playing.find("/music/glue_") != std::string::npos ? m.playing : g_music.path(gs->files[0]);
                 m.gain = mv * gs->volume;
             }
-            m.loop = !inWorld;
+            m.loop = !inWorld && cine.empty();
+            if (!cine.empty()) m.gain = std::max(mv, std::max(sfxVol, 0.6f)) * cineVol;
             a.gain = av * g_dir.ambienceVolume();
             steer(m, 1, dt);
+            if (!cine.empty() && m.started && m.playing == m.wanted && m.vol < 1.0f) { m.vol = 1.0f; setMix(m.ch, m.gain); }
             steer(a, 1, dt);
-            if (!feed(m) && m.started && m.ended) {   // the track is over: a pause, then another one
+            if (!cine.empty()) {
+                if (!feed(m) && m.started && m.ended) {   // the narration is over
+                    stopVoice(m);
+                    m.playing.clear();
+                    LightLock_Lock(&g_lock);
+                    if (g_cine == cine) { g_cine.clear(); g_cineDone = true; }
+                    LightLock_Unlock(&g_lock);
+                }
+            } else if (!feed(m) && m.started && m.ended) {   // the track is over: a pause, then another one
                 stopVoice(m);
                 g_dir.musicEnded(now);
                 m.wanted = m.playing = g_dir.music();
@@ -312,6 +335,7 @@ bool init(const char* soundDir) {
     g_soundsTxt = dir + "/sounds.txt";
     const bool pack = g_sfx.load((dir + "/sfx.w3ds").c_str(), [](size_t n) { return linearAlloc(n); }, linearFree);
     if (!pack) g_sfx.synthesize([](size_t n) { return linearAlloc(n); }, linearFree);
+    else g_sfx.synthesizeMissing([](size_t n) { return linearAlloc(n); }, linearFree);   // 6.39: no event stays silent
     DSP_FlushDataCache(nullptr, 0);
     const bool music = g_music.load(soundDir);
     for (int i = 0; i < 2; ++i) {
@@ -451,5 +475,23 @@ void stats(Stats* o) {
     o->requestsDropped = g_dropped;
 }
 uint32_t area() { return g_area; }
+
+void playCinematic(const char* musicFile, int volume100) {
+    if (!g_ok) return;
+    LightLock_Lock(&g_lock);
+    g_cine = musicFile ? musicFile : "";
+    g_cineVol = std::clamp(volume100 / 100.0f, 0.05f, 1.0f);
+    g_cineNew = !g_cine.empty();
+    g_cineDone = false;
+    LightLock_Unlock(&g_lock);
+}
+
+bool cinematicSoundDone() {
+    if (!g_ok) return true;
+    LightLock_Lock(&g_lock);
+    const bool d = g_cineDone || g_cine.empty();
+    LightLock_Unlock(&g_lock);
+    return d;
+}
 
 }  // namespace audio

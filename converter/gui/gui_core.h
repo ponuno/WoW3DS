@@ -22,6 +22,9 @@ struct Settings {
     bool ui = true, sound = true;
     bool everything = false;          // stage 5.27: w3dconv --all, every map and dungeon with one shared asset pool
                                       // (map<ID>.w3dp + common.w3dp); the world/dungeon choices above are not used then
+    bool hlod = true;                 // 6.57: after the packs, the horizon meshes of the world packs (w3docc --hlod: map<ID>.hlod)
+    bool pvs = false;                 // 6.54e: after the packs, the precomputed visibility of the capitals (w3docc --pvs:
+                                      // map<ID>.pvs next to the pack; the 3DS skips what cannot be seen from there)
     int quality = 0;                  // texture encoder: 0 low (fast), 1 medium, 2 high
     std::string extra;                // more w3dconv options for the world pack, as typed
 };
@@ -30,7 +33,50 @@ struct Step {
     std::string title;                // shown in the window
     std::string logFile;              // in the output folder
     std::vector<std::string> args;    // for w3dconv.exe
+    std::string exe;                  // 6.54e: another program next to w3dgui.exe (w3docc.exe); empty = w3dconv.exe
+    bool needsPack = false;           // 6.54e: skipped when an earlier step failed (the pack it reads may be missing / broken)
 };
+
+// 6.54e: the capitals of a continent, for the PVS (render space x y, radius; as pvs_cities.bat)
+struct PvsTown { const char* name; float x, y, r; };
+inline std::vector<PvsTown> pvsTowns(int continent) {
+    if (continent == 0) return {{"Stormwind", -8700, 700, 550}, {"Ironforge", -4840, -1000, 300}, {"Undercity", 1630, 240, 250}};
+    if (continent == 1) return {{"Orgrimmar", 1600, -4400, 400}, {"Thunder Bluff", -1250, 100, 300}, {"Darnassus", 9900, 2300, 400}};
+    return {};
+}
+// One w3docc run for a pack: its capitals (those not in the pack are left out by w3docc itself).
+inline Step pvsStep(const std::string& packPath, const std::string& packName, int continent) {
+    Step p;
+    p.exe = "w3docc.exe";
+    p.needsPack = true;
+    p.title = "Visibility (PVS) of the capitals in " + packName + ":";
+    p.logFile = "log_pvs_" + packName.substr(0, packName.find('.')) + ".txt";
+    p.args = {"--pvs", packPath};
+    for (const PvsTown& t : pvsTowns(continent)) {
+        p.title += std::string(" ") + t.name + ",";
+        p.args.push_back("--around");
+        for (float v : {t.x, t.y, t.r}) p.args.push_back(std::to_string((int)v));
+    }
+    p.title.back() = ' ';
+    p.title += "(report: " + packName.substr(0, packName.find('.')) + ".pvs.txt)";
+    return p;
+}
+// 6.57: the horizon of a world pack (every tile; minutes)
+inline Step hlodStep(const std::string& packPath, const std::string& packName) {
+    Step p;
+    p.exe = "w3docc.exe";
+    p.needsPack = true;
+    const std::string base = packName.substr(0, packName.find('.'));
+    p.title = "Horizon meshes of " + packName + " (report: " + base + ".hlod.txt)";
+    p.logFile = "log_hlod_" + base + ".txt";
+    p.args = {"--hlod", packPath};
+    return p;
+}
+inline int continentOf(const std::string& map) {
+    if (map == "Azeroth" || map == "map0") return 0;
+    if (map == "Kalimdor" || map == "map1") return 1;
+    return -1;
+}
 
 inline std::string joinPath(const std::string& dir, const std::string& name) {
     if (dir.empty()) return name;
@@ -110,15 +156,25 @@ inline std::vector<Step> buildSteps(const Settings& s) {
         a.args.push_back(s.out);
         a.args.push_back("-v");
         v.push_back(a);
+        if (s.hlod)
+            for (int c : {0, 1}) {
+                const std::string name = "map" + std::to_string(c) + ".w3dp";
+                v.push_back(hlodStep(joinPath(s.out, name), name));
+            }
+        if (s.pvs)
+            for (int c : {0, 1}) {
+                const std::string name = "map" + std::to_string(c) + ".w3dp";
+                v.push_back(pvsStep(joinPath(s.out, name), name, c));
+            }
         return v;
     }
     if (s.ui) {   // Extra options too (e.g. --consoleport "C:\\path")
-        Step u{"Interface and texts (ui.w3dp, spells/talents/taxi ...)", "log_ui.txt", {"--data", s.data, "--ui"}};
+        Step u{"Interface and texts (ui.w3dp, spells/talents/taxi ...)", "log_ui.txt", {"--data", s.data, "--ui"}, "", false};
         for (auto& x : splitArgs(s.extra)) u.args.push_back(x);
         for (const std::string& x : {std::string("-o"), joinPath(s.out, "ui.w3dp"), std::string("-v")}) u.args.push_back(x);
         v.push_back(u);
     }
-    if (s.sound) v.push_back({"Sound and music (folder sound)", "log_sound.txt", {"--data", s.data, "--sound", "-o", joinPath(s.out, "sound"), "-v"}});
+    if (s.sound) v.push_back({"Sound and music (folder sound)", "log_sound.txt", {"--data", s.data, "--sound", "-o", joinPath(s.out, "sound"), "-v"}, "", false});
     if (s.packWorld) {
         Step w;
         w.title = s.world ? "World: all tiles of map " + s.map : "World: tiles " + std::to_string(s.tx0) + "," + std::to_string(s.ty0) + " - " +
@@ -157,6 +213,10 @@ inline std::vector<Step> buildSteps(const Settings& s) {
         d.args.push_back("-v");
         v.push_back(d);
     }
+    if (s.hlod && s.packWorld)
+        v.push_back(hlodStep(joinPath(s.out, worldPackName(s.map)), worldPackName(s.map)));
+    if (s.pvs && s.packWorld && continentOf(s.map) >= 0)   // (after the dungeons: those have no capitals)
+        v.push_back(pvsStep(joinPath(s.out, worldPackName(s.map)), worldPackName(s.map), continentOf(s.map)));
     return v;
 }
 
@@ -175,7 +235,7 @@ inline std::string serialize(const Settings& s) {
     put("tx0", std::to_string(s.tx0)); put("ty0", std::to_string(s.ty0)); put("tx1", std::to_string(s.tx1)); put("ty1", std::to_string(s.ty1));
     put("packWorld", b(s.packWorld)); put("creatures", b(s.creatures)); put("players", b(s.players)); put("items", b(s.items));
     put("transports", b(s.transports)); put("gameobjects", b(s.gameobjects)); put("dungeons", b(s.dungeons)); put("ui", b(s.ui)); put("sound", b(s.sound));
-    put("everything", b(s.everything));
+    put("everything", b(s.everything)); put("pvs", b(s.pvs)); put("hlod", b(s.hlod));
     put("quality", std::to_string(s.quality)); put("extra", s.extra);
     return r;
 }
@@ -200,7 +260,7 @@ inline Settings parse(const std::string& text) {
     num("tx0", s.tx0); num("ty0", s.ty0); num("tx1", s.tx1); num("ty1", s.ty1); num("quality", s.quality);
     flag("world", s.world); flag("packWorld", s.packWorld); flag("creatures", s.creatures); flag("players", s.players);
     flag("items", s.items); flag("transports", s.transports); flag("gameobjects", s.gameobjects); flag("dungeons", s.dungeons); flag("ui", s.ui); flag("sound", s.sound);
-    flag("everything", s.everything);
+    flag("everything", s.everything); flag("pvs", s.pvs); flag("hlod", s.hlod);
     return s;
 }
 

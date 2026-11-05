@@ -127,7 +127,8 @@ int main(int argc, char** argv) {
     const snd::CreatureSounds* wolf = st.creature(100);
     CHECK(wolf && wolf->aggro == 300 && wolf->death == 301 && wolf->wound == 302 && wolf->woundCrit == 303 &&
           wolf->attack == 304 && wolf->attackCrit == 305 && wolf->footstep == 7, "creature sound columns");
-    CHECK(st.creature(101) && !st.creature(102), "display without sound data");
+    // 6.60: display 102 has no set of its own, its model does (CreatureModelData); 103 has neither
+    CHECK(st.creature(101) && st.creature(102) && st.creature(102)->aggro == 300 && !st.creature(103), "display sound sets: own, through the model, none");
     CHECK(st.weapon(7).first == 310 && st.weapon(7).second == 311, "weapon impact on flesh: %u %u", st.weapon(7).first, st.weapon(7).second);
     CHECK(st.footstep(7) == 330, "footstep on dirt: %u", st.footstep(7));
     const snd::SpellSounds* fb = st.spell(133);
@@ -158,11 +159,32 @@ int main(int argc, char** argv) {
         CHECK(!snd::spatialize(45, 0, 0, 0, 0, 8, 40, &l, &r), "beyond the cutoff");
     }
 
+    clipCheck(bank, "error", 220, 0.25);           // 6.40: an event by the file path (\"@Sound\\Interface\\Error.wav\")
+    clipCheck(bank, "spellcast_fire", 440, 0.3);
+
     snd::SfxBank synth;
     CHECK(synth.synthesize(), "built-in sounds");
     for (const char* e : {"click", "tab", "open", "close", "coin", "levelup", "questcomplete", "whisper", "targethostile",
                           "bagsopen", "npcclose", "questaccept", "invite", "targetfriend"})
         CHECK(synth.pick(e) != nullptr, "built-in %s", e);
+    for (const char* e : {"lootitem", "spellcast", "spellfail", "equip", "trade", "questupdate", "spellcast_fire", "spellcast_arcane", "error"})   // 6.39 (the last three by fallback)
+        CHECK(synth.pick(e) != nullptr, "built-in %s", e);
+    {   // 6.39: a loaded pack gets the built-in sound for what it lacks, and keeps its own for what it has
+        snd::SfxBank b;
+        CHECK(b.load((dir + "/sfx.w3ds").c_str()), "reload the pack");
+        const bool hadSpell = b.pick("spellcast") != nullptr;
+        const snd::Clip* own = b.pick("click");
+        const size_t added = b.synthesizeMissing();
+        CHECK(!hadSpell && added > 0, "the pack lacks spellcast: %zu built-in sounds added", added);
+        CHECK(b.pick("lootitem"), "the interface events the pack lacks get a built-in sound");
+        // 7.07: never a blip for the fight with a pack: the client's file or nothing
+        for (const char* e : {"spellcast", "spellcast_nature", "spellfail", "hitfire", "hitfall", "swing"})
+            CHECK(b.pick(e) == nullptr, "pack: no built-in %s", e);
+        CHECK(b.pick("spellcast_fire") != nullptr, "pack: its own FireCast is kept");
+        CHECK(b.pick("hit") != nullptr && b.pick("hitcrit") != nullptr, "pack: hit from the client's flesh impact (%%hitflesh), hitcrit falls back to it");
+        CHECK(!own || b.pick("click") == own || b.pick("click")->samples == own->samples, "the pack's own click is kept");
+        CHECK(b.synthesizeMissing() == 0, "once only");
+    }
 
     std::printf("SOUND: %d checks, %d failed -> %s\n", g_ok + g_fail, g_fail, g_fail ? "FAIL" : "PASS");
     return g_fail ? 1 : 0;

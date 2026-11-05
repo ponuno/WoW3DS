@@ -33,6 +33,7 @@ u32 vramSpaceFree(void);
 // stage 6 (perf log)
 int LightEvent_WaitTimeout(LightEvent* e, s64 timeoutNs);
 Result APT_GetAppCpuTimeLimit(u32* percent);
+static inline bool envIsHomebrew(void) { return false; }   // 6.58c
 typedef enum { MEMREGION_ALL = 0, MEMREGION_APPLICATION = 1, MEMREGION_SYSTEM = 2, MEMREGION_BASE = 3 } MemRegion;
 u32 osGetMemRegionSize(MemRegion r); u32 osGetMemRegionUsed(MemRegion r); u32 osGetMemRegionFree(MemRegion r);
 u8 osGetWifiStrength(void);

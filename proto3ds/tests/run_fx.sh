@@ -9,7 +9,7 @@ PACK=${1:-/tmp/w3d_wmo/wmo.w3dp}
 g++ -std=gnu++20 -g -O1 -Wall -fsanitize=address,undefined -I"$T/../../common" -I"$T/../source" "$T/fx_test.cpp" \
     "$T/../source/fx.cpp" -o "$OUT/fx_test"
 "$OUT/fx_test"
-SRC="$T/streamer_pc.cpp $T/../source/fx.cpp $T/../source/streamer.cpp $T/../source/creature_view.cpp $T/stub/ctru_stub.cpp"
+SRC="$T/streamer_pc.cpp $T/../source/fx.cpp $T/../source/streamer.cpp $T/../source/hlod.cpp $T/../source/objcoll.cpp $T/../source/creature_view.cpp $T/stub/ctru_stub.cpp"
 g++ -std=gnu++20 -g -O1 -DW3D_PC_TEST -I"$T/stub" -I"$T/../source" -I"$T/../../common" -fsanitize=address,undefined $SRC \
     -o "$OUT/streamer_fx" -lpthread
 for pace in 0 300; do PACE_US=$pace "$OUT/streamer_fx" "$PACK" 1500 | tee "$OUT/streamer_$pace.log" | grep -E "effects:|STREAMER"; done

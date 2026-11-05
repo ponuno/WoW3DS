@@ -8,6 +8,16 @@ const W3dUiGlyph* glyphOf(const ui::FontView& f, uint32_t cp) {
     if (cp == 0xA0) return f.find(' ');
     if (cp == 0x401) return f.find(0x415);   // Yo without its dots rather than '?'
     if (cp == 0x451) return f.find(0x435);
+    // 7.03: arrows the game's fonts lack (FRIZQT and its fallbacks have ▲ ▼ but no ◀ ▶: the pager showed '?'): the nearest one
+    // the font has, an ASCII bracket at worst
+    struct Alt { uint32_t cp, a, b; };
+    static const Alt kAlt[] = {{0x25C0, 0x2190, '<'}, {0x25B6, 0x2192, '>'}, {0x25B2, 0x2191, '^'}, {0x25BC, 0x2193, 'v'},
+                               {0x2190, 0x25C0, '<'}, {0x2192, 0x25B6, '>'}, {0x2191, 0x25B2, '^'}, {0x2193, 0x25BC, 'v'}};
+    for (const Alt& a : kAlt)
+        if (a.cp == cp) {
+            if (const W3dUiGlyph* g = f.find(a.a)) return g;
+            if (const W3dUiGlyph* g = f.find(a.b)) return g;
+        }
     return f.find('?');
 }
 }  // namespace

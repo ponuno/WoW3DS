@@ -1,17 +1,25 @@
 #include "creature_view.hpp"
 
+#include <stdio.h>
+
 #include <initializer_list>
 
+#include "perflog.hpp"
 #include "w3d_anim.h"
 
 namespace {
 
+// The first of the ids the model has - 6.43: a sequence that would show the bind pose (w3d_seq_broken: no keys for it) counts as missing
 int findSeq(const uint8_t* blob, std::initializer_list<uint16_t> ids) {
     for (uint16_t id : ids) {
         int s = w3d_find_seq(blob, id);
-        if (s >= 0) return s;
+        if (s >= 0 && !w3d_seq_broken(blob, s)) return s;
     }
     return -1;
+}
+int findSeqOne(const uint8_t* blob, uint16_t id) {   // (an emote / emote state by its id: the same test)
+    const int s = w3d_find_seq(blob, id);
+    return s >= 0 && !w3d_seq_broken(blob, s) ? s : -1;
 }
 
 const W3dAnimSeq* seqAt(const uint8_t* blob, int s) {
@@ -28,6 +36,7 @@ float moveRate(const uint8_t* blob, int s, float speed) {
 
 constexpr uint32_t kBackward = 0x2, kStrafeLeft = 0x4, kStrafeRight = 0x8, kForward = 0x1;
 constexpr uint32_t kJumping = 0x2000, kFallingFar = 0x4000;
+constexpr uint32_t kLatchMs = 600, kCatchUpMs = 150;   // 6.64
 constexpr uint8_t kPrioReact = 1, kPrioEmote = 2, kPrioCast = 3, kPrioAttack = 4, kPrioTransition = 5;
 
 int attackSeq(const uint8_t* blob, CreatureWeapon w, bool off) {
@@ -86,11 +95,22 @@ int castGoSeq(const uint8_t* blob, CastLook look, bool directed) {
 // Loops of a unit standing still, in order: casting, its stand state, its emote state, looting, combat, swimming.
 int idleSeq(const uint8_t* blob, const CreatureSeen& c) {
     int s = -1;
+    if (c.rangedStance != CastLook::Spell && !c.casting) {   // 6.87: aiming / between shots: the ranged ready stance
+        switch (c.rangedStance) {
+            case CastLook::Bow: s = findSeq(blob, {W3D_ANIM_READY_BOW, W3D_ANIM_READY_RIFLE}); break;
+            case CastLook::Rifle: s = findSeq(blob, {W3D_ANIM_READY_RIFLE, W3D_ANIM_READY_BOW}); break;
+            case CastLook::Thrown: s = findSeq(blob, {W3D_ANIM_READY_THROWN, W3D_ANIM_READY_1H}); break;
+            default: break;
+        }
+        if (s >= 0) return s;
+    }
     switch (c.casting) {
         case 1: s = findSeq(blob, {W3D_ANIM_READY_SPELL_DIRECTED, W3D_ANIM_SPELL_PRECAST, W3D_ANIM_READY_SPELL_OMNI}); break;
         case 2: s = findSeq(blob, {W3D_ANIM_READY_SPELL_OMNI, W3D_ANIM_SPELL_PRECAST, W3D_ANIM_READY_SPELL_DIRECTED}); break;
         case 3: s = findSeq(blob, {W3D_ANIM_CHANNEL_CAST_DIRECTED, W3D_ANIM_READY_SPELL_DIRECTED, W3D_ANIM_SPELL_PRECAST}); break;
         case 4: s = findSeq(blob, {W3D_ANIM_CHANNEL_CAST_OMNI, W3D_ANIM_READY_SPELL_OMNI, W3D_ANIM_SPELL_PRECAST}); break;
+        // 6.36: opening / gathering at a game object: kneeling, as the original does (not the spell-casting hands)
+        case 5: s = findSeq(blob, {W3D_ANIM_KNEEL_LOOP, W3D_ANIM_LOOT, W3D_ANIM_READY_SPELL_OMNI, W3D_ANIM_SPELL_PRECAST}); break;
         default: break;
     }
     if (s >= 0) return s;
@@ -106,7 +126,7 @@ int idleSeq(const uint8_t* blob, const CreatureSeen& c) {
     }
     if (s >= 0) return s;
     if (c.loopAnim) {
-        s = w3d_find_seq(blob, c.loopAnim);
+        s = findSeqOne(blob, c.loopAnim);
         if (s >= 0) return s;
     }
     if (c.looting) {
@@ -181,13 +201,15 @@ int creaturePickSeq(const uint8_t* blob, bool dead, float speed, bool swimming, 
 }
 
 // ------------------------------------------------------------------ UnitAnimator
-void UnitAnimator::startOneShot(const uint8_t* blob, int seq, uint8_t prio, uint32_t nowMs) {
+void UnitAnimator::startOneShot(const uint8_t* blob, int seq, uint8_t prio, uint32_t nowMs, uint32_t skipMs) {
     const W3dAnimSeq* sq = seqAt(blob, seq);
     if (!sq || !sq->durationMs) return;
     if (oneSeq_ >= 0 && nowMs - oneStart_ < oneDur_ && prio < onePrio_) return;   // something more important plays
     oneSeq_ = seq;
     onePrio_ = prio;
-    oneStart_ = nowMs;
+    if (skipMs > sq->durationMs / 2) skipMs = sq->durationMs / 2;
+    oneSkip_ = skipMs;
+    oneStart_ = nowMs - skipMs;   // 6.64: the event is older than this frame by skipMs
     oneDur_ = sq->durationMs;
     oneCancelOnMove_ = prio == kPrioReact || prio == kPrioEmote;
     seq_ = -4;   // restart the clock
@@ -247,6 +269,7 @@ AnimChoice UnitAnimator::update(const uint8_t* blob, const CreatureSeen& c, bool
         lastHit_ = c.hitMs;
         lastEmote_ = c.emoteMs;
         lastCastGo_ = c.castGoMs;
+        lastCasting_ = c.casting;
         wasAirborne_ = (c.moveFlags & (kJumping | kFallingFar)) != 0;
     }
     const bool moving = c.speed > 0.1f;
@@ -255,6 +278,7 @@ AnimChoice UnitAnimator::update(const uint8_t* blob, const CreatureSeen& c, bool
     // ---- events
     if (c.dead) {
         oneSeq_ = -1;
+        pendSwing_ = pendHit_ = pendCast_ = pendEmote_ = 0;
     } else {
         if (c.standState != lastStand_) {   // sitting down / getting up / lying down / kneeling
             const uint8_t from = lastStand_, to = c.standState;
@@ -268,6 +292,13 @@ AnimChoice UnitAnimator::update(const uint8_t* blob, const CreatureSeen& c, bool
             else if (to == 0 && from == 8) s = findSeq(blob, {W3D_ANIM_KNEEL_END});
             if (s >= 0 && !moving) startOneShot(blob, s, kPrioTransition, nowMs);
         }
+        if (c.casting != lastCasting_) {   // 6.36: kneeling down to open / gather something
+            if (c.casting == 5 && lastCasting_ != 5) {
+                int s = findSeq(blob, {W3D_ANIM_KNEEL_START});
+                if (s >= 0 && !moving) startOneShot(blob, s, kPrioTransition, nowMs);
+            }
+            lastCasting_ = c.casting;
+        }
         if (airborne && !wasAirborne_ && !riding) {
             int s = findSeq(blob, {W3D_ANIM_JUMP_START});
             if (s >= 0) startOneShot(blob, s, kPrioTransition, nowMs);
@@ -275,21 +306,41 @@ AnimChoice UnitAnimator::update(const uint8_t* blob, const CreatureSeen& c, bool
             int s = findSeq(blob, {W3D_ANIM_JUMP_END});
             if (s >= 0) startOneShot(blob, s, kPrioTransition, nowMs);
         }
-        if (c.swingMs && c.swingMs != lastSwing_) {
-            int s = attackSeq(blob, c.weapon, c.swingOff);
-            if (s >= 0 && !moving) startOneShot(blob, s, kPrioAttack, nowMs);
+        // 6.64: smoothing under ping. An event is latched until it can play (the unit stands still, nothing of equal rank is
+        // mid-swing) for up to kLatchMs, and starts as far in as it has aged (up to kCatchUpMs), so that a late packet
+        // or a unit still extrapolated as moving does not lose or delay the blow.
+        auto latch = [&](uint32_t stamp, uint32_t last, uint32_t& pend, uint32_t& seenAt) {
+            if (stamp && stamp != last) { pend = stamp; seenAt = nowMs; }
+            if (pend && nowMs - seenAt > kLatchMs) pend = 0;   // waited too long: the moment has passed
+        };
+        auto age = [&](uint32_t pend) { uint32_t a = nowMs - pend; return a > kCatchUpMs ? (a < 1000 ? kCatchUpMs : 0u) : a; };
+        latch(c.swingMs, lastSwing_, pendSwing_, seenAt_[0]);
+        latch(c.castGoMs, lastCastGo_, pendCast_, seenAt_[1]);
+        latch(c.hitMs, lastHit_, pendHit_, seenAt_[2]);
+        latch(c.emoteMs, lastEmote_, pendEmote_, seenAt_[3]);
+        if (pendSwing_ && !moving) {
+            const bool midSwing = oneSeq_ >= 0 && onePrio_ == kPrioAttack && nowMs - oneStart_ < oneDur_;
+            if (!midSwing) {   // an equal swing does not cut the one playing: it follows it
+                int s = attackSeq(blob, c.weapon, c.swingOff);
+                if (s >= 0) startOneShot(blob, s, kPrioAttack, nowMs, age(pendSwing_));
+                pendSwing_ = 0;
+            }
         }
-        if (c.castGoMs && c.castGoMs != lastCastGo_) {
-            int s = castGoSeq(blob, c.castGoLook, c.castGoDirected);
-            if (s >= 0 && !moving) startOneShot(blob, s, kPrioCast, nowMs);
+        if (pendCast_ && !moving) {
+            // 6.36: a cast that opened / gathered a game object ends with getting up, not with a spell release
+            int s = c.castGoObject ? findSeq(blob, {W3D_ANIM_KNEEL_END}) : castGoSeq(blob, c.castGoLook, c.castGoDirected);
+            if (s >= 0) startOneShot(blob, s, kPrioCast, nowMs, age(pendCast_));
+            pendCast_ = 0;
         }
-        if (c.hitMs && c.hitMs != lastHit_ && !moving) {
+        if (pendHit_ && !moving) {
             int s = reactSeq(blob, c.hitReact, c.weapon);
-            if (s >= 0) startOneShot(blob, s, kPrioReact, nowMs);
+            if (s >= 0) startOneShot(blob, s, kPrioReact, nowMs, age(pendHit_));
+            pendHit_ = 0;
         }
-        if (c.emoteMs && c.emoteMs != lastEmote_ && c.emoteAnim && !moving) {
-            int s = w3d_find_seq(blob, c.emoteAnim);
-            if (s >= 0) startOneShot(blob, s, kPrioEmote, nowMs);
+        if (pendEmote_ && c.emoteAnim && !moving) {
+            int s = findSeqOne(blob, c.emoteAnim);
+            if (s >= 0) startOneShot(blob, s, kPrioEmote, nowMs, age(pendEmote_));
+            pendEmote_ = 0;
         }
     }
     lastSwing_ = c.swingMs;
@@ -298,6 +349,26 @@ AnimChoice UnitAnimator::update(const uint8_t* blob, const CreatureSeen& c, bool
     lastEmote_ = c.emoteMs;
     wasAirborne_ = airborne;
     if (oneSeq_ >= 0 && (nowMs - oneStart_ >= oneDur_ || (moving && oneCancelOnMove_) || c.stunned)) oneSeq_ = -1;
+
+    // ---- 6.93: drawing / sheathing the weapons. The reach animation is the same both ways (89 for a weapon on the back, 90 for the
+    // hip); the weapon changes place at the middle of it. No reach (moving, mounted, no such sequence, nothing to sheathe): at once.
+    if (!drawInit_) { drawInit_ = true; drawn_ = want_ = c.inCombat; }
+    if (c.inCombat != want_) {
+        want_ = c.inCombat;
+        drawSwapAt_ = 0;
+        int s = -1;
+        const bool main = c.equip[W3D_EQ_MAINHAND] != 0, off = c.equip[W3D_EQ_OFFHAND] != 0, rng = c.equip[W3D_EQ_RANGED] != 0;
+        if (c.look && !c.dead && !moving && !riding && (main || off || rng)) {
+            const bool back = (main && c.equipInv[W3D_EQ_MAINHAND] == 17) || (!main && !off);
+            s = back ? findSeq(blob, {W3D_ANIM_SHEATHE, W3D_ANIM_HIP_SHEATHE}) : findSeq(blob, {W3D_ANIM_HIP_SHEATHE, W3D_ANIM_SHEATHE});
+        }
+        if (s >= 0) {
+            startOneShot(blob, s, kPrioTransition, nowMs);
+            if (oneSeq_ == s) { oneCancelOnMove_ = true; drawSwapAt_ = oneStart_ + oneDur_ * 2 / 5; }
+        }
+        if (!drawSwapAt_) drawn_ = want_;
+    }
+    if (drawSwapAt_ && ((int32_t)(nowMs - drawSwapAt_) >= 0 || oneSeq_ < 0 || c.dead)) { drawn_ = want_; drawSwapAt_ = 0; }
 
     // ---- the state
     int s = -1;
@@ -325,7 +396,7 @@ AnimChoice UnitAnimator::update(const uint8_t* blob, const CreatureSeen& c, bool
     a.seq = s;
     if (s != seq_) {
         // A unit first seen dead lies at the end of its death animation.
-        timeMs_ = (c.dead && firstSeenDead_) ? 1e9f : 0;
+        timeMs_ = (c.dead && firstSeenDead_) ? 1e9f : (oneSeq_ >= 0 && s == oneSeq_ ? (float)oneSkip_ : 0.0f);
         seq_ = s;
     } else {
         timeMs_ += dt * a.rate;
@@ -343,10 +414,10 @@ namespace {
 // Where an item hangs on its bearer: attachment candidates in order (W3dAttachId); none = not drawn.
 // Players sheathe their weapons out of combat (hip, back) and draw them in combat; creatures always hold theirs.
 // side: shoulders 0 = left, 1 = right. shooting: a bow / gun / throw is being fired (the ranged weapon is in hand).
-int wornAttach(const CreatureSeen& c, int slot, int side, bool shooting, int out[3]) {
+int wornAttach(const CreatureSeen& c, int slot, int side, bool shooting, bool drawn, int out[3]) {
     const int inv = c.equipInv[slot];
     const bool player = c.look != 0;
-    const bool handsFree = !player || c.inCombat;   // weapons in hand
+    const bool handsFree = !player || drawn;   // weapons in hand (6.93: players' follow the reach animation, not the flag)
     int n = 0;
     auto add = [&](int a) { out[n++] = a; };
     switch (slot) {
@@ -355,24 +426,26 @@ int wornAttach(const CreatureSeen& c, int slot, int side, bool shooting, int out
         case W3D_EQ_MAINHAND:
             if (shooting) break;
             if (handsFree) { add(W3D_ATT_RHAND); }
-            else if (inv == 17) { add(W3D_ATT_LARGE_LEFT); add(W3D_ATT_LARGE_RIGHT); add(W3D_ATT_BACK); }   // two-hander on the back
-            else { add(W3D_ATT_SHEATH_MAIN); add(W3D_ATT_HIP_RIGHT); add(W3D_ATT_HIP_LEFT); }
+            // 6.92, as WoWee: a two-hander on the back (attachment 12, with an extra turn); a one-hander on the left hip (32);
+            // the "sheath" points 26 / 27 carry no orientation of their own and stay as the last resort
+            else if (inv == 17) { add(W3D_ATT_BACK); add(W3D_ATT_LARGE_LEFT); add(W3D_ATT_LARGE_RIGHT); }
+            else { add(W3D_ATT_HIP_LEFT); add(W3D_ATT_HIP_RIGHT); add(W3D_ATT_SHEATH_MAIN); }
             break;
         case W3D_EQ_OFFHAND:
-            if (inv == 14) {   // shield: on the arm, else on the back
+            if (inv == 14) {   // shield: its own sheath point (28), else the back
                 if (handsFree) add(W3D_ATT_SHIELD);
                 else { add(W3D_ATT_SHEATH_SHIELD); add(W3D_ATT_BACK); }
             } else if (inv == 23) {   // held in off hand (book, orb): only in hand
                 if (handsFree && !shooting) add(W3D_ATT_LHAND);
             } else if (!shooting) {
                 if (handsFree) add(W3D_ATT_LHAND);
-                else { add(W3D_ATT_SHEATH_OFF); add(W3D_ATT_HIP_LEFT); add(W3D_ATT_HIP_RIGHT); }
+                else { add(W3D_ATT_HIP_RIGHT); add(W3D_ATT_HIP_LEFT); add(W3D_ATT_SHEATH_OFF); }
             }
             break;
         case W3D_EQ_RANGED:
             if (shooting) { add(inv == 15 ? W3D_ATT_LHAND : W3D_ATT_RHAND); }                  // bow / crossbow in the left hand
-            else if (inv == 15 || (inv == 26 && !player)) { add(W3D_ATT_LARGE_RIGHT); add(W3D_ATT_LARGE_LEFT); add(W3D_ATT_BACK); }   // bows, guns on the back
-            else if (inv == 26) { add(W3D_ATT_LARGE_RIGHT); add(W3D_ATT_LARGE_LEFT); }
+            else if (inv == 15 || (inv == 26 && !player)) { add(W3D_ATT_BACK); add(W3D_ATT_LARGE_RIGHT); add(W3D_ATT_LARGE_LEFT); }   // bows, guns on the back
+            else if (inv == 26) { add(W3D_ATT_BACK); add(W3D_ATT_LARGE_RIGHT); add(W3D_ATT_LARGE_LEFT); }
             break;
         default: break;
     }
@@ -388,6 +461,7 @@ bool findAttach(const uint8_t* blob, const int* ids, int n, CreatureInstance::Wo
             if (at[k].id == ids[i] && at[k].bone >= 0 && (uint32_t)at[k].bone < h->boneCount) {
                 w->bone = at[k].bone;
                 w->pos[0] = at[k].pos[0]; w->pos[1] = at[k].pos[1]; w->pos[2] = at[k].pos[2];
+                w->backFix = at[k].id == W3D_ATT_BACK;
                 return true;
             }
     return false;
@@ -445,6 +519,80 @@ bool CreatureView::seatPosition(const uint8_t* blob, int seq, float timeMs, bool
     return true;
 }
 
+void CreatureView::noteModel(const uint8_t* blob, uint32_t displayId) {
+    if (noted_.size() >= 512 || !noted_.insert(blob).second) return;
+    const W3dCreatureHeader* h = w3d_creature(blob);
+    char buf[200];
+    const unsigned long disp = displayId, seqs = h->seqCount, bones = h->boneCount;
+    const int stand = w3d_find_seq(blob, W3D_ANIM_STAND);
+    if (h->seqCount == 0)
+        snprintf(buf, sizeof buf, "ANIM MODEL display %lu: no animation sequences (%lu bones) - it stands in its bind pose", disp, bones);
+    else if (stand < 0)
+        snprintf(buf, sizeof buf, "ANIM MODEL display %lu: no Stand sequence (%lu sequences, %lu bones)", disp, seqs, bones);
+    else if (!w3d_seq_animated(blob, stand)) {
+        const W3dAnimSeq* sq = seqAt(blob, stand);
+        snprintf(buf, sizeof buf, "ANIM MODEL display %lu: Stand is a still pose (%lu frames, %lu ms; %lu sequences, %lu bones) - it will not move",
+                 disp, sq ? (unsigned long)sq->frames : 0ul, sq ? (unsigned long)sq->durationMs : 0ul, seqs, bones);
+    } else {
+        // 6.43: sequences that would show the bind pose (skipped by findSeq: the unit plays Stand instead)
+        int o = snprintf(buf, sizeof buf, "ANIM MODEL display %lu: sequences without keys (bind pose, Stand played instead):", disp);
+        int found = 0;
+        const W3dAnimSeq* sq = (const W3dAnimSeq*)(blob + h->offSeqs);
+        for (uint32_t i = 0; i < h->seqCount && o < (int)sizeof buf - 24; ++i)
+            if (w3d_seq_broken(blob, (int)i)) {
+                o += snprintf(buf + o, sizeof buf - o, " %u (%lu of %lu bones)", (unsigned)sq[i].animId,
+                              (unsigned long)w3d_seq_posed_bones(blob, (int)i), (unsigned long)w3d_seq_posed_bones(blob, stand));
+                ++found;
+            }
+        if (!found) return;
+    }
+    if (diag_.size() < 64) diag_.push_back(buf);
+}
+
+// 6.36: a unit that stands still and is shown with something other than its Stand loop (stunned, a stand state, a looping emote,
+// a cast, moving flags without speed): one line per model, so a frozen unit can be told from a still model
+void CreatureView::noteUnit(const CreatureSeen& c) {
+    if (c.isGo || c.dead || c.look || c.speed > 0.1f) return;
+    const bool odd = c.stunned || c.standState || c.loopAnim || c.casting || c.inCombat;
+    if (!odd || notedDisplays_.size() >= 48 || !notedDisplays_.insert(c.displayId).second) return;
+    char buf[200];
+    snprintf(buf, sizeof buf, "ANIM UNIT display %lu: idle is not Stand - stunned %d, stand state %d, looping emote %d, casting %d, in combat %d, move flags 0x%lX",
+             (unsigned long)c.displayId, (int)c.stunned, (int)c.standState, (int)c.loopAnim, (int)c.casting, (int)c.inCombat,
+             (unsigned long)c.moveFlags);
+    if (diag_.size() < 64) diag_.push_back(buf);
+}
+
+// 6.43c: the first time a display is drawn, what it plays: the animation, its frames and how many bones it poses against Stand (a model in its
+// bind pose - the wind riders' T-pose - shows "poses 0 of N" or "seq -1")
+void CreatureView::notePlay(const CreatureSeen& c, const uint8_t* blob, const AnimChoice& a, bool riding) {
+    if (notedPlay_.size() >= 400 || !notedPlay_.insert(c.displayId | (c.isGo ? 0x80000000u : 0u)).second) return;
+    const W3dCreatureHeader* h = w3d_creature(blob);
+    const W3dAnimSeq* sq = seqAt(blob, a.seq);
+    const int stand = w3d_find_seq(blob, W3D_ANIM_STAND);
+    char buf[240];
+    snprintf(buf, sizeof buf, "ANIM PLAY %s display %lu: anim %d (seq %d of %lu, %lu frames, %lu ms, poses %lu of %lu bones; Stand %s, poses %lu) "
+             "stand state %d, flying %d, riding %d, move flags 0x%lX",
+             c.isGo ? "object" : "unit", (unsigned long)c.displayId, sq ? (int)sq->animId : -1, a.seq, (unsigned long)h->seqCount,
+             sq ? (unsigned long)sq->frames : 0ul, sq ? (unsigned long)sq->durationMs : 0ul, (unsigned long)w3d_seq_posed_bones(blob, a.seq),
+             (unsigned long)h->boneCount, stand < 0 ? "missing" : w3d_seq_animated(blob, stand) ? "moves" : "still",
+             (unsigned long)w3d_seq_posed_bones(blob, stand), (int)c.standState, (int)c.flying, (int)riding, (unsigned long)c.moveFlags);
+    if (diag_.size() < 400) diag_.push_back(buf);
+}
+
+bool CreatureView::describeUnit(uint64_t guid, char* buf, size_t n) const {
+    auto it = units_.find(guid);
+    if (it == units_.end() || !it->second.lastBlob || !it->second.drawn) return false;
+    const Unit& u = it->second;
+    const W3dCreatureHeader* h = w3d_creature(u.lastBlob);
+    const W3dAnimSeq* sq = seqAt(u.lastBlob, u.last.seq);
+    const int stand = w3d_find_seq(u.lastBlob, W3D_ANIM_STAND);
+    snprintf(buf, n, "display %lu: anim %d (seq %d of %lu, %lu frames, poses %lu of %lu bones; Stand poses %lu)%s", (unsigned long)u.displayId,
+             sq ? (int)sq->animId : -1, u.last.seq, (unsigned long)h->seqCount, sq ? (unsigned long)sq->frames : 0ul,
+             (unsigned long)w3d_seq_posed_bones(u.lastBlob, u.last.seq), (unsigned long)h->boneCount,
+             (unsigned long)w3d_seq_posed_bones(u.lastBlob, stand), u.mount ? " (mounted)" : "");
+    return true;
+}
+
 void CreatureView::update(const std::vector<CreatureSeen>& seen, uint32_t nowMs, std::vector<CreatureInstance>& out) {
     out.clear();
     ++frame_;
@@ -496,7 +644,22 @@ void CreatureView::update(const std::vector<CreatureSeen>& seen, uint32_t nowMs,
         }
         if (!u.disp || !u.disp->ready()) continue;
         const uint8_t* blob = u.disp->model->blob;
+        if (!c.isGo) { noteModel(blob, c.displayId); noteUnit(c); }
         if (!u.shownMs) u.shownMs = nowMs ? nowMs : 1;
+        if (!c.isGo && u.disp->model->h) {   // 6.74: sizes, once per display - the three terms and the model's height (to see which one is off)
+            static uint32_t said[80];
+            static int nSaid = 0;
+            bool seen = false;
+            for (int k = 0; k < nSaid; ++k) seen = seen || said[k] == c.displayId;
+            if (!seen && nSaid < 80) {
+                said[nSaid++] = c.displayId;
+                const W3dCreatureHeader* hh = u.disp->model->h;
+                const float ds = u.disp->d.scale > 0.01f ? u.disp->d.scale : 1.0f, s = w3d_unit_draw_scale(c.scale, &u.disp->d);
+                perf::event("size: display %u: unit scale %.2f, display+model %.2f (model %.3f) -> drawn at %.2f; model %.2f x %.2f x %.2f yd -> height %.2f yd",
+                            (unsigned)c.displayId, c.scale, ds, u.disp->d.modelScaleMilli / 1000.0f, s, hh->bmax[0] - hh->bmin[0],
+                            hh->bmax[1] - hh->bmin[1], hh->bmax[2] - hh->bmin[2], (hh->bmax[2] - hh->bmin[2]) * s);
+            }
+        }
         CreatureInstance ci;
         ci.disp = u.disp;
         {   // stage 6.12: appearing (kFadeMs from the first frame drawn), and fading out at the far edge
@@ -504,6 +667,7 @@ void CreatureView::update(const std::vector<CreatureSeen>& seen, uint32_t nowMs,
             float f = fadeIn && age < kFadeMs ? (float)age / (float)kFadeMs : 1.0f;
             if (fadeIn) f = std::min(f, c.farFade);
             ci.fade = f >= 0.97f ? 1.0f : f;
+            if (c.ghost) { ci.fade = std::min(ci.fade, 0.5f); ci.tint = 0x00FFC890u; }   // 6.62: R 0x90, G 0xC8, B 0xFF
         }
         ci.guid = c.guid;
         ci.pos[0] = c.pos[0]; ci.pos[1] = c.pos[1]; ci.pos[2] = c.pos[2];
@@ -528,7 +692,7 @@ void CreatureView::update(const std::vector<CreatureSeen>& seen, uint32_t nowMs,
             mi.seq = ma.seq;
             mi.timeMs = u.mountAnim.timeMs();
             mi.loop = ma.loop;
-            const float ms = c.scale * (u.mount->d.scale > 0.01f ? u.mount->d.scale : 1.0f);
+            const float ms = w3d_unit_draw_scale(c.scale, &u.mount->d);
             float seat[3];
             if (seatPosition(mb, ma.seq, mi.timeMs, ma.loop, c.pos, c.yaw, ms, seat)) {
                 ci.pos[0] = seat[0]; ci.pos[1] = seat[1]; ci.pos[2] = seat[2];
@@ -537,12 +701,16 @@ void CreatureView::update(const std::vector<CreatureSeen>& seen, uint32_t nowMs,
             out.push_back(mi);
         }
         AnimChoice a = u.anim.update(blob, c, riding, nowMs);
+        notePlay(c, blob, a, riding);
+        u.last = a;
+        u.lastBlob = blob;
         ci.seq = a.seq;
         ci.timeMs = u.anim.timeMs();
         ci.loop = a.loop;
         ci.wornCount = 0;
         // item models: helmet, shoulders, weapons
-        const bool shooting = c.castGoMs && nowMs - c.castGoMs < 1500 && c.castGoLook != CastLook::Spell && c.equip[W3D_EQ_RANGED];
+        const bool shooting = c.equip[W3D_EQ_RANGED] && (c.rangedStance != CastLook::Spell ||
+                                                         (c.castGoMs && nowMs - c.castGoMs < 1500 && c.castGoLook != CastLook::Spell));
         for (int k = 0; k < CreatureView::kWornSlots; ++k) {
             const int slot = kWornEq[k];
             UnitWorn& w = u.worn[k];
@@ -552,10 +720,13 @@ void CreatureView::update(const std::vector<CreatureSeen>& seen, uint32_t nowMs,
                 if (!w.model[side] || w.model[side]->state != AssetState::Ready || !w.model[side]->h ||
                     ci.wornCount >= CreatureInstance::kMaxWorn) continue;
                 int cand[4];
-                int n = wornAttach(c, slot, side, shooting, cand);
-                CreatureInstance::Worn wi;
+                int n = wornAttach(c, slot, side, shooting, u.anim.weaponsDrawn(), cand);
+                CreatureInstance::Worn wi{};
                 wi.model = w.model[side];
-                if (n && findAttach(blob, cand, n, &wi)) ci.worn[ci.wornCount++] = wi;
+                if (n && findAttach(blob, cand, n, &wi)) {
+                    if (slot == W3D_EQ_OFFHAND) wi.backFix = 0;   // a shield on the back keeps the bone's orientation (as WoWee)
+                    ci.worn[ci.wornCount++] = wi;
+                }
             }
         }
         out.push_back(ci);

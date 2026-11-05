@@ -30,7 +30,7 @@ namespace {
 enum {
     ID_DATA = 100, ID_DATA_BROWSE, ID_OUT, ID_OUT_BROWSE, ID_MAP, ID_RADIO_WORLD, ID_RADIO_REGION, ID_TX0, ID_TY0, ID_TX1, ID_TY1,
     ID_PACKWORLD, ID_CREATURES, ID_PLAYERS, ID_ITEMS, ID_TRANSPORTS, ID_GAMEOBJECTS, ID_DUNGEONS, ID_UI, ID_SOUND, ID_QUALITY, ID_EXTRA,
-    ID_MODE_ALL, ID_MODE_SEL, ID_START, ID_CANCEL, ID_OPEN, ID_LOG, ID_STATUS, ID_STAGE, ID_PROGRESS, ID_LAB_TILES
+    ID_MODE_ALL, ID_MODE_SEL, ID_START, ID_CANCEL, ID_OPEN, ID_LOG, ID_STATUS, ID_STAGE, ID_PROGRESS, ID_LAB_TILES, ID_PVS, ID_HLOD
 };
 constexpr UINT_PTR kTimer = 1;
 constexpr size_t kLogLines = 600;   // lines kept in the window (the whole log is in log_*.txt)
@@ -95,6 +95,8 @@ w3gui::Settings readUi() {
     s.creatures = checked(ID_CREATURES); s.players = checked(ID_PLAYERS); s.items = checked(ID_ITEMS);
     s.transports = checked(ID_TRANSPORTS); s.gameobjects = checked(ID_GAMEOBJECTS); s.dungeons = checked(ID_DUNGEONS); s.ui = checked(ID_UI); s.sound = checked(ID_SOUND);
     s.everything = checked(ID_MODE_ALL);
+    s.pvs = false;   // 6.97: the PVS option is gone from the GUI (it hardly helped)
+    s.hlod = checked(ID_HLOD);
     s.quality = (int)SendDlgItemMessageW(g_wnd, ID_QUALITY, CB_GETCURSEL, 0, 0);
     if (s.quality < 0) s.quality = 0;
     s.extra = narrow(getText(ID_EXTRA));
@@ -114,6 +116,7 @@ void writeUi(const w3gui::Settings& s) {
     setChecked(ID_TRANSPORTS, s.transports); setChecked(ID_GAMEOBJECTS, s.gameobjects); setChecked(ID_DUNGEONS, s.dungeons); setChecked(ID_UI, s.ui); setChecked(ID_SOUND, s.sound);
     setChecked(ID_MODE_ALL, s.everything);
     setChecked(ID_MODE_SEL, !s.everything);
+    setChecked(ID_HLOD, s.hlod);
     SendDlgItemMessageW(g_wnd, ID_QUALITY, CB_SETCURSEL, (WPARAM)s.quality, 0);
     setText(ID_EXTRA, widen(s.extra));
 }
@@ -254,7 +257,17 @@ DWORD WINAPI worker(LPVOID p) {
         addLine(L"");
         addLine(L"=== Step " + std::to_wstring(i + 1) + L" of " + std::to_wstring(steps.size()) + L": " + widen(steps[i].title) + L" ===");
         setStatus(L"Step " + std::to_wstring(i + 1) + L" of " + std::to_wstring(steps.size()) + L": " + widen(steps[i].title));
-        int rc = runStep(exe, steps[i], outDir);
+        if (steps[i].needsPack && failed) {   // 6.54e: its pack may be missing or broken
+            addLine(L"Skipped: an earlier step failed.");
+            continue;
+        }
+        const std::wstring stepExe = steps[i].exe.empty() ? exe : g_exeDir + widen(steps[i].exe);
+        if (GetFileAttributesW(stepExe.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            ++failed;
+            addLine(L"!!! " + widen(steps[i].exe) + L" is not next to w3dgui.exe.");
+            continue;
+        }
+        int rc = runStep(stepExe, steps[i], outDir);
         if (g_cancel) break;
         if (rc != 0) {
             ++failed;
@@ -297,7 +310,7 @@ void applyMode() {
 
 void setRunning(bool running) {
     for (int id : {ID_START, ID_DATA, ID_DATA_BROWSE, ID_OUT, ID_OUT_BROWSE, ID_MAP, ID_RADIO_WORLD, ID_RADIO_REGION, ID_TX0, ID_TY0, ID_TX1, ID_TY1,
-                   ID_LAB_TILES, ID_PACKWORLD, ID_CREATURES, ID_PLAYERS, ID_ITEMS, ID_TRANSPORTS, ID_GAMEOBJECTS, ID_DUNGEONS, ID_UI, ID_SOUND,
+                   ID_LAB_TILES, ID_PACKWORLD, ID_CREATURES, ID_PLAYERS, ID_ITEMS, ID_TRANSPORTS, ID_GAMEOBJECTS, ID_DUNGEONS, ID_UI, ID_SOUND, ID_HLOD,
                    ID_QUALITY, ID_EXTRA, ID_MODE_ALL, ID_MODE_SEL})
         EnableWindow(GetDlgItem(g_wnd, id), !running);
     if (!running) applyMode();
@@ -459,7 +472,7 @@ void createControls() {
     check(L"Dungeons and raids (one map<ID>.w3dp each)", sx, y + 142, 320, ID_DUNGEONS);
     y += 186;
     // ---- content
-    group(L"Content", kM, y, gw, 100);
+    group(L"Content", kM, y, gw, 124);
     const int c1 = kM + 12, c2 = kM + 12 + gw / 3, c3 = kM + 12 + 2 * gw / 3;
     check(L"Interface and texts", c1, y + 22, 190, ID_UI);
     check(L"Sound and music", c2, y + 22, 190, ID_SOUND);
@@ -468,7 +481,8 @@ void createControls() {
     check(L"Players", c2, y + 46, 190, ID_PLAYERS);
     check(L"Ships and zeppelins", c3, y + 46, 190, ID_TRANSPORTS);
     check(L"All game objects (chests, lamps, decorations; large)", c1, y + 70, 360, ID_GAMEOBJECTS);
-    y += 110;
+    check(L"Horizon meshes (far buildings; minutes)", c1 + gw / 2 - 10, y + 94, gw / 2 - 10, ID_HLOD);
+    y += 134;
     // ---- options
     group(L"Options", kM, y, gw, 58);
     label(L"Texture quality:", kM + 12, y + 26, 100);
@@ -488,11 +502,11 @@ void createControls() {
     y += 20;
     mk(L"STATIC", L"", SS_ENDELLIPSIS, kM, y, gw, 18, ID_STAGE);
     y += 22;
-    HWND logBox = mk(L"EDIT", L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_BORDER, kM, y, gw, 150, ID_LOG,
+    HWND logBox = mk(L"EDIT", L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_BORDER, kM, y, gw, 126, ID_LOG,
                      WS_EX_CLIENTEDGE, g_mono);
     SendMessageW(logBox, EM_SETLIMITTEXT, 0x7FFFFFFE, 0);
 }
-constexpr int kH = 10 + 128 + 186 + 110 + 68 + 40 + 18 + 20 + 22 + 150 + 14;   // client height
+constexpr int kH = 10 + 128 + 186 + 134 + 68 + 40 + 18 + 20 + 22 + 126 + 14;   // client height
 
 LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {

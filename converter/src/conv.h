@@ -51,13 +51,22 @@ struct Options {
     // WMO buildings (stage 5.0)
     bool noWmo = false;         // skip buildings entirely
     bool noWmoDoodads = false;  // buildings without their furniture/lamps
-    bool wmoExteriorOnly = false;   // drop interior-only groups (no portals yet, they are drawn anyway)
+    bool noPortals = false;          // 6.42: no WMO portals (every interior group is drawn near it, as before)
+    bool wmoExteriorOnly = false;   // drop interior-only groups (without them there is nothing behind the doors)
     int wmoTex = 128;           // max WMO texture size
     float drawMaxError = 0.15f;  // 6.19b: yards a simplified building / doodad may move from its collision; --draw-error
+                                 // (6.47: floors only - the walkable triangles, n.z >= cos 50 degrees)
+    float drawWallError = 0.5f;  // 6.47: the same bound for walls, roofs and the rest (0 = 2% of the mesh size only); --wall-error
+    float wmoLodError[2] = {0.2f, 0.6f};   // 6.47: yards a WMO group's LOD 1 / 2 may lie from its full mesh; --wmo-lod-error A,B
+    int wmoChunkMinTris = 256;      // 6.48: a piece keeps at least this many triangles (--wmo-chunk-min; tests)
+    float wmoChunk = 64.0f;         // 6.48: an outside WMO group wider than 1.5x this is cut into pieces about this size (yd); --wmo-chunk, 0 = off (on again in 7za: the perf logs showed -16% tris, fewer draws)
+    bool wmoLodLockBorder = false;  // 6.47b: a WMO group's LOD levels keep every open border (--wmo-lod-lock; before 6.47b: always)
     int wmoGroupTris = 3000;    // triangle budget per WMO group (0 = keep all)
     std::string dumpPlacements; // debug: text file with every building group/doodad placement
+    std::string dumpWmo;        // 6.47d debug: WMO groups whose key contains one of these (comma-separated) -> OBJ + a log line
     bool noFloors = false;      // skip COLL entirely (no floors, no walls)
     bool noWalls = false;       // COLL with floors only (walking passes through walls)
+    bool noUvAnim = false;      // 6.41: moving textures of doodads (M2 texture transforms) are not baked (--no-uv-anim)
     bool noFx = false;          // stage 5.32: no particle emitters / glow sprites on doodads (--no-fx)
     bool fxSpell = false;       // stage 5.33: the model being converted is a spell effect (internal)
     bool spellFx = true;        // stage 5.33: spell visuals with the creatures (--no-spell-fx)
@@ -188,12 +197,21 @@ public:
     // Game path like "World\\Maps\\Azeroth\\Azeroth_32_48.adt".
     bool read(const std::string& gamePath, std::vector<uint8_t>& out) const;
     static std::string normalize(const std::string& gamePath);
+    // WoW Forever (modern client): a reader of files by FileDataID (CASC, or a test double) and the map-name -> WDT FileDataID
+    // table.  With it, "fdid\\N.ext" paths read that file and World\\Maps\\<m>\\<m>.wdt / <m>_X_Y.adt are assembled from the
+    // modern split files (modern_adt.h).
+    using FdidReader = std::function<bool(uint32_t, std::vector<uint8_t>&)>;
+    void setForever(FdidReader r, std::unordered_map<std::string, uint32_t> wdtIds) { fdid_ = std::move(r); wdtIds_ = std::move(wdtIds); }
+    bool forever() const { return (bool)fdid_; }
     size_t archiveCount() const { return archives_.size(); }
     size_t looseCount() const { return files_.size(); }
 
 private:
     bool openMpq(const std::string& dir);
     bool readMpq(const std::string& gamePath, std::vector<uint8_t>& out) const;
+    bool readForever(const std::string& gamePath, std::vector<uint8_t>& out, bool& handled) const;
+    FdidReader fdid_;
+    std::unordered_map<std::string, uint32_t> wdtIds_;   // lower-case map directory -> WDT FileDataID
     std::unordered_map<std::string, std::string> files_;  // normalized -> fs path
     std::vector<void*> archives_;                          // StormLib HANDLEs, highest priority first
 };
@@ -228,26 +246,62 @@ uint32_t addTextureFromGame(PackWriter& pack, const DataDir& data, const std::st
 // ------------------------------------------------------------ geometry
 struct ModelSource {               // engine-neutral mesh before packing
     struct V { float p[3]; float n[3]; float uv[2]; };
-    struct Sub { uint32_t texId; uint8_t blend, flags; std::vector<uint32_t> idx; uint16_t tag = 0; };   // tag: stage 5.35, kept apart in the merge
+    struct Sub { uint32_t texId; uint8_t blend, flags; std::vector<uint32_t> idx; uint16_t tag = 0, uvAnim = 0xFFFF; };   // tag: stage 5.35; uvAnim: 6.41, an index into uvTracks - both kept apart in the merge
+    struct UvTrack { uint32_t periodMs = 0; std::vector<W3dUvKey> keys; };   // 6.41: one baked texture transform (see w3d_format.h)
+    std::vector<UvTrack> uvTracks;
+    std::vector<W3dPortal> portals;   // 6.42: the portals of a WMO group (w3d_format.h), written behind the UV table
     std::vector<V> verts;
     std::vector<Sub> subs;
     std::vector<uint32_t> texIds;   // TEX entry ids referenced by Sub::texId (index)
     std::vector<uint16_t> outTags;   // out (stage 5.35): the Sub::tag of every submesh of the blob, in order
     size_t dropped = 0;             // out: indices/triangles buildModelBlob had to throw away (partial triangle, index out of range)
+    size_t statIn = 0, statLod[2] = {0, 0};   // out (6.47): triangles before simplifying; drawn at LOD 1 / 2 (report)
 };
 // Flips idx (triangle list over m.verts) to be CCW seen from the vertex normals; true if flipped.
 bool orientByNormals(const ModelSource& m, std::vector<uint32_t>& idx);
+// 6.45: a doodad's vertices in its Stand pose (first frame) instead of the bind pose; false: no skeleton / no difference (model.cpp)
+bool poseDoodad(const wowee::pipeline::M2Model& m, ModelSource& src);
 // Also normalises winding: CCW seen from the vertex normals' side (flippedOut = submeshes flipped).
 // maxErrYd > 0 (6.19b): the simplified surface stays within that many yards of the original (floors the walker stands on
 // are the exact ones: a ground drawn a yard above them buried the feet); 0 = 2% of the mesh size only.
-std::vector<uint8_t> buildModelBlob(ModelSource& m, int maxTris, size_t* trisOut, int* flippedOut = nullptr, float maxErrYd = 0.0f);
+// 6.47: wallErrYd > 0: the same bound for the non-walkable triangles (each part simplified on its own, the edge between them locked);
+// 0 = maxErrYd for all. lodErrYd (non-null, buildings): the LOD levels by these absolute errors (yards) instead of shares of the size.
+std::vector<uint8_t> buildModelBlob(ModelSource& m, int maxTris, size_t* trisOut, int* flippedOut = nullptr, float maxErrYd = 0.0f,
+                                    float wallErrYd = 0.0f, const float* lodErrYd = nullptr, bool lodLockBorder = true);
 extern size_t g_errorBoundModels;   // models that kept more triangles than their budget for maxErrYd (report)
+// 6.47: what the budget simplification did, by kind (report: are buildings lighter, where did the triangles stay)
+struct SimplifyStats {
+    std::atomic<size_t> models{0}, overBudget{0}, welded{0}, degenerate{0}, merged{0};
+    std::atomic<size_t> floorIn{0}, floorOut{0}, wallIn{0}, wallOut{0};
+};
+extern SimplifyStats g_simpStats[2];   // [0] doodads / other models, [1] WMO groups
+// 6.47: the heaviest WMO groups drawn (report)
+void noteHeavyGroup(const std::string& name, size_t trisIn, size_t trisOut, size_t lod1, size_t lod2);
+void printHeavyGroups(int n);
+void printSimplifyReport();
+// 6.48: a big mesh cut into pieces of at most ~cell yards across (k-d by triangle centres along the longer horizontal axis, a piece
+// keeps at least minTris): each piece's vertices around its own centre (offset[] = that centre in the source's space). One piece =
+// the source unchanged (offset 0).
+struct ModelChunk { ModelSource src; float offset[3]; };
+// 6.48: buildModelBlob's preparation and budget pass only, the result left in m (welded, merged, simplified submeshes); triangles
+size_t simplifyModelSource(ModelSource& m, int maxTris, float maxErrYd, float wallErrYd);
+std::vector<ModelChunk> splitModelSource(const ModelSource& src, float cell, size_t minTris);
+// 6.47d: does the key match one of the comma-separated parts of list?
+bool dumpWmoWanted(const std::string& list, const std::string& key);
+// 6.47d: the group's source mesh as <dir>/<key>.obj and a log line of what the simplifier can do with it (position only, welded)
+void dumpWmoGroup(const ModelSource& src, const std::string& key, const std::string& dir);
 // Stage 6.12: lighter versions of one index list for the distance (W3D_MODEL_LODS levels, ~50% / ~25% of the triangles, each
 // from the one before, error-bounded); an empty level = not worth it (the client uses the level below). lock: vertices that
 // must stay (a skinned mesh's joints), may be null; lockBorder: open borders stay (buildings: no cracks between groups).
+// absErr (6.47, non-null): level k by the absolute error absErr[k] (yards; the share of the size is no limit then).
 std::vector<std::vector<uint32_t>> simplifyLods(const uint32_t* idx, size_t n, const float* pos, size_t vcount, size_t posStride,
-                                                const float* uv, size_t uvStride, const unsigned char* lock, bool lockBorder);
-struct LodStats { std::atomic<size_t> rejected{0}, subs{0}, lod1{0}, lod2{0}, tris0{0}, tris1{0}, tris2{0}; };   // (models may be built on several threads)
+                                                const float* uv, size_t uvStride, const unsigned char* lock, bool lockBorder,
+                                                const float* absErr = nullptr, bool cards = false);
+// 6.84: lighter versions of an alpha-keyed foliage submesh (crown cards): whole cards go, the largest and the outermost stay (the
+// triangle-collapse simplifier cannot thin a cloud of flat cards: it keeps them all or tears them). ~60% / ~35% of the triangles.
+std::vector<std::vector<uint32_t>> cardLods(const uint32_t* idx, size_t n, const float* pos, size_t posStride);
+struct LodStats { std::atomic<size_t> rejected{0}, subs{0}, lod1{0}, lod2{0}, tris0{0}, tris1{0}, tris2{0};
+                  std::atomic<size_t> bSubs{0}, bTris0{0}, bTris1{0}, bTris2{0}; };   // b*: building submeshes (6.47)   // (models may be built on several threads)
 extern LodStats g_lodStats;   // (for the log: how much the LODs saved)
 
 // Whole file into memory in one read (the byte-by-byte istreambuf_iterator took minutes on a multi-GB map pack).
@@ -256,9 +310,12 @@ bool readFileFast(const std::string& path, std::vector<uint8_t>& out);
 struct ConvStats {
     size_t collOrphanTiles = 0;   // collision tiles dropped because the map has no terrain tile there
     size_t tiles = 0, waterTris = 0, wmoSkipped = 0;
+    size_t doodadsPosed = 0;   // 6.45: doodads standing in their Stand pose (not the bind pose)
+    size_t wmoGroupsCut = 0, wmoChunks = 0;   // 6.48: big outside groups cut into pieces / pieces written
+    size_t wmoPortals = 0, wmoPortalGroups = 0;   // 6.42: portals written (each counted in both groups) / groups that hold any
     size_t wmoOk = 0, wmoFailed = 0, wmoGroups = 0, wmoGroupsFailed = 0, wmoGroupsSkipped = 0, wmoTris = 0;
     size_t wmoPlacements = 0, wmoPlacedGroups = 0, wmoDoodads = 0, duplicatesSkipped = 0;
-    size_t m2SubsFlipped = 0, wmoSubsFlipped = 0;
+    size_t m2SubsFlipped = 0, wmoSubsFlipped = 0, uvAnims = 0;   // uvAnims: 6.41, texture transforms baked
     size_t fxModels = 0, fxEmitters = 0, fxGlows = 0;   // stage 5.32
     size_t fxAnimated = 0, fxEmittersDropped = 0, fxParticleOnly = 0;   // 5.35f: emitters without a rate or a life                                // stage 5.35: effect models with baked bone animation
     size_t creatureModelsOk = 0, creatureModelsFailed = 0, displaysOk = 0, displaysFailed = 0, creatureTris = 0;
@@ -270,6 +327,9 @@ struct ConvStats {
            itemModelTris = 0, itemHelms = 0, itemCapes = 0;
     size_t wmoBatchesUntextured = 0;   // WMO batches whose material texture did not resolve (drawn flat)
     size_t transportDisplays = 0, transportDisplaysFailed = 0, transportDecks = 0, transportDecksFromMesh = 0, staticDecks = 0;   // stage 5.21
+    size_t objWmoDisplays = 0, objWmoFailed = 0, objWmoParts = 0, objWmoCollTris = 0;   // 6.59: game objects whose model is a WMO
+    size_t displaysModelScaled = 0;   // 6.60: creature displays whose model asks for a scale of its own (CreatureModelData.ModelScale)
+    size_t objWmoTooBig = 0;   // 6.59c: of the failed, refused as too big for an object (cities, dungeons)
     size_t defaultObjectDisplays = 0, defaultObjectBytes = 0;   // stage 5.41: displays added only by the default set, and what they cost
     size_t charRaces = 0, charRacesFailed = 0, charSections = 0, charImages = 0, charImagesFailed = 0, charImageBytes = 0;   // submeshes whose winding disagreed with their normals
     // Placements repeat in every ADT they overlap (same uniqueId): emit each once.
@@ -305,6 +365,7 @@ struct ConvStats {
     struct TileLiquids { std::map<int, LiquidChunk> chunks; std::vector<LiquidQuad> quads; };
     std::map<uint32_t, TileLiquids> liquids;              // by tile id
     size_t liquidLayers = 0, liquidCells = 0, liquidDeepCells = 0, liquidQuads = 0, liquidWmoGroups = 0, liquidTiles = 0;
+    size_t liquidTilesFromGrid = 0;   // 6.59c: tiles whose water is drawn from the query grid (too many building cells)
     size_t liquidFramesOk = 0, liquidFramesMissing = 0, liquidBytes = 0, liquidMclqBad = 0;
     size_t modelsOk = 0, modelsFailed = 0, texturesOk = 0, texturesFailed = 0;
 };
@@ -316,6 +377,12 @@ uint32_t addModelFromGame(PackWriter& pack, const DataDir& data, const std::stri
 void placeWmo(PackWriter& pack, const DataDir& data, const std::string& path, const float pos[3],
               const float eulerRad[3], uint16_t doodadSet, const Options& o, ConvStats& st,
               const std::function<uint32_t(const std::string&)>& modelFor, std::vector<W3dPlacement>& out);
+// 6.59: a WMO as a game object's model: its groups and doodad set 0 as placements in the WMO's own space, its collision triangles
+// (9 floats each) in the same space; false when the WMO cannot be read, or (6.59c, *tooBig) when it is bigger than the client takes
+// for an object (W3D_OBJWMO_MAX_*: a whole city or dungeon) - such a one is refused before its groups go into the pack.
+bool wmoObjectParts(PackWriter& pack, const DataDir& data, const std::string& path, const Options& o, ConvStats& st,
+                    const std::function<uint32_t(const std::string&)>& modelFor, std::vector<W3dPlacement>& parts,
+                    std::vector<float>& coll, bool* tooBig = nullptr);
 // A WDBC table (DBFilesClient\\<name>), fields read as u32 / f32 / string offsets.
 struct DbcTable {
     uint32_t records = 0, fields = 0, recSize = 0, strSize = 0;
@@ -349,10 +416,13 @@ std::string resolveSpellText(const std::string& text, const SpellTextVals& v,
 bool exportSpellDescriptions(const DataDir& data, const std::string& path, bool verbose);
 // skills.txt (SkillLine.dbc, stage 6.19): "S id category name description" - the skills page of the 3DS client.
 bool exportSkills(const DataDir& data, const std::string& path, bool verbose);
+// recipes.txt (6.38): the profession window - recipes of the professions with their reagents, tools and the item they make.
+bool exportRecipes(const DataDir& data, const std::string& path, bool verbose);
 bool exportLocks(const DataDir& data, const std::string& path, bool verbose);
 // areatriggers.txt (AreaTrigger.dbc, stage 5.28): the zones the client reports with CMSG_AREATRIGGER (dungeon doors, the tram).
 bool exportAreaTriggers(const DataDir& data, const std::string& path, bool verbose);
 bool exportEmotes(const DataDir& data, const std::string& path, bool verbose);
+bool exportSky(const DataDir& data, const std::string& path, bool verbose);   // 6.60: sky.txt (Light.dbc sky / fog colours over the day)
 // glue.txt (stage 5.29): GlueStrings.lua texts, CharStartOutfit.dbc clothes, AreaTable.dbc zone names.
 bool exportGlueTexts(const DataDir& data, const std::string& path, bool verbose);
 // Transports (stage 5.21): transports.txt = "T path node map x y z flags delay" per TaxiPathNode.dbc row and
@@ -418,6 +488,8 @@ bool convertItems(const Options& o, const DataDir& data, PackWriter& pack, ConvS
 bool convertCreatures(const Options& o, const DataDir& data, PackWriter& pack, ConvStats& st);
 // Stage 5.29: the login / character screen scenes (MODL + GLUE entries), with the player models.
 bool convertGlueScenes(const Options& o, const DataDir& data, PackWriter& pack, ConvStats& st);
+// 6.61 (skybox.cpp): the sky models of LightSkybox.dbc as SKYB + MODL entries (the pool with --all). Returns the number written.
+size_t convertSkyboxes(const Options& o, const DataDir& data, PackWriter& pack, ConvStats& st);
 // Spell visuals (stage 5.33, spellfx.cpp): effect models + the SVFX table, into the pack (the pool with --all).
 bool convertSpellEffects(const Options& o, const DataDir& data, PackWriter& pack, ConvStats& st);
 int explainSpells(const DataDir& data, const std::vector<uint32_t>& ids);   // --explain-spell (5.35f)
@@ -482,6 +554,11 @@ int  printPackInfo(const std::string& path);   // validator, returns 0 if pack i
 
 // Stage 6.13: particle emitters of an M2 (model.cpp; also used for creature / game object models: a brazier's fire) and the
 // fx section + footer behind a blob (the same for MODL and CMDL blobs).
+// 6.43 (m2_fix.cpp): M2Loader::load, then the bone tracks of a 1.12 / 2.x file rebuilt with inclusive key ranges (WoWee dropped
+// single-key sequences: T-poses). Use it for every M2 whose bones are baked. g_m2TracksFixed counts the bone tracks it changed.
+wowee::pipeline::M2Model loadM2(const std::vector<uint8_t>& bytes);
+size_t fixVanillaBoneTracks(const std::vector<uint8_t>& bytes, wowee::pipeline::M2Model& m);
+extern std::atomic<size_t> g_m2TracksFixed;
 size_t m2Emitters(const wowee::pipeline::M2Model& mdl, PackWriter& pack, const DataDir& data, const Options& o, ConvStats& st,
                   bool fire, size_t maxN, std::vector<W3dFxEmitter>& emitters, std::vector<uint32_t>& fxTex,
                   std::vector<uint32_t>* bones);

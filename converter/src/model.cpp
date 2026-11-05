@@ -7,6 +7,8 @@
 #include "pipeline/m2_loader.hpp"
 #include "rendering/m2_track_sampler.hpp"
 #include "meshoptimizer.h"
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include "w3d_fx.h"
 
 #include <algorithm>
@@ -19,6 +21,10 @@
 #include <map>
 #include <tuple>
 #include <unordered_map>
+#include <mutex>
+#include <filesystem>
+#include <string>
+#include "w3d_collision.h"
 
 namespace w3d {
 
@@ -48,13 +54,116 @@ bool orientByNormals(const ModelSource& m, std::vector<uint32_t>& idx) {
 
 LodStats g_lodStats;
 
+std::vector<std::vector<uint32_t>> cardLods(const uint32_t* idx, size_t n, const float* pos, size_t posStride) {
+    std::vector<std::vector<uint32_t>> out(W3D_MODEL_LODS);
+    const size_t tris = n / 3;
+    if (tris < 24) return out;
+    auto P = [&](uint32_t i) { return (const float*)((const char*)pos + (size_t)i * posStride); };
+    // cards = connected pieces (triangles sharing a vertex)
+    std::unordered_map<uint32_t, uint32_t> parent;
+    std::function<uint32_t(uint32_t)> find = [&](uint32_t a) {
+        auto it = parent.find(a);
+        if (it == parent.end()) { parent[a] = a; return a; }
+        uint32_t r = a;
+        while (parent[r] != r) r = parent[r];
+        while (parent[a] != r) { uint32_t nx = parent[a]; parent[a] = r; a = nx; }
+        return r;
+    };
+    for (size_t t = 0; t < tris; ++t) {
+        const uint32_t a = find(idx[3 * t]), b = find(idx[3 * t + 1]), c = find(idx[3 * t + 2]);
+        parent[b] = a;
+        parent[find(c)] = find(a);
+    }
+    struct Card { std::vector<uint32_t> tri; double area = 0; bool must = false; };
+    std::vector<Card> cards;
+    std::unordered_map<uint32_t, uint32_t> slot;
+    float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+    for (size_t t = 0; t < tris; ++t) {
+        const uint32_t root = find(idx[3 * t]);
+        auto it = slot.find(root);
+        if (it == slot.end()) { it = slot.emplace(root, (uint32_t)cards.size()).first; cards.emplace_back(); }
+        Card& cd = cards[it->second];
+        cd.tri.push_back((uint32_t)t);
+        const float *a = P(idx[3 * t]), *b = P(idx[3 * t + 1]), *c = P(idx[3 * t + 2]);
+        float e1[3], e2[3];
+        for (int k = 0; k < 3; ++k) { e1[k] = b[k] - a[k]; e2[k] = c[k] - a[k]; lo[k] = std::min({lo[k], a[k], b[k], c[k]}); hi[k] = std::max({hi[k], a[k], b[k], c[k]}); }
+        const double gx = (double)e1[1] * e2[2] - (double)e1[2] * e2[1], gy = (double)e1[2] * e2[0] - (double)e1[0] * e2[2],
+                     gz = (double)e1[0] * e2[1] - (double)e1[1] * e2[0];
+        cd.area += 0.5 * std::sqrt(gx * gx + gy * gy + gz * gz);
+    }
+    if (cards.size() < 4) return out;
+    // the outermost cards (the extreme vertex of each axis, both ways) always stay: the crown keeps its extent
+    for (int k = 0; k < 3; ++k) {
+        for (int side = 0; side < 2; ++side) {
+            size_t best = 0;
+            float bv = side ? -1e30f : 1e30f;
+            for (size_t ci = 0; ci < cards.size(); ++ci)
+                for (uint32_t t : cards[ci].tri)
+                    for (int c = 0; c < 3; ++c) {
+                        const float v = P(idx[3 * t + c])[k];
+                        if (side ? v > bv : v < bv) { bv = v; best = ci; }
+                    }
+            cards[best].must = true;
+        }
+    }
+    std::vector<uint32_t> order(cards.size());
+    for (uint32_t i = 0; i < order.size(); ++i) order[i] = i;
+    std::stable_sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) {
+        if (cards[a].must != cards[b].must) return cards[a].must;
+        return cards[a].area > cards[b].area;
+    });
+    static const float kShare[W3D_MODEL_LODS] = {0.6f, 0.35f};
+    std::vector<uint32_t> prev(idx, idx + n);
+    size_t keepCards = order.size();
+    for (int k = 0; k < W3D_MODEL_LODS; ++k) {
+        const size_t target = (size_t)((float)tris * kShare[k]);
+        size_t kept = 0, c = 0;
+        for (; c < order.size(); ++c) {
+            if (kept >= target && !cards[order[c]].must) break;
+            kept += cards[order[c]].tri.size();
+        }
+        if (c >= keepCards || (float)kept > 0.8f * (float)(prev.size() / 3)) continue;   // not much lighter than the level below
+        keepCards = c;
+        std::vector<uint32_t> keepTri;
+        for (size_t i = 0; i < c; ++i) keepTri.insert(keepTri.end(), cards[order[i]].tri.begin(), cards[order[i]].tri.end());
+        std::sort(keepTri.begin(), keepTri.end());   // (the original order: cache friendliness of the source stays)
+        std::vector<uint32_t> r;
+        r.reserve(keepTri.size() * 3);
+        for (uint32_t t : keepTri) r.insert(r.end(), {idx[3 * t], idx[3 * t + 1], idx[3 * t + 2]});
+        out[k] = r;
+        prev = r;
+    }
+    return out;
+}
+
 std::vector<std::vector<uint32_t>> simplifyLods(const uint32_t* idx, size_t n, const float* pos, size_t vcount, size_t posStride,
-                                                const float* uv, size_t uvStride, const unsigned char* lock, bool lockBorder) {
+                                                const float* uv, size_t uvStride, const unsigned char* lock, bool lockBorder,
+                                                const float* absErr, bool cards) {
+    if (cards) {   // 6.84: foliage
+        ++g_lodStats.subs;
+        g_lodStats.tris0 += n / 3;
+        auto lv = cardLods(idx, n, pos, posStride);
+        if (!lv[0].empty()) { ++g_lodStats.lod1; g_lodStats.tris1 += lv[0].size() / 3; }
+        if (!lv[1].empty()) { ++g_lodStats.lod2; g_lodStats.tris2 += lv[1].size() / 3; }
+        return lv;
+    }
     std::vector<std::vector<uint32_t>> out(W3D_MODEL_LODS);
     ++g_lodStats.subs;
     g_lodStats.tris0 += n / 3;
-    if (n < 3 * 24) return out;   // a few triangles: nothing to gain, one draw call either way
-    static const float kRatio[W3D_MODEL_LODS] = {0.5f, 0.25f};
+    if (absErr) { ++g_lodStats.bSubs; g_lodStats.bTris0 += n / 3; }
+    // 6.47: what the client draws at level k (the lightest level there is up to k), for the report
+    auto countDrawn = [&]() {
+        if (!absErr) return;
+        size_t t1 = out[0].empty() ? n / 3 : out[0].size() / 3;
+        size_t t2 = out[1].empty() ? t1 : out[1].size() / 3;
+        g_lodStats.bTris1 += t1;
+        g_lodStats.bTris2 += t2;
+    };
+    if (n < 3 * 24) { countDrawn(); return out; }   // a few triangles: nothing to gain, one draw call either way
+    // 6.47: a building's levels are made by an absolute error (the client switches by its size on the screen): the triangle
+    // target is only a floor, the error decides how far each level goes
+    static const float kRatioShare[W3D_MODEL_LODS] = {0.5f, 0.25f}, kRatioAbs[W3D_MODEL_LODS] = {0.1f, 0.03f};
+    const float* kRatio = absErr ? kRatioAbs : kRatioShare;
     static const float kErr[W3D_MODEL_LODS] = {0.03f, 0.08f};   // of the mesh's extent
     static const float attrW[2] = {0.3f, 0.3f};
     // 6.15: the error is a share of the mesh's extent - and a street lamp is tall: 8% of 4 yards is 0.3, three times the radius
@@ -79,10 +188,15 @@ std::vector<std::vector<uint32_t>> simplifyLods(const uint32_t* idx, size_t n, c
         std::vector<uint32_t> r(prev.size());
         float err = 0;
         const float errRel = ext > 1e-6f ? std::min(kErr[k], kThin[k] * thin / ext) : kErr[k];
+        const unsigned opts = (lockBorder ? meshopt_SimplifyLockBorder : 0) | (absErr ? meshopt_SimplifyErrorAbsolute : 0);
         size_t got = meshopt_simplifyWithAttributes(r.data(), prev.data(), prev.size(), pos, vcount, posStride, uv, uvStride, attrW,
-                                                    uv ? 2 : 0, lock, target, errRel, lockBorder ? meshopt_SimplifyLockBorder : 0, &err);
-        // not much lighter than the level below: not worth an extra index range
-        if (got < 3 || (float)got > 0.8f * (float)prev.size()) break;
+                                                    uv ? 2 : 0, lock, target, absErr ? absErr[k] : errRel, opts, &err);
+        // not much lighter than the level below: not worth an extra index range (6.47: a building's next level has a larger error
+        // and may still be worth it - tried from the same mesh)
+        if (got < 3 || (float)got > 0.8f * (float)prev.size()) {
+            if (absErr) continue;
+            break;
+        }
         {   // 6.15: a part that vanished (a lamp's post: the bounding box got shorter by more than a quarter of the model's smallest
             // dimension) makes this level - and the lighter ones - unusable: the model keeps the level below
             float nlo[3] = {1e30f, 1e30f, 1e30f}, nhi[3] = {-1e30f, -1e30f, -1e30f};
@@ -102,12 +216,213 @@ std::vector<std::vector<uint32_t>> simplifyLods(const uint32_t* idx, size_t n, c
         (k == 0 ? g_lodStats.lod1 : g_lodStats.lod2)++;
         (k == 0 ? g_lodStats.tris1 : g_lodStats.tris2) += got / 3;
     }
+    countDrawn();
     return out;
 }
 
 size_t g_errorBoundModels = 0;
 
-std::vector<uint8_t> buildModelBlob(ModelSource& m, int maxTris, size_t* trisOut, int* flippedOut, float maxErrYd) {
+SimplifyStats g_simpStats[2];
+static thread_local bool g_simplifyOnly = false;   // 6.48: buildModelBlob stops after its budget pass (simplifyModelSource)
+
+size_t simplifyModelSource(ModelSource& m, int maxTris, float maxErrYd, float wallErrYd) {
+    g_simplifyOnly = true;
+    size_t tris = 0;
+    int flipped = 0;
+    buildModelBlob(m, maxTris, &tris, &flipped, maxErrYd, wallErrYd, nullptr, true);
+    g_simplifyOnly = false;
+    return tris;
+}
+
+namespace {
+std::mutex g_heavyMu;
+struct HeavyGroup { std::string name; size_t in, out, lod1, lod2; };
+std::vector<HeavyGroup> g_heavy;   // the heaviest WMO groups (kept at most 64)
+}
+
+void noteHeavyGroup(const std::string& name, size_t trisIn, size_t trisOut, size_t lod1, size_t lod2) {
+    std::lock_guard<std::mutex> lk(g_heavyMu);
+    if (g_heavy.size() >= 64 && trisOut <= g_heavy.back().out) return;
+    for (const auto& g : g_heavy) if (g.name == name) return;   // (the same group from another tile / map)
+    g_heavy.push_back({name, trisIn, trisOut, lod1, lod2});
+    std::sort(g_heavy.begin(), g_heavy.end(), [](const HeavyGroup& a, const HeavyGroup& b) { return a.out > b.out; });
+    if (g_heavy.size() > 64) g_heavy.resize(64);
+}
+
+void printHeavyGroups(int n) {
+    std::lock_guard<std::mutex> lk(g_heavyMu);
+    if (g_heavy.empty()) return;
+    std::printf("  heaviest WMO groups (6.47; triangles in the file -> drawn, LOD 1, LOD 2):\n");
+    for (int i = 0; i < n && i < (int)g_heavy.size(); ++i) {
+        const auto& g = g_heavy[i];
+        std::printf("    %6zu -> %6zu  %6zu  %6zu  %s\n", g.in, g.out, g.lod1, g.lod2, g.name.c_str());
+    }
+}
+
+void printSimplifyReport() {
+    static const char* kKind[2] = {"models", "WMO groups"};
+    for (int k = 0; k < 2; ++k) {
+        const SimplifyStats& s = g_simpStats[k];
+        if (!s.models) continue;
+        std::printf("  simplify (6.47) %s: %zu built, %zu over their budget (their floors %zu -> %zu tris, walls / rest %zu -> %zu); "
+                    "%zu vertices welded, %zu merged (6.47c), %zu degenerate triangles dropped\n", kKind[k], (size_t)s.models,
+                    (size_t)s.overBudget, (size_t)s.floorIn, (size_t)s.floorOut, (size_t)s.wallIn, (size_t)s.wallOut, (size_t)s.welded,
+                    (size_t)s.merged, (size_t)s.degenerate);
+    }
+    if (g_lodStats.bSubs) {
+        const double t0 = (double)g_lodStats.bTris0;
+        std::printf("  building LODs (6.47): %zu submeshes, %zu tris; drawn at level 1: %zu (%.0f%%), at level 2: %zu (%.0f%%)\n",
+                    (size_t)g_lodStats.bSubs, (size_t)g_lodStats.bTris0, (size_t)g_lodStats.bTris1, t0 > 0 ? 100.0 * g_lodStats.bTris1 / t0 : 0.0,
+                    (size_t)g_lodStats.bTris2, t0 > 0 ? 100.0 * g_lodStats.bTris2 / t0 : 0.0);
+    }
+}
+
+std::vector<ModelChunk> splitModelSource(const ModelSource& src, float cell, size_t minTris) {
+    struct Tri { uint32_t sub, first; float c[3]; };
+    std::vector<Tri> tris;
+    for (uint32_t si = 0; si < src.subs.size(); ++si) {
+        const auto& s = src.subs[si];
+        for (uint32_t t = 0; t + 2 < s.idx.size(); t += 3) {
+            if (s.idx[t] >= src.verts.size() || s.idx[t + 1] >= src.verts.size() || s.idx[t + 2] >= src.verts.size()) continue;
+            Tri r{si, t, {0, 0, 0}};
+            for (int k = 0; k < 3; ++k)
+                for (int c = 0; c < 3; ++c) r.c[c] += src.verts[s.idx[t + k]].p[c] / 3.0f;
+            tris.push_back(r);
+        }
+    }
+    std::vector<std::pair<size_t, size_t>> leaves;   // ranges of tris
+    std::function<void(size_t, size_t)> split = [&](size_t b, size_t e) {
+        float lo[2] = {1e30f, 1e30f}, hi[2] = {-1e30f, -1e30f};
+        for (size_t i = b; i < e; ++i)
+            for (int c = 0; c < 2; ++c) { lo[c] = std::min(lo[c], tris[i].c[c]); hi[c] = std::max(hi[c], tris[i].c[c]); }
+        const int ax = (hi[0] - lo[0]) >= (hi[1] - lo[1]) ? 0 : 1;
+        if (cell <= 0 || hi[ax] - lo[ax] <= cell || e - b < 2 * minTris) { leaves.push_back({b, e}); return; }
+        const size_t mid = b + (e - b) / 2;
+        std::nth_element(tris.begin() + b, tris.begin() + mid, tris.begin() + e, [ax](const Tri& x, const Tri& y) { return x.c[ax] < y.c[ax]; });
+        split(b, mid);
+        split(mid, e);
+    };
+    split(0, tris.size());
+    std::vector<ModelChunk> out;
+    if (leaves.size() <= 1) {
+        out.push_back({src, {0, 0, 0}});
+        return out;
+    }
+    for (const auto& [b, e] : leaves) {
+        ModelChunk ch;
+        ch.src.texIds = src.texIds;
+        ch.src.uvTracks = src.uvTracks;
+        std::vector<uint32_t> remap(src.verts.size(), UINT32_MAX);
+        std::map<uint32_t, uint32_t> subOf;   // source sub -> chunk sub
+        float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+        std::vector<Tri> part(tris.begin() + b, tris.begin() + e);
+        std::sort(part.begin(), part.end(), [](const Tri& x, const Tri& y) { return x.sub != y.sub ? x.sub < y.sub : x.first < y.first; });
+        for (const Tri& t : part) {
+            auto [it, fresh] = subOf.emplace(t.sub, (uint32_t)ch.src.subs.size());
+            if (fresh) {
+                ModelSource::Sub d = src.subs[t.sub];
+                d.idx.clear();
+                ch.src.subs.push_back(std::move(d));
+            }
+            auto& d = ch.src.subs[it->second];
+            for (int k = 0; k < 3; ++k) {
+                const uint32_t v = src.subs[t.sub].idx[t.first + k];
+                if (remap[v] == UINT32_MAX) {
+                    remap[v] = (uint32_t)ch.src.verts.size();
+                    ch.src.verts.push_back(src.verts[v]);
+                    for (int c = 0; c < 3; ++c) { lo[c] = std::min(lo[c], src.verts[v].p[c]); hi[c] = std::max(hi[c], src.verts[v].p[c]); }
+                }
+                d.idx.push_back(remap[v]);
+            }
+        }
+        for (int c = 0; c < 3; ++c) ch.offset[c] = 0.5f * (lo[c] + hi[c]);
+        for (auto& v : ch.src.verts)
+            for (int c = 0; c < 3; ++c) v.p[c] -= ch.offset[c];
+        out.push_back(std::move(ch));
+    }
+    return out;
+}
+
+bool dumpWmoWanted(const std::string& list, const std::string& key) {
+    std::string k = key;
+    for (char& c : k) c = (char)std::tolower((unsigned char)c);
+    size_t p = 0;
+    while (p <= list.size()) {
+        size_t e = list.find(',', p);
+        if (e == std::string::npos) e = list.size();
+        std::string part = list.substr(p, e - p);
+        for (char& c : part) c = (char)std::tolower((unsigned char)c);
+        for (char& c : part) if (c == '\\') c = '/';
+        if (!part.empty() && k.find(part) != std::string::npos) return true;
+        p = e + 1;
+    }
+    return false;
+}
+
+void dumpWmoGroup(const ModelSource& src, const std::string& key, const std::string& dir) {
+    static std::mutex mu;
+    std::lock_guard<std::mutex> lk(mu);
+    std::string name = key;
+    for (char& c : name) if (c == '/' || c == '\\' || c == '#' || c == ':') c = '_';
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    const std::string path = dir + "/" + name + ".obj";
+    if (FILE* f = std::fopen(path.c_str(), "w")) {
+        std::fprintf(f, "# %s: %zu vertices, %zu submeshes (6.47d dump, group space)\n", key.c_str(), src.verts.size(), src.subs.size());
+        for (const auto& v : src.verts) std::fprintf(f, "v %.5f %.5f %.5f\n", v.p[0], v.p[1], v.p[2]);
+        for (const auto& v : src.verts) std::fprintf(f, "vt %.5f %.5f\n", v.uv[0], v.uv[1]);
+        for (const auto& v : src.verts) std::fprintf(f, "vn %.4f %.4f %.4f\n", v.n[0], v.n[1], v.n[2]);
+        for (size_t si = 0; si < src.subs.size(); ++si) {
+            const auto& s = src.subs[si];
+            std::fprintf(f, "g sub%zu\nusemtl tex%u_blend%u_flags%u\n", si, (unsigned)s.texId, (unsigned)s.blend, (unsigned)s.flags);
+            for (size_t t = 0; t + 2 < s.idx.size(); t += 3) {
+                const uint32_t a = s.idx[t] + 1, b = s.idx[t + 1] + 1, c = s.idx[t + 2] + 1;
+                std::fprintf(f, "f %u/%u/%u %u/%u/%u %u/%u/%u\n", a, a, a, b, b, b, c, c, c);
+            }
+        }
+        std::fclose(f);
+    }
+    // what the simplifier can do with the shape alone: positions within 2 mm one vertex, no attributes
+    std::vector<uint32_t> idx;
+    for (const auto& s : src.subs)
+        for (size_t t = 0; t + 2 < s.idx.size(); t += 3)
+            if (s.idx[t] < src.verts.size() && s.idx[t + 1] < src.verts.size() && s.idx[t + 2] < src.verts.size())
+                idx.insert(idx.end(), {s.idx[t], s.idx[t + 1], s.idx[t + 2]});
+    std::vector<float> pos(src.verts.size() * 3);
+    for (size_t i = 0; i < src.verts.size(); ++i)
+        for (int c = 0; c < 3; ++c) pos[i * 3 + c] = std::round(src.verts[i].p[c] * 500.0f) / 500.0f;
+    std::vector<uint32_t> sh(idx.size());
+    meshopt_generateShadowIndexBuffer(sh.data(), idx.data(), idx.size(), pos.data(), src.verts.size(), 3 * sizeof(float), 3 * sizeof(float));
+    std::vector<char> usedPos(src.verts.size(), 0);
+    size_t positions = 0;
+    for (uint32_t i : sh) if (!usedPos[i]) { usedPos[i] = 1; ++positions; }
+    std::map<std::pair<uint32_t, uint32_t>, int> edges;
+    size_t degenerate = 0;
+    for (size_t t = 0; t + 2 < sh.size(); t += 3) {
+        if (sh[t] == sh[t + 1] || sh[t + 1] == sh[t + 2] || sh[t] == sh[t + 2]) { ++degenerate; continue; }
+        for (int e = 0; e < 3; ++e) {
+            uint32_t a = sh[t + e], b = sh[t + (e + 1) % 3];
+            if (a > b) std::swap(a, b);
+            ++edges[{a, b}];
+        }
+    }
+    size_t open = 0, nonManifold = 0;
+    for (const auto& [k, n] : edges) { if (n == 1) ++open; else if (n > 2) ++nonManifold; }
+    auto simp = [&](float err, unsigned opts) {
+        std::vector<uint32_t> r(sh.size());
+        float e = 0;
+        return meshopt_simplify(r.data(), sh.data(), sh.size(), pos.data(), src.verts.size(), 3 * sizeof(float), 3, err,
+                                opts | meshopt_SimplifyErrorAbsolute, &e) / 3;
+    };
+    const size_t tris = idx.size() / 3;
+    std::printf("  dump-wmo (6.47d) %s: %zu tris, %zu vertices, %zu distinct positions, %zu degenerate; edges %zu (%zu open, %zu shared by 3+);"
+                " shape-only simplify: 0.2 yd %zu, 0.6 yd %zu, 2 yd %zu, 0.6 yd locked borders %zu -> %s\n",
+                key.c_str(), tris, src.verts.size(), positions, degenerate, edges.size(), open, nonManifold, simp(0.2f, 0), simp(0.6f, 0),
+                simp(2.0f, 0), simp(0.6f, meshopt_SimplifyLockBorder), path.c_str());
+}
+
+std::vector<uint8_t> buildModelBlob(ModelSource& m, int maxTris, size_t* trisOut, int* flippedOut, float maxErrYd, float wallErrYd,
+                                    const float* lodErrYd, bool lodLockBorder) {
     // ---- 0a. sanitise the input. meshoptimizer is compiled without asserts in Release, so an index list that is not a
     // whole number of triangles (a WMO batch with an odd index count, a group with no batch table, ...) or an index past the
     // vertex array made it read and write beyond the buffer: heap corruption / access violation, no message
@@ -135,10 +450,10 @@ std::vector<uint8_t> buildModelBlob(ModelSource& m, int maxTris, size_t* trisOut
     if (flippedOut) *flippedOut = flipped;
 
     // ---- 1. merge submeshes sharing material
-    std::map<std::tuple<uint32_t, uint8_t, uint8_t, uint16_t>, ModelSource::Sub> merged;
+    std::map<std::tuple<uint32_t, uint8_t, uint8_t, uint16_t, uint16_t>, ModelSource::Sub> merged;
     for (auto& s : m.subs) {
-        auto& d = merged[{s.texId, s.blend, s.flags, s.tag}];
-        d.texId = s.texId; d.blend = s.blend; d.flags = s.flags; d.tag = s.tag;
+        auto& d = merged[{s.texId, s.blend, s.flags, s.tag, s.uvAnim}];
+        d.texId = s.texId; d.blend = s.blend; d.flags = s.flags; d.tag = s.tag; d.uvAnim = s.uvAnim;
         d.idx.insert(d.idx.end(), s.idx.begin(), s.idx.end());
     }
     std::vector<ModelSource::Sub> subs;
@@ -146,55 +461,189 @@ std::vector<uint8_t> buildModelBlob(ModelSource& m, int maxTris, size_t* trisOut
     if (subs.empty()) return {};
 
     // ---- 2. simplify each submesh proportionally to hit the budget
-    size_t total = 0;
-    for (auto& s : subs) total += s.idx.size() / 3;
-    if (maxTris > 0 && total > (size_t)maxTris) {
-        // Weld before simplifying (stage 5.31): WMO panels each carry their own vertices whose positions differ from the
-        // neighbour's by float noise; seen as open borders, they were collapsed one panel at a time and cracks opened
-        // between panels (Stormwind's walls: holes that never closed). Positions within 2 mm become identical (seams the
-        // simplifier keeps together), and what is still a border is locked (meshopt_SimplifyLockBorder below).
-        std::unordered_map<uint64_t, uint32_t> cell;
-        auto q = [](float v) { return (uint64_t)(uint32_t)(int32_t)std::lround(v * 500.0f) & 0x1FFFFF; };
+    bool building = false;
+    for (auto& s : subs) building = building || (s.flags & W3D_SUBF_BUILDING);
+    SimplifyStats& st = g_simpStats[building ? 1 : 0];
+    ++st.models;
+    {
+        // Weld (stage 5.31; 6.47: always, not only when over the budget): WMO panels each carry their own vertices whose positions
+        // differ from the neighbour's by float noise; seen as open borders, they were collapsed one panel at a time and cracks
+        // opened between panels (Stormwind's walls: holes that never closed). Positions within 2 mm become identical (seams the
+        // simplifier keeps together), and what is still a border is locked (meshopt_SimplifyLockBorder below). Before 6.47 a group
+        // under its budget was not welded - and its LOD levels then saw every panel edge as a locked border: they hardly
+        // simplified at all (/gputest 6.46: "lightest LOD everywhere" saved 12% of the triangles).
+        // (6.47c: by distance - a copy within 2 mm joins the first vertex there even across a cell edge; the cell lookup alone
+        // left the copies that fell on either side of a grid line apart, ~15% of the corners at 1e-4 of noise)
+        std::unordered_map<uint64_t, std::vector<uint32_t>> cell;
+        auto q = [](float v) { return (int64_t)std::floor(v * 500.0f); };
+        auto key = [](int64_t x, int64_t y, int64_t z) {
+            return (uint64_t)(x & 0x1FFFFF) | (uint64_t)(y & 0x1FFFFF) << 21 | (uint64_t)(z & 0x1FFFFF) << 42;
+        };
+        size_t welded = 0;
         for (uint32_t i = 0; i < m.verts.size(); ++i) {
             auto& v = m.verts[i];
-            const uint64_t k = q(v.p[0]) | q(v.p[1]) << 21 | q(v.p[2]) << 42;
-            auto [it, fresh] = cell.emplace(k, i);
-            if (!fresh) { const auto& w = m.verts[it->second]; v.p[0] = w.p[0]; v.p[1] = w.p[1]; v.p[2] = w.p[2]; }
+            const int64_t cx = q(v.p[0]), cy = q(v.p[1]), cz = q(v.p[2]);
+            int64_t best = -1;
+            for (int dz = -1; dz <= 1 && best < 0; ++dz)
+                for (int dy = -1; dy <= 1 && best < 0; ++dy)
+                    for (int dx = -1; dx <= 1 && best < 0; ++dx) {
+                        auto it = cell.find(key(cx + dx, cy + dy, cz + dz));
+                        if (it == cell.end()) continue;
+                        for (uint32_t j : it->second) {
+                            const auto& w = m.verts[j];
+                            const float ex = w.p[0] - v.p[0], ey = w.p[1] - v.p[1], ez = w.p[2] - v.p[2];
+                            if (ex * ex + ey * ey + ez * ez <= 0.002f * 0.002f) { best = j; break; }
+                        }
+                    }
+            if (best < 0) { cell[key(cx, cy, cz)].push_back(i); continue; }
+            const auto& w = m.verts[(uint32_t)best];
+            if (v.p[0] != w.p[0] || v.p[1] != w.p[1] || v.p[2] != w.p[2]) ++welded;
+            v.p[0] = w.p[0]; v.p[1] = w.p[1]; v.p[2] = w.p[2];
         }
+        st.welded += welded;
+        // 6.47c: vertices that are the same corner (one place, one texture coordinate, normals within ~10 degrees) become one.
+        // A group that gives every triangle its own three vertices (7v log: Stromgarde, Fenris Keep, the Undercity wall kept 100%
+        // at every level) makes every edge a seam between distinct vertices, which the simplifier treats as locked - nothing
+        // simplified at any error. Merged, the shared corners simplify like any mesh; real UV / shading seams stay.
+        {
+            std::unordered_map<uint64_t, std::vector<uint32_t>> same;   // (position, uv) -> the vertices kept there
+            auto qu = [](float v) { return (uint64_t)(uint32_t)(int32_t)std::lround(v * 4096.0f); };
+            std::vector<uint32_t> remap(m.verts.size());
+            size_t merged = 0;
+            for (uint32_t i = 0; i < m.verts.size(); ++i) {
+                const auto& v = m.verts[i];
+                uint64_t k = 1469598103934665603ull;
+                for (uint64_t part : {qu(v.p[0] * 0.125f), qu(v.p[1] * 0.125f), qu(v.p[2] * 0.125f), qu(v.uv[0]), qu(v.uv[1])})
+                    k = (k ^ part) * 1099511628211ull;
+                auto& list = same[k];
+                const float nl = std::sqrt(v.n[0] * v.n[0] + v.n[1] * v.n[1] + v.n[2] * v.n[2]);
+                uint32_t to = i;
+                for (uint32_t j : list) {
+                    const auto& w = m.verts[j];
+                    if (w.p[0] != v.p[0] || w.p[1] != v.p[1] || w.p[2] != v.p[2] || std::fabs(w.uv[0] - v.uv[0]) > 1e-4f ||
+                        std::fabs(w.uv[1] - v.uv[1]) > 1e-4f)
+                        continue;
+                    const float wl = std::sqrt(w.n[0] * w.n[0] + w.n[1] * w.n[1] + w.n[2] * w.n[2]);
+                    const float dot = (v.n[0] * w.n[0] + v.n[1] * w.n[1] + v.n[2] * w.n[2]);
+                    if ((nl < 1e-6f && wl < 1e-6f) || dot >= 0.985f * nl * wl) { to = j; break; }
+                }
+                remap[i] = to;
+                if (to == i) list.push_back(i); else ++merged;
+            }
+            if (merged)
+                for (auto& s : subs)
+                    for (uint32_t& x : s.idx) x = remap[x];
+            st.merged += merged;
+        }
+        // triangles with two corners at one place draw nothing
+        size_t degenerate = 0;
+        auto samePos = [&](uint32_t a, uint32_t b) {
+            const auto& u = m.verts[a].p; const auto& w = m.verts[b].p;
+            return u[0] == w[0] && u[1] == w[1] && u[2] == w[2];
+        };
+        for (auto& s : subs) {
+            size_t w = 0;
+            for (size_t t = 0; t + 2 < s.idx.size(); t += 3) {
+                const uint32_t a = s.idx[t], b = s.idx[t + 1], c = s.idx[t + 2];
+                if (samePos(a, b) || samePos(b, c) || samePos(a, c)) { ++degenerate; continue; }
+                s.idx[w++] = a; s.idx[w++] = b; s.idx[w++] = c;
+            }
+            s.idx.resize(w);
+        }
+        st.degenerate += degenerate;
+        subs.erase(std::remove_if(subs.begin(), subs.end(), [](const ModelSource::Sub& s) { return s.idx.empty(); }), subs.end());
+        if (subs.empty()) return {};
+        // only the vertices a triangle uses (6.47c): the simplifier groups vertices by position, unused ones included - a merged-away
+        // copy left in the array made its corner a "seam" with an empty side, locked (the budget pass then kept 44% of a wall)
+        std::vector<uint32_t> nidx(m.verts.size(), UINT32_MAX);
+        std::vector<ModelSource::V> nv;
+        nv.reserve(m.verts.size());
+        for (auto& s : subs)
+            for (uint32_t& x : s.idx) {
+                if (nidx[x] == UINT32_MAX) { nidx[x] = (uint32_t)nv.size(); nv.push_back(m.verts[x]); }
+                x = nidx[x];
+            }
+        m.verts.swap(nv);
     }
     const float* pos = &m.verts[0].p[0];
     const size_t stride = sizeof(ModelSource::V);
+    size_t total = 0;
+    for (auto& s : subs) total += s.idx.size() / 3;
+    m.statIn = total;
+    m.statLod[0] = m.statLod[1] = 0;
     if (maxTris > 0 && total > (size_t)maxTris) {
+        ++st.overBudget;
         float ratio = (float)maxTris / (float)total;
         // 6.19b: the error is relative to the mesh size, so 2% of Orgrimmar's ground group (hundreds of yards) let the drawn
         // ground drift yards away from the exact floor in COLL: the character stood on the true floor buried to the waist.
-        float errRel = 0.02f;
-        if (maxErrYd > 0) {
-            const float scale = meshopt_simplifyScale(&m.verts[0].p[0], m.verts.size(), sizeof(ModelSource::V));
-            if (scale > 0) errRel = std::min(errRel, maxErrYd / scale);
-        }
-        size_t after = 0;
-        for (auto& s : subs) {
-            size_t target = std::max<size_t>(3, (size_t)(s.idx.size() * ratio) / 3 * 3);
-            std::vector<uint32_t> out(s.idx.size());
+        // 6.47: that bound held every triangle of a building to 0.15 yd - walls and roofs too, which nobody stands on, and a big
+        // Stormwind group then kept several times its budget. Now the walkable triangles (n.z >= cos 50 degrees) keep the floor
+        // bound and the rest gets wallErrYd; each part is simplified on its own, so the edge between them is a locked border
+        // (no crack where a wall meets its floor).
+        const float scale = meshopt_simplifyScale(pos, m.verts.size(), stride);
+        auto relFor = [&](float yd) {
+            float e = 0.02f;
+            if (yd > 0 && scale > 0) e = std::min(e, yd / scale);
+            return e;
+        };
+        const float floorRel = relFor(maxErrYd);
+        const float wallRel = wallErrYd > 0 ? relFor(wallErrYd) : floorRel;
+        static const float attrW[2] = {0.5f, 0.5f};
+        auto simplifyPart = [&](std::vector<uint32_t>& idx, float errRel) {
+            if (idx.size() < 3 * 2) return;
+            size_t target = std::max<size_t>(3, (size_t)(idx.size() * ratio) / 3 * 3);
+            std::vector<uint32_t> out(idx.size());
             float err = 0;
-            // Error-bounded only (2% of the mesh size), UVs kept: the old "sloppy" fallback (100% error
-            // allowed) tore big buildings (Stormwind) into slabs. A mesh that cannot reach the budget
-            // within the error keeps more triangles.
-            static const float attrW[2] = {0.5f, 0.5f};
-            size_t n = meshopt_simplifyWithAttributes(out.data(), s.idx.data(), s.idx.size(), pos, m.verts.size(), stride,
+            // Error-bounded only, UVs kept: the old "sloppy" fallback (100% error allowed) tore big buildings (Stormwind) into
+            // slabs. A mesh that cannot reach the budget within the error keeps more triangles.
+            size_t n = meshopt_simplifyWithAttributes(out.data(), idx.data(), idx.size(), pos, m.verts.size(), stride,
                                                       &m.verts[0].uv[0], stride, attrW, 2, nullptr, target, errRel,
                                                       meshopt_SimplifyLockBorder, &err);
             out.resize(n);
-            if (n >= 3) s.idx.swap(out);
+            if (n >= 3) idx.swap(out);
+        };
+        size_t after = 0;
+        for (auto& s : subs) {
+            std::vector<uint32_t> floorIdx, wallIdx;
+            for (size_t t = 0; t + 2 < s.idx.size(); t += 3) {
+                const float* a = m.verts[s.idx[t]].p; const float* b = m.verts[s.idx[t + 1]].p; const float* c = m.verts[s.idx[t + 2]].p;
+                const float e1[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]}, e2[3] = {c[0] - a[0], c[1] - a[1], c[2] - a[2]};
+                const float nx = e1[1] * e2[2] - e1[2] * e2[1], ny = e1[2] * e2[0] - e1[0] * e2[2], nz = e1[0] * e2[1] - e1[1] * e2[0];
+                const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
+                // (two-sided: a floor seen from below is still one - its winding may be either)
+                const bool walk = len > 0 && std::fabs(nz) / len >= W3D_WALK_MIN_NZ && (nz > 0 || (s.flags & W3D_SUBF_TWO_SIDED));
+                auto& d = walk ? floorIdx : wallIdx;
+                d.insert(d.end(), {s.idx[t], s.idx[t + 1], s.idx[t + 2]});
+            }
+            st.floorIn += floorIdx.size() / 3;
+            st.wallIn += wallIdx.size() / 3;
+            if (wallRel == floorRel) {   // one bound: simplify the submesh whole, as before 6.47
+                simplifyPart(s.idx, floorRel);
+                st.floorOut += floorIdx.size() / 3;   // (not told apart any more: counted as they came)
+                st.wallOut += s.idx.size() / 3 > floorIdx.size() / 3 ? s.idx.size() / 3 - floorIdx.size() / 3 : 0;
+            } else {
+                simplifyPart(floorIdx, floorRel);
+                simplifyPart(wallIdx, wallRel);
+                st.floorOut += floorIdx.size() / 3;
+                st.wallOut += wallIdx.size() / 3;
+                s.idx.swap(floorIdx);
+                s.idx.insert(s.idx.end(), wallIdx.begin(), wallIdx.end());
+            }
             after += s.idx.size() / 3;
         }
         if (after > (size_t)maxTris * 11 / 10) ++g_errorBoundModels;
     }
 
+    if (g_simplifyOnly) {   // 6.48: simplifyModelSource - the simplified submeshes back into the source, no blob
+        m.subs = std::move(subs);
+        if (trisOut) { size_t t = 0; for (auto& s : m.subs) t += s.idx.size() / 3; *trisOut = t; }
+        return {};
+    }
+
     // ---- 3. single index buffer, vertex cache + fetch optimisation
     std::vector<uint32_t> all;
     std::vector<W3dSubmesh> outSubs;
+    std::vector<uint16_t> outUv;   // 6.41: the texture transform of every submesh of the blob (index into m.uvTracks)
     for (auto& s : subs) {
         if (s.idx.empty()) continue;
         meshopt_optimizeVertexCache(s.idx.data(), s.idx.data(), s.idx.size(), m.verts.size());
@@ -206,6 +655,7 @@ std::vector<uint8_t> buildModelBlob(ModelSource& m, int maxTris, size_t* trisOut
         d.indexCount = (uint32_t)s.idx.size();
         all.insert(all.end(), s.idx.begin(), s.idx.end());
         outSubs.push_back(d);
+        outUv.push_back(s.uvAnim < m.uvTracks.size() ? s.uvAnim : (uint16_t)W3D_UVA_NONE);
         m.outTags.push_back(s.tag);
     }
     std::vector<ModelSource::V> verts(m.verts.size());
@@ -222,9 +672,20 @@ std::vector<uint8_t> buildModelBlob(ModelSource& m, int maxTris, size_t* trisOut
         for (size_t i = 0; i < outSubs.size(); ++i) {
             const W3dSubmesh& d = outSubs[i];
             if (d.firstIndex + d.indexCount > full) continue;
+            const bool bsub = (d.flags & W3D_SUBF_BUILDING) != 0;
             auto lv = simplifyLods(all.data() + d.firstIndex, d.indexCount, &verts[0].p[0], verts.size(), sizeof(ModelSource::V),
-                                   &verts[0].uv[0], sizeof(ModelSource::V), nullptr, (d.flags & W3D_SUBF_BUILDING) != 0);
+                                   &verts[0].uv[0], sizeof(ModelSource::V), nullptr,
+                                   // 6.47b: a building's levels made by an absolute error move its open borders by that error at
+                                   // most - a gap of at most the error between groups / pieces, as small on the screen as the
+                                   // level's error when the client picks it. Locked, the open pieces WMO detail is built of
+                                   // (beams, trims, rails: nearly every vertex on a border) did not simplify at all (7u log:
+                                   // Stromgarde, Fenris Keep, a Stormwind group kept 100% at both levels).
+                                   bsub && (lodLockBorder || !lodErrYd), bsub ? lodErrYd : nullptr,
+                                   !bsub && d.blend == W3D_BLEND_ALPHAKEY);   // 6.84: crown cards go whole
+            size_t drawn = d.indexCount / 3;   // (6.47: what level k draws - the lightest there is up to k)
             for (int k = 0; k < W3D_MODEL_LODS; ++k) {
+                if (!lv[k].empty()) drawn = lv[k].size() / 3;
+                m.statLod[k] += drawn;
                 if (lv[k].empty()) continue;
                 lods[i].firstIndex[k] = (uint32_t)all.size();
                 lods[i].indexCount[k] = (uint32_t)lv[k].size();
@@ -258,6 +719,8 @@ std::vector<uint8_t> buildModelBlob(ModelSource& m, int maxTris, size_t* trisOut
     h.submeshCount = (uint32_t)outSubs.size();
     h.texCount = (uint32_t)m.texIds.size();
     h.lodCount = W3D_MODEL_LODS;
+    if (lodErrYd && building)   // 6.47: the client switches these levels by the error's size on the screen
+        for (int k = 0; k < W3D_MODEL_LODS; ++k) h.lodErr[k] = lodErrYd[k];
 
     Blob b;
     b.put(h);
@@ -288,7 +751,57 @@ std::vector<uint8_t> buildModelBlob(ModelSource& m, int maxTris, size_t* trisOut
     size_t offL = b.putArray(lods);
     b.align(4);
 
+    // ---- 4b. 6.41: moving textures: the transforms that a submesh uses, baked keys + the table
+    size_t offUva = 0;
+    {
+        std::vector<uint16_t> remap(m.uvTracks.size(), (uint16_t)W3D_UVA_NONE);
+        std::vector<uint16_t> used;
+        for (uint16_t& u : outUv)
+            if (u != W3D_UVA_NONE) {
+                if (remap[u] == W3D_UVA_NONE) { remap[u] = (uint16_t)used.size(); used.push_back(u); }
+                u = remap[u];
+            }
+        if (!used.empty() && used.size() <= 64) {
+            std::vector<W3dUvAnim> anims;
+            for (uint16_t u : used) {
+                const ModelSource::UvTrack& t = m.uvTracks[u];
+                W3dUvAnim a{};
+                a.periodMs = t.periodMs;
+                a.keyCount = (uint16_t)t.keys.size();
+                b.align(4);
+                a.offKeys = (uint32_t)b.putArray(t.keys);
+                anims.push_back(a);
+            }
+            b.align(4);
+            const size_t offAnims = b.putArray(anims);
+            b.align(4);
+            const size_t offSubUv = b.putArray(outUv);
+            b.align(4);
+            W3dUvAnimTable tab{};
+            tab.animCount = (uint32_t)anims.size();
+            tab.offAnims = (uint32_t)offAnims;
+            tab.offSub = (uint32_t)offSubUv;
+            offUva = b.data.size();
+            b.put(tab);
+            b.align(4);
+        }
+    }
+
+    // ---- 4c. 6.42: portals of a WMO group
+    size_t offPortals = 0;
+    if (!m.portals.empty() && m.portals.size() <= W3D_PORTAL_MAX) {
+        b.align(4);
+        offPortals = b.data.size();
+        W3dPortalTable pt{};
+        pt.count = (uint32_t)m.portals.size();
+        b.put(pt);
+        for (const W3dPortal& p : m.portals) b.put(p);
+        b.align(4);
+    }
+
     auto* hp = b.at<W3dModelHeader>(0);
+    hp->offPortals = (uint32_t)offPortals;
+    hp->offUvAnim = (uint32_t)offUva;
     hp->offTexIds = (uint32_t)offTex;
     hp->offSubmeshes = (uint32_t)offSub;
     hp->offVertices = (uint32_t)offV;
@@ -446,6 +959,55 @@ bool fireLikePath(const std::string& lowerPath) { return fireLike(lowerPath); }
 
 
 
+// 6.41: an M2 texture transform baked to a looping table (see common/w3d_format.h, W3dUvAnim). False: it does not move.
+// The period is the global sequence the tracks run on, else the first Stand sequence's length (else its last key); the
+// rotation is the quaternion's turn about the UV plane's normal (Z), unwrapped over the samples. Rotation and scale pivot
+// on the middle of the texture (0.5, 0.5) - the translation comes after, as in the M2 matrix T * R * S.
+bool bakeUvTrack(const wowee::pipeline::M2Model& m, uint16_t transformIdx, ModelSource::UvTrack& out) {
+    using namespace wowee::rendering::m2_track;
+    if (transformIdx >= m.textureTransforms.size()) return false;
+    const auto& tt = m.textureTransforms[transformIdx];
+    const wowee::pipeline::M2AnimationTrack* tr[3] = {&tt.translation, &tt.rotation, &tt.scale};
+    int seq = 0;
+    for (size_t i = 0; i < m.sequences.size(); ++i)
+        if (m.sequences[i].id == 0) { seq = (int)i; break; }
+    uint32_t period = 0;
+    bool any = false;
+    for (const auto* t : tr) {
+        if (!t->hasData()) continue;
+        any = true;
+        if (t->globalSequence >= 0 && (size_t)t->globalSequence < m.globalSequenceDurations.size()) {
+            period = std::max(period, m.globalSequenceDurations[(size_t)t->globalSequence]);
+        } else if ((size_t)seq < t->sequences.size() && !t->sequences[(size_t)seq].timestamps.empty()) {
+            period = std::max(period, t->sequences[(size_t)seq].timestamps.back());
+        }
+    }
+    if (!any || period < 100) return false;
+    period = std::min<uint32_t>(period, 30000);
+    const uint32_t n = std::clamp<uint32_t>((period + 249) / 250, 8, 32) + 1;
+    std::vector<W3dUvKey> keys(n);
+    float prev = 0;
+    bool moves = false;
+    for (uint32_t i = 0; i < n; ++i) {
+        const float t = std::min((float)period * (float)i / (float)(n - 1), (float)period - 1.0f);
+        const glm::vec3 d = sampleVec3(tt.translation, seq, t, t, m.globalSequenceDurations, glm::vec3(0.0f));
+        const glm::quat q = sampleQuat(tt.rotation, seq, t, t, m.globalSequenceDurations);
+        const glm::vec3 s = sampleVec3(tt.scale, seq, t, t, m.globalSequenceDurations, glm::vec3(1.0f));
+        float ang = 2.0f * std::atan2(q.z, q.w);
+        if (i) {
+            while (ang - prev > 3.14159265f) ang -= 6.2831853f;
+            while (ang - prev < -3.14159265f) ang += 6.2831853f;
+        }
+        prev = ang;
+        keys[i] = {d.x, d.y, ang, s.x, s.y};
+        if (std::fabs(d.x) > 1e-4f || std::fabs(d.y) > 1e-4f || std::fabs(ang) > 1e-4f || std::fabs(s.x - 1) > 1e-4f || std::fabs(s.y - 1) > 1e-4f) moves = true;
+    }
+    if (!moves) return false;
+    out.periodMs = period;
+    out.keys = std::move(keys);
+    return true;
+}
+
 // Stage 5.35: the loop of an effect model: the first Stand sequence (else the first), or the longest global sequence
 // when the tracks run on those. False: no loop (nothing to animate).
 static bool fxLoop(const wowee::pipeline::M2Model& m, int* seqOut, uint32_t* loopOut) {
@@ -486,6 +1048,58 @@ static void fxFadeAt(const wowee::pipeline::M2Model& m, const FxFade& f, int seq
 // Stage 5.35: the animation of an effect model, baked per bone (see common/w3d_fx.h, W3dFxAnim). used = the M2 bones
 // that something hangs on (index = the tag the parts got; -1 = a part that stays). subTag: per submesh of the blob,
 // bone tag | fade index << 8 (fades[0] = none). Empty: nothing moves and nothing fades.
+// 6.45: the vertices in the pose of the model's Stand (first variation, first frame) - skinned by up to four bones as the game does.
+// Returns false (nothing changed) when the model has no skeleton / no sequence, or the pose differs from the bind pose by under a centimetre.
+bool poseDoodad(const wowee::pipeline::M2Model& m, ModelSource& src) {
+    if (m.bones.empty() || m.sequences.empty() || src.verts.size() != m.vertices.size()) return false;
+    int seq = -1;
+    for (size_t i = 0; i < m.sequences.size(); ++i)
+        if (m.sequences[i].id == 0 && (seq < 0 || m.sequences[i].variationIndex < m.sequences[seq].variationIndex)) seq = (int)i;
+    if (seq < 0) seq = 0;
+    using namespace wowee::rendering::m2_track;
+    std::vector<glm::mat4> M(m.bones.size());
+    for (size_t i = 0; i < m.bones.size(); ++i) {
+        const auto& b = m.bones[i];
+        glm::vec3 tr = sampleVec3(b.translation, seq, 0.0f, 0.0f, m.globalSequenceDurations, glm::vec3(0.0f));
+        glm::quat q = sampleQuat(b.rotation, seq, 0.0f, 0.0f, m.globalSequenceDurations);
+        glm::vec3 sc = sampleVec3(b.scale, seq, 0.0f, 0.0f, m.globalSequenceDurations, glm::vec3(1.0f));
+        if (sc.x < 0.001f) sc.x = 1; if (sc.y < 0.001f) sc.y = 1; if (sc.z < 0.001f) sc.z = 1;
+        glm::mat4 l = glm::translate(glm::mat4(1.0f), b.pivot);
+        l = glm::translate(l, tr);
+        l *= glm::mat4_cast(q);
+        l = glm::scale(l, sc);
+        l = glm::translate(l, -b.pivot);
+        M[i] = (b.parentBone >= 0 && (size_t)b.parentBone < i) ? M[b.parentBone] * l : l;
+    }
+    std::vector<ModelSource::V> out = src.verts;
+    float moved = 0;
+    for (size_t i = 0; i < m.vertices.size(); ++i) {
+        const auto& v = m.vertices[i];
+        glm::vec4 p(0.0f);
+        glm::vec3 n(0.0f);
+        int wsum = 0;
+        for (int k = 0; k < 4; ++k) {
+            const int w = v.boneWeights[k];
+            if (!w || v.boneIndices[k] >= M.size()) continue;
+            const glm::mat4& B = M[v.boneIndices[k]];
+            p += (float)w * (B * glm::vec4(v.position, 1.0f));
+            n += (float)w * glm::vec3(B * glm::vec4(v.normal, 0.0f));
+            wsum += w;
+        }
+        if (!wsum) continue;   // (no weights: stays where it is)
+        p /= (float)wsum;
+        const float nl = glm::length(n);
+        if (nl > 1e-6f) n /= nl; else n = v.normal;
+        auto& d = out[i];
+        moved = std::max(moved, glm::length(glm::vec3(p) - v.position));
+        d.p[0] = p.x; d.p[1] = p.y; d.p[2] = p.z;
+        d.n[0] = n.x; d.n[1] = n.y; d.n[2] = n.z;
+    }
+    if (!(moved > 0.01f) || !std::isfinite(moved)) return false;
+    src.verts.swap(out);
+    return true;
+}
+
 static std::vector<uint8_t> bakeFxAnim(const wowee::pipeline::M2Model& m, const std::vector<int>& used,
                                        const std::vector<uint16_t>& subTag, const std::vector<uint8_t>& emBone,
                                        const std::vector<uint8_t>& glBone, const std::vector<FxFade>& fades) {
@@ -596,7 +1210,7 @@ static uint32_t addModelFromGameImpl(PackWriter& pack, const DataDir& data, cons
         ++st.modelsFailed;
         return 0;
     }
-    wowee::pipeline::M2Model mdl = wowee::pipeline::M2Loader::load(bytes);
+    wowee::pipeline::M2Model mdl = loadM2(bytes);
     // 5.35f: most spell effects are particles only - no vertex at all (Fire_Precast_Hand, MoltenBlast_Impact_Chest,
     // LesserHeal_Base ...): they were refused as broken models, so Fireball and Heal showed nothing. With effects on, such a
     // model becomes one degenerate triangle carrying its emitters.
@@ -638,8 +1252,16 @@ static uint32_t addModelFromGameImpl(PackWriter& pack, const DataDir& data, cons
         d.n[0] = v.normal.x;   d.n[1] = v.normal.y;   d.n[2] = v.normal.z;
         d.uv[0] = v.texCoords[0].x; d.uv[1] = v.texCoords[0].y;
     }
+    // 6.45: a world doodad with a skeleton stands in the pose of its Stand's first frame, not in its bind pose. The gryphons on the roosts
+    // of Stormwind's flight master and the wind riders of Orgrimmar's are parts of such doodads (GryphonRoost01, WyvernRoost01): in the
+    // bind pose their wings were spread - the "T-pose". (Spell models keep their bones: they are animated at run time, 5.35.)
+    if (!o.fxSpell && !particlesOnly && !collisionOnly && poseDoodad(mdl, src)) {
+        ++st.doodadsPosed;
+        if (o.verbose) std::printf("    posed: %s stands in its Stand pose (bones %zu)\n", m2Path.c_str(), mdl.bones.size());
+    }
 
     std::map<uint32_t, uint32_t> texSlot;  // TEX entry id -> slot
+    std::map<uint16_t, int> uvSlot;        // 6.41: M2 texture transform -> index in src.uvTracks (-1: it does not move)
     const std::string lowerPath = lowerStr(m2Path);
     const bool fire = !o.fxSpell && fireLike(lowerPath);   // "Spells\\Fireball..." is not a torch
     std::vector<W3dFxGlow> glows;
@@ -763,6 +1385,17 @@ static uint32_t addModelFromGameImpl(PackWriter& pack, const DataDir& data, cons
             // type != 0 = replaceable (creature skin, hair...) -> untextured in the prototype
         }
         s.idx.assign(mdl.indices.begin() + b.indexStart, mdl.indices.begin() + b.indexStart + b.indexCount);
+        if (!o.noUvAnim && b.textureAnimIndex != 0xFFFF && b.textureAnimIndex < mdl.textureTransformLookup.size()) {   // 6.41
+            const uint16_t ti = mdl.textureTransformLookup[b.textureAnimIndex];
+            auto it = uvSlot.find(ti);
+            if (it == uvSlot.end()) {
+                ModelSource::UvTrack t;
+                int slot = -1;
+                if (src.uvTracks.size() < 64 && bakeUvTrack(mdl, ti, t)) { slot = (int)src.uvTracks.size(); src.uvTracks.push_back(std::move(t)); ++st.uvAnims; }
+                it = uvSlot.emplace(ti, slot).first;
+            }
+            if (it->second >= 0) s.uvAnim = (uint16_t)it->second;
+        }
         if (animOk) s.tag = tagFor(dominantBone(b));
         {
             bool invisible = false;
@@ -784,7 +1417,7 @@ static uint32_t addModelFromGameImpl(PackWriter& pack, const DataDir& data, cons
 
     size_t tris = 0;
     int flipped = 0;
-    auto blob = buildModelBlob(src, o.maxModelTris, &tris, &flipped, o.drawMaxError);
+    auto blob = buildModelBlob(src, o.maxModelTris, &tris, &flipped, o.drawMaxError, o.drawWallError);
     st.m2SubsFlipped += flipped;
     if (blob.empty()) { ++st.modelsFailed; return 0; }
     // ---- particle emitters (stage 5.32)
@@ -879,7 +1512,7 @@ uint32_t addItemModel(PackWriter& pack, const DataDir& data, const std::string& 
         ++st.itemModelsFailed;
         return 0;
     }
-    M2Model mdl = wowee::pipeline::M2Loader::load(bytes);
+    M2Model mdl = loadM2(bytes);
     if (mdl.batches.empty() || mdl.indices.empty()) {
         std::vector<uint8_t> skin;
         if (data.read(wowee::pipeline::skinPathForM2(m2Path), skin)) wowee::pipeline::M2Loader::loadSkin(skin, mdl);

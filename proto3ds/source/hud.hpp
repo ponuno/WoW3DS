@@ -29,6 +29,11 @@ struct HudQuad {
 constexpr uint32_t hudRgba(int r, int g, int b, int a = 255) {
     return ((uint32_t)a << 24) | ((uint32_t)b << 16) | ((uint32_t)g << 8) | (uint32_t)r;
 }
+// 6.63: the colour of the k-th followed quest (its area on the map, its square in the log and the legend)
+constexpr uint32_t questSlotColor(int k, int a = 255) {
+    return k == 0 ? hudRgba(255, 200, 40, a) : k == 1 ? hudRgba(60, 210, 255, a) : k == 2 ? hudRgba(90, 230, 90, a)
+         : k == 3 ? hudRgba(235, 90, 235, a) : hudRgba(255, 130, 40, a);
+}
 constexpr uint32_t hudAlpha(uint32_t c, int a) { return (c & 0x00FFFFFFu) | ((uint32_t)a << 24); }
 
 struct HudList {

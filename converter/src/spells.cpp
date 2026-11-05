@@ -104,6 +104,10 @@ bool exportSpellNames(const DataDir& data, const std::string& path, bool verbose
         for (char& ch : rank) if (ch == '\t' || ch == '\n' || ch == '\r') ch = ' ';
         out += std::to_string(id) + '\t' + name + '\t' + rank + '\n';
         ++n;
+        // 6.40: the school of magic (1.12 Spell.dbc column 1: 1 holy, 2 fire, 3 nature, 4 frost, 5 shadow, 6 arcane; 0 physical):
+        // the client picks a cast sound by it for spells the sound data knows nothing of
+        const uint32_t school = spell.u32(r, 1);
+        if (school >= 1 && school <= 6) out += "@school\t" + std::to_string(id) + "\t" + std::to_string(school) + "\n";
     }
     // Trainers (stage 5.13b) list the spells that teach (effect 36 LEARN_SPELL, the taught spell in
     // EffectTriggerSpell): write them under the name and rank of what they teach. 1.12 columns: Effect 61-63,
@@ -239,6 +243,120 @@ bool exportSpellNames(const DataDir& data, const std::string& path, bool verbose
                 known += " " + std::to_string(id) + "(" + spell.str(r, (uint32_t)nameCol) + " " + std::to_string(rec ? rec : catRec) + " ms)";
         }
         std::printf("  spell cooldowns: %zu (known among them:%s)\n", cds, known.empty() ? " none" : known.c_str());
+    }
+    // 6.64: cast times, "@cast id ms": Spell.dbc CastingTimeIndex (column name-102) -> SpellCastTimes.dbc (ID, Base ms, PerLevel, Minimum).
+    // The client starts its own cast bar and animation on send instead of waiting for SMSG_SPELL_START (ping).
+    size_t casts = 0;
+    {
+        DbcTable ct;
+        if (nameCol >= 102 && ct.load(data, "SpellCastTimes.dbc")) {
+            std::unordered_map<uint32_t, uint32_t> baseOf;
+            for (uint32_t r = 0; r < ct.records; ++r) {
+                const int32_t base = (int32_t)ct.u32(r, 1);
+                if (base > 0) baseOf[ct.u32(r, 0)] = (uint32_t)base;
+            }
+            const uint32_t idxCol = (uint32_t)nameCol - 102;
+            for (uint32_t r = 0; r < spell.records; ++r) {
+                const uint32_t id = spell.u32(r, 0);
+                auto it = baseOf.find(spell.u32(r, idxCol));
+                if (!id || it == baseOf.end() || it->second > 60000) continue;
+                out += "@cast\t" + std::to_string(id) + "\t" + std::to_string(it->second) + "\n";
+                ++casts;
+            }
+            std::printf("  spell cast times: %zu\n", casts);
+        } else {
+            std::fprintf(stderr, "spells: SpellCastTimes.dbc not found (no cast prediction)\n");
+        }
+    }
+    // 6.87: auto-attack, "@combat id kind": 1 = a melee ability at an enemy (the original client turns auto-attack on with it),
+    // 2 = fired with the ranged weapon (the shooting animation), 4 = SPELL_ATTR_STOP_ATTACK_TARGET (auto-attack ends).
+    // 1.12 columns relative to the name (120): Attributes 6 (0x2 RANGED, 0x40 PASSIVE, 0x100000 STOP_ATTACK_TARGET),
+    // AttributesEx2 8 (0x20 AUTOREPEAT), ImplicitTargetA 82-84, DmgClass 164 (1 magic, 2 melee, 3 ranged). The DmgClass column
+    // is checked against Sinister Strike 1752 = 2, Arcane Shot 3044 = 3, Fireball 133 = 1, and searched for if it differs.
+    size_t combat = 0;
+    if (nameCol >= 114) {
+        std::unordered_map<uint32_t, uint32_t> rowOf;
+        for (uint32_t r = 0; r < spell.records; ++r) rowOf[spell.u32(r, 0)] = r;
+        auto dmgOk = [&](uint32_t col) {
+            auto v = [&](uint32_t id) -> int64_t { auto it = rowOf.find(id); return it == rowOf.end() ? -1 : (int64_t)spell.u32(it->second, col); };
+            return v(1752) == 2 && v(3044) == 3 && v(133) == 1;
+        };
+        int dmgCol = -1;
+        if ((uint32_t)nameCol + 44 < spell.fields && dmgOk((uint32_t)nameCol + 44)) dmgCol = nameCol + 44;
+        for (uint32_t c = (uint32_t)nameCol + 20; dmgCol < 0 && c < spell.fields; ++c)
+            if (dmgOk(c)) dmgCol = (int)c;
+        const uint32_t attrCol = (uint32_t)nameCol - 114, attr2Col = (uint32_t)nameCol - 112, aCol = (uint32_t)nameCol - 38;
+        size_t melee = 0, ranged = 0, stops = 0, passives = 0;
+        // 6.95: "@passive id" - SPELL_ATTR_PASSIVE spells: the book shows them but they cannot be put on a bar
+        for (uint32_t r = 0; r < spell.records; ++r) {
+            const uint32_t id = spell.u32(r, 0);
+            if (id && (spell.u32(r, attrCol) & 0x40)) { out += "@passive\t" + std::to_string(id) + "\n"; ++passives; }
+        }
+        std::printf("  passive spells: %zu\n", passives);
+        // 6.99: "@hidden id" - spells the game's book never lists: SPELL_ATTR_DO_NOT_DISPLAY (Attributes 0x80), and the ones that
+        // only grant a skill - weapon and armour proficiencies (Swords, Plate Mail), languages, skill steps (Effect 60 PROFICIENCY,
+        // 39 LANGUAGE, 44 SKILL_STEP, 118 SKILL): those are skills (the Skills tab), not spells. Effect[3]: name - 56.
+        size_t hidden = 0;
+        for (uint32_t r = 0; r < spell.records; ++r) {
+            const uint32_t id = spell.u32(r, 0);
+            if (!id) continue;
+            bool hide = (spell.u32(r, attrCol) & 0x80) != 0;
+            if (!hide && nameCol >= 56) {
+                bool any = false, onlySkill = true;
+                for (uint32_t k = 0; k < 3; ++k) {
+                    const uint32_t e = spell.u32(r, (uint32_t)nameCol - 56 + k);
+                    if (!e) continue;
+                    any = true;
+                    if (e != 39 && e != 44 && e != 60 && e != 118) onlySkill = false;
+                }
+                hide = any && onlySkill;
+            }
+            if (hide) { out += "@hidden\t" + std::to_string(id) + "\n"; ++hidden; }
+        }
+        std::printf("  spells hidden from the book: %zu\n", hidden);
+        for (uint32_t r = 0; r < spell.records; ++r) {
+            const uint32_t id = spell.u32(r, 0);
+            if (!id) continue;
+            const uint32_t attr = spell.u32(r, attrCol), attr2 = spell.u32(r, attr2Col);
+            const uint32_t dmg = dmgCol >= 0 ? spell.u32(r, (uint32_t)dmgCol) : 0;
+            if (attr & 0x40) continue;   // passive
+            bool atEnemy = false;
+            for (uint32_t k = 0; k < 3; ++k) atEnemy = atEnemy || spell.u32(r, aCol + k) == 6;   // TARGET_CHAIN_DAMAGE: the enemy
+            const bool learnable = !haveSla || wanted.count(id);
+            uint32_t kind = 0;
+            if (learnable && dmg == 2 && atEnemy && !(attr & 0x100000)) kind |= 1;
+            if ((attr & 0x2) || dmg == 3 || (attr2 & 0x20)) kind |= 2;
+            if (learnable && (attr & 0x100000)) kind |= 4;
+            if (!kind) continue;
+            out += "@combat\t" + std::to_string(id) + "\t" + std::to_string(kind) + "\n";
+            ++combat;
+            melee += (kind & 1) != 0; ranged += (kind & 2) != 0; stops += (kind & 4) != 0;
+        }
+        std::printf("  auto-attack spells: %zu (%zu melee abilities, %zu ranged, %zu that stop it; DmgClass column %d%s)\n", combat, melee,
+                    ranged, stops, dmgCol, dmgCol < 0 ? " NOT FOUND: melee abilities will not start auto-attack" : "");
+    }
+    // 6.87: range, "@range id min max" (yards; SpellRange.dbc ID 0, MinRange 1, MaxRange 2; Spell.dbc RangeIndex = name - 84).
+    // The original client refuses a cast at a unit out of range / too close itself, before sending it. Index 1 (self) and 2
+    // (melee "combat range": the server checks reach with the bounding radii) are left out.
+    size_t ranges = 0;
+    if (nameCol >= 84) {
+        Table rg;
+        if (rg.load(data, "SpellRange.dbc") && rg.fields > 2) {
+            std::unordered_map<uint32_t, std::pair<float, float>> mm;
+            for (uint32_t r = 0; r < rg.records; ++r) mm[rg.u32(r, 0)] = {rg.f32(r, 1), rg.f32(r, 2)};
+            const uint32_t rangeCol = (uint32_t)nameCol - 84;
+            for (uint32_t r = 0; r < spell.records; ++r) {
+                const uint32_t id = spell.u32(r, 0), idx = spell.u32(r, rangeCol);
+                if (!id || idx <= 2 || (haveSla && !wanted.count(id))) continue;
+                auto it = mm.find(idx);
+                if (it == mm.end() || it->second.second <= 0.5f || it->second.second > 1000.0f) continue;
+                char line[96];
+                std::snprintf(line, sizeof line, "@range\t%u\t%.1f\t%.1f\n", id, it->second.first, it->second.second);
+                out += line;
+                ++ranges;
+            }
+        }
+        std::printf("  spell ranges: %zu\n", ranges);
     }
     FILE* f = std::fopen(path.c_str(), "wb");
     if (!f) {

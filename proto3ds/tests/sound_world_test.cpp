@@ -16,7 +16,7 @@ using namespace w3n;
 static int g_fail = 0, g_ok = 0;
 #define CHECK(c, ...) do { if (c) ++g_ok; else { ++g_fail; std::printf("FAIL %s:%d ", __FILE__, __LINE__); std::printf(__VA_ARGS__); std::printf("\n"); } } while (0)
 
-struct Run { std::map<std::string, int> what; size_t stops = 0, requests = 0; int unknown = 0, badLoops = 0; };
+struct Run { std::map<std::string, int> what, eventWhat; size_t stops = 0, requests = 0, events = 0; int unknown = 0, badLoops = 0; };
 
 // One pass over a log; 'tables' maps every display to sound data 1 (or self to 2) and every spell to visual 1.
 static Run replay(const std::vector<LoggedPacket>& pk, const std::string& tablesPath, std::set<uint32_t>* displays,
@@ -54,7 +54,8 @@ static Run replay(const std::vector<LoggedPacket>& pk, const std::string& tables
             for (const SoundReq& q : out) {
                 ++run.requests;
                 if (q.stop) { ++run.stops; continue; }
-                run.what[q.what]++;
+                if (q.event) { ++run.events; run.eventWhat[q.what]++; continue; }   // (7.07: counted apart from the world sounds)
+                run.what[q.what]++;   // 6.39: our own spell with no data of its own: a built-in event
                 if (!q.sound) ++run.unknown;
                 if (std::string(q.what) == "precast" && (!q.tag || !q.loopMs)) ++run.badLoops;   // stage 5.43: a precast repeats for the cast's length
             }
@@ -77,7 +78,14 @@ int main(int argc, char** argv) {
         std::set<uint32_t> displays, spells;
         { FILE* f = fopen(tables.c_str(), "w"); fclose(f); }
         Run silent = replay(pk, tables, &displays, &spells);
-        CHECK(silent.what.empty() || (silent.what.size() == 0), "%s: no tables, no sounds", argv[a]);
+        {   // without tables only the built-in events (our own cast / fizzle) may sound
+            size_t other = 0;
+            for (const auto& [k, n] : silent.what) if (k != "spellcast" && k != "spellfail") other += (size_t)n;
+            CHECK(other == 0, "%s: no tables, no world sounds (%zu)", argv[a], other);
+            std::string ev;
+            for (const auto& [k, n] : silent.eventWhat) ev += " " + k + "=" + std::to_string(n);
+            std::printf("  %s without tables, built-in events:%s\n", argv[a], ev.c_str());
+        }
         FILE* f = fopen(tables.c_str(), "w");
         for (uint32_t d : displays) fprintf(f, "D\t%u\t1\n", d);
         fprintf(f, "K\t1\t300\t301\t302\t303\t304\t305\t7\nF\t7\t330\nW\t7\t310\t311\n");

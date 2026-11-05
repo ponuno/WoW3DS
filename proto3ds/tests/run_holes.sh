@@ -9,7 +9,7 @@ OUT=${OUT:-/tmp/w3d_holes}
 rm -rf "$OUT" && mkdir -p "$OUT"
 python3 "$T/../../converter/tests/gen_terrain_layers.py" "$OUT/Data" > /dev/null
 "$B/w3dconv" --data "$OUT/Data" --map Test --tiles 32 48 32 48 -o "$OUT/t.w3dp" > "$OUT/conv.log" 2>&1
-SRC="$T/streamer_pc.cpp $T/../source/fx.cpp $T/../source/streamer.cpp $T/../source/creature_view.cpp $T/stub/ctru_stub.cpp"
+SRC="$T/streamer_pc.cpp $T/../source/fx.cpp $T/../source/streamer.cpp $T/../source/hlod.cpp $T/../source/objcoll.cpp $T/../source/creature_view.cpp $T/stub/ctru_stub.cpp"
 g++ -std=gnu++20 -g -O1 -DW3D_PC_TEST -I$T/stub -I$T/../source -I$T/../../common -fsanitize=address,undefined $SRC -o "$OUT/holes" -lpthread
 FAR_EXPECT=1 HOLE_EXPECT=14 "$OUT/holes" "$OUT/t.w3dp" 300 > "$OUT/holes.log" 2>&1 || true   # (an empty pack fails the model checks)
 grep "terrain holes" "$OUT/holes.log"
