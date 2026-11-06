@@ -925,8 +925,7 @@ void GameUi::drawPet(w3n::GameSession& g, const Input& in) {
     if (petFeedList_) {   // the food list
         std::vector<w3n::InvItem> food = g.petFoodCandidates();
         list_.text(10, kTop + 6, tr("Feed Pet: pick the food", "Кормление: выберите еду"), kGold, true, Font::Normal);
-        if (!g.knowsSpell(w3n::GameSession::kSpellFeedPet)) list_.text(10, kTop + 24, tr("You do not know Feed Pet.", "Вы не знаете «Кормление питомца»."), kRed);
-        else if (food.empty()) list_.text(10, kTop + 24, tr("No food in the bags.", "В сумках нет еды."), kGrey);
+        if (food.empty()) list_.text(10, kTop + 24, tr("No food in the bags.", "В сумках нет еды."), kGrey);
         const int per = 6, rowH = 23;
         const int pages = std::max(1, ((int)food.size() + per - 1) / per);
         page_ = std::min(page_, pages - 1);

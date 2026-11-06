@@ -77,7 +77,12 @@ public:
     // client sends them without a target, as the original does - a selected enemy made the server refuse them.
     bool selfCast(uint32_t id) const { return selfCast_.count(id) != 0; }
     void addSelfCast(uint32_t id) { selfCast_.insert(id); }
-    size_t selfCastCount() const { return selfCast_.size(); }   // 0 = spells.txt not loaded: we cannot tell what needs a target
+    size_t selfCastCount() const { return selfCast_.size(); }
+    // 7.11: helpful spells that take a friendly unit (Holy Light, Flash Heal ...; spells.txt "@friend id"): at an enemy, a dead
+    // unit or nothing selected they go at ourselves, as the console versions of the game do (no clearing the target first)
+    bool friendly(uint32_t id) const { return friend_.count(id) != 0; }
+    void addFriendly(uint32_t id) { friend_.insert(id); }
+    size_t friendlyCount() const { return friend_.size(); }   // 0 = spells.txt not loaded: we cannot tell what needs a target
     // UI stage 12: the cooldowns of Spell.dbc (spells.txt "@cd id recovery category categoryRecovery onEvent", ms). The
     // 1.12 server does not send them for ordinary casts: the client starts them itself when its cast goes off.
     struct Cooldown { uint32_t rec = 0, category = 0, catRec = 0; bool onEvent = false; };
@@ -122,6 +127,7 @@ private:
     std::unordered_map<uint32_t, std::pair<std::string, std::string>> names_;
     std::unordered_map<uint32_t, Ground> ground_;
     std::unordered_set<uint32_t> selfCast_;
+    std::unordered_set<uint32_t> friend_;
     std::unordered_map<uint32_t, Cooldown> cd_;
 };
 
@@ -803,6 +809,10 @@ public:
     // Casts at the current target (or self when there is none). "Attack" toggles auto-attack instead.
     // Returns false and adds a local line when it cannot be sent (unknown spell, cooldown, busy casting).
     bool castSpell(uint32_t spell, uint32_t nowMs);
+    // 7.11: true when a helpful spell must go at ourselves now (the target is an enemy / dead / not set)
+    bool castsOnSelf(uint32_t spell) const;
+    uint32_t lastCastSpell_ = 0, lastCastRetry_ = 0;
+    uint64_t lastCastTarget_ = 0;
     // 6.64: our own cast starts on send, not when the server answers (rolled back by SMSG_CAST_FAILED / SPELL_FAILURE)
     void predictCast(uint32_t spell, uint64_t target, uint32_t nowMs);
     void cancelCast(uint32_t nowMs);                  // CMSG_CANCEL_CAST
