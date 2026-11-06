@@ -282,15 +282,19 @@ std::vector<InvItem> GameSession::petFoodCandidates() {
 
 bool GameSession::feedPet(const InvItem& food, uint32_t nowMs) {
     if (!petGuid()) { error("You have no pet", Vocal::None, nowMs); return false; }
-    if (!knowsSpell(kSpellFeedPet)) { fail("You do not know Feed Pet.", nowMs); return false; }
+    // 7.11: the spell book may hold Feed Pet under another id (1539 / 6991 / a rank): take whatever is named so; with none
+    // known the server decides (it answers a failure line) - the old check blocked hunters who had it
+    uint32_t feedId = kSpellFeedPet;
+    for (uint32_t sp : spells)
+        if (sp == kSpellFeedPet || spellNames.name(sp) == "Feed Pet") { feedId = sp; if (sp == kSpellFeedPet) break; }
     if (cast.active && nowMs - cast.startMs < 400) return false;
     Writer w;
-    w.u32(kSpellFeedPet);
+    w.u32(feedId);
     w.u16(0x10);                 // TARGET_FLAG_ITEM
     w.packedGuid(food.guid);
     send(CMSG_CAST_SPELL_PET, w.b, nowMs);
     cast.active = true;
-    cast.spell = kSpellFeedPet;
+    cast.spell = feedId;
     cast.startMs = nowMs;
     cast.durMs = 0;
     return true;

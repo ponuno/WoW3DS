@@ -110,6 +110,11 @@ bool SpellNames::load(const char* path) {
             if (sscanf(line + 6, "%u", &id) == 1 && id) addSelfCast(id);
             continue;
         }
+        if (!strncmp(line, "@friend\t", 8)) {   // 7.11: "@friend id": helpful spell at a friendly unit
+            unsigned id = 0;
+            if (sscanf(line + 8, "%u", &id) == 1 && id) addFriendly(id);
+            continue;
+        }
         char* tab1 = strchr(line, '\t');
         if (!tab1) continue;
         *tab1 = 0;
@@ -252,6 +257,13 @@ void GameSession::predictCast(uint32_t spell, uint64_t target, uint32_t nowMs) {
     cast.predicted = cast.durMs != 0;
 }
 
+bool GameSession::castsOnSelf(uint32_t spell) const {
+    if (!spellNames.friendly(spell)) return false;
+    if (!target_ || target_ == self_) return true;
+    const WorldObject* t = objects.find(target_);
+    return !t || !t->isUnitLike() || t->dead() || enemyLike(*t);
+}
+
 bool GameSession::castSpell(uint32_t spell, uint32_t nowMs) {
     if (spell == kSpellAttack) {
         if (attackWanted_) stopAttack(nowMs); else startAttack(nowMs);
@@ -275,7 +287,8 @@ bool GameSession::castSpell(uint32_t spell, uint32_t nowMs) {
     }
     // 6.87: range, as the original client checks it before sending (vMaNGOS Spell::CheckRange measures between the bounding
     // spheres: centre distance - both UNIT_BOUNDINGRADIUS; a player gets 1.25 yd of leeway on max range)
-    if (target_ && target_ != self_ && !spellNames.selfCast(spell)) {
+    const bool onSelf = castsOnSelf(spell);
+    if (target_ && target_ != self_ && !spellNames.selfCast(spell) && !onSelf) {
         const SpellNames::Range* rg = spellNames.range(spell);
         const WorldObject* t = objects.find(target_);
         const WorldObject* me = selfObject();
@@ -292,14 +305,19 @@ bool GameSession::castSpell(uint32_t spell, uint32_t nowMs) {
     }
     Writer w;
     w.u32(spell);
-    if (target_ && !spellNames.selfCast(spell)) {
+    if (onSelf && self_) {
+        w.u16(TARGET_FLAG_UNIT);
+        w.packedGuid(self_);
+    } else if (target_ && !spellNames.selfCast(spell)) {
         w.u16(TARGET_FLAG_UNIT);
         w.packedGuid(target_);
     } else {
         w.u16(0);   // self / no explicit target
     }
     send(CMSG_CAST_SPELL, w.b, nowMs);
-    predictCast(spell, target_ && !spellNames.selfCast(spell) ? target_ : 0, nowMs);
+    predictCast(spell, onSelf ? self_ : target_ && !spellNames.selfCast(spell) ? target_ : 0, nowMs);
+    lastCastSpell_ = spell;
+    lastCastTarget_ = target_;
     combatAfterCast(spell, nowMs);
     return true;
 }
@@ -572,6 +590,20 @@ bool GameSession::handleSpells(uint16_t op, const Bytes& data, uint32_t nowMs) {
             uint8_t res = r.u8();
             if (r.bad) return true;
             if (cast.spell == spell) cast = CastState();
+            // 7.11: no "@friend" data (old spells.txt): a refusal "invalid target" with an enemy selected is tried once at
+            // ourselves - a helpful spell then goes off, a harmful one is refused again
+            if (res == 10 && spellNames.friendlyCount() == 0 && spell == lastCastSpell_ && lastCastTarget_ && lastCastTarget_ != self_
+                && !spellNames.selfCast(spell) && lastCastRetry_ != spell) {
+                const WorldObject* lt = objects.find(lastCastTarget_);
+                if (lt && lt->isUnitLike() && enemyLike(*lt) && self_) {
+                    lastCastRetry_ = spell;
+                    Writer w;
+                    w.u32(spell); w.u16(TARGET_FLAG_UNIT); w.packedGuid(self_);
+                    send(CMSG_CAST_SPELL, w.b, nowMs);
+                    return true;
+                }
+            }
+            lastCastRetry_ = 0;
             lastCastFail = res;
             lastCastFailMs = nowMs;
             {

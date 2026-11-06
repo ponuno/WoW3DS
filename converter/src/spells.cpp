@@ -222,6 +222,29 @@ bool exportSpellNames(const DataDir& data, const std::string& path, bool verbose
         }
         std::printf("  spells without a unit target: %zu\n", selfCasts);
     }
+    // 7.11: helpful spells at a friendly unit: "@friend<TAB>id" - an effect aims at a single friend (21) or party member (57)
+    // and none at a single enemy (6, 25): Holy Light, Flash Heal, Rejuvenation ...; the client casts them at itself when the
+    // selected target is an enemy or nothing.
+    size_t friends = 0;
+    if (nameCol >= 107) {
+        const uint32_t effC = (uint32_t)nameCol - 59, aC = (uint32_t)nameCol - 38, bC = (uint32_t)nameCol - 35;
+        for (uint32_t r = 0; r < spell.records; ++r) {
+            const uint32_t id = spell.u32(r, 0);
+            if (!id) continue;
+            bool fr = false, foe = false;
+            for (uint32_t k = 0; k < 3; ++k) {
+                if (!spell.u32(r, effC + k)) continue;
+                for (uint32_t t : {spell.u32(r, aC + k), spell.u32(r, bC + k)}) {
+                    if (t == 21 || t == 57) fr = true;
+                    if (t == 6 || t == 25) foe = true;
+                }
+            }
+            if (!fr || foe) continue;
+            out += "@friend\t" + std::to_string(id) + "\n";
+            ++friends;
+        }
+        std::printf("  helpful spells at a friend: %zu\n", friends);
+    }
     // UI stage 12: cooldowns, "@cd id recovery category categoryRecovery onEvent" (ms): the 1.12 server sends none for an
     // ordinary cast, the client starts them itself from Spell.dbc. Columns relative to the name (120): Category 2,
     // Attributes 6 (0x02000000 SPELL_ATTR_COOLDOWN_ON_EVENT), RecoveryTime 19, CategoryRecoveryTime 20.

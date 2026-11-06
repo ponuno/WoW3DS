@@ -274,11 +274,12 @@ void GameUi::pressSpell(w3n::GameSession& g, uint32_t spell, const Input& in, Ou
     const w3n::WorldObject* t = g.objects.find(g.target());
     bool toggleOff = spell == w3n::kSpellAttack && g.attackWanted();
     // soft target: without a living target, the enemy in front (melee range for Attack, 30 yd for spells)
-    if (!toggleOff && !g.spellNames.selfCast(spell) && (!t || t->dead() || t->self)) {
+    const bool onSelf = g.castsOnSelf(spell);   // 7.11: a helpful spell with an enemy / nothing selected goes at us
+    if (!toggleOff && !g.spellNames.selfCast(spell) && !onSelf && (!t || t->dead() || t->self)) {
         uint64_t s = g.softEnemy(in.pos, in.yaw, spell == w3n::kSpellAttack ? 8.0f : 30.0f, 1.05f, in.nowMs);
         if (s) { g.setTarget(s, in.nowMs); t = g.objects.find(s); }
     }
-    if (!toggleOff && !g.spellNames.selfCast(spell) && t && t->hasPos && !t->dead() && !t->self) faceTarget(g, in, out);
+    if (!toggleOff && !g.spellNames.selfCast(spell) && !onSelf && t && t->hasPos && !t->dead() && !t->self) faceTarget(g, in, out);
     g.castSpell(spell, in.nowMs);
 }
 
