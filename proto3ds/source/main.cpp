@@ -1772,6 +1772,26 @@ int main() {
                     // jump's height (2.4 yd) of the ground ahead (bunny-hopping up a cliff): the walker slides along the slope
                     if (!ride.guid) wallHit |= streamerSlopeMove(pl[0], pl[1], pl[2], &nx, &ny, airborne ? 2.4f : -1.0f);
                     wallUs += (float)(ticksToMs(svcGetSystemTick() - w0) * 1000.0);
+                    // 7.12c: a step whose ground is far ABOVE the feet (more than a step + 1 yd) has nothing to stand on at the feet's height:
+                    // only a cave's roof or the hill over it (a gap in a cave's wall: the walker slipped through it along the wall and was
+                    // lifted onto the hillside). Such a point is a wall: the move slides along it (x or y alone) or stops. Only from a
+                    // place with proper ground under the feet - a walker already under everything (fallen through) still gets lifted.
+                    const float liftMax = kStepHeight + 1.0f;
+                    auto liftsUp = [&](float x, float y, float* g) { return floorW(x, y, pl[2], g) && *g > pl[2] + liftMax; };
+                    float gHere = 0;
+                    if (!ride.guid && liftsUp(nx, ny, &ground) && floorW(pl[0], pl[1], pl[2], &gHere) && gHere <= pl[2] + liftMax) {
+                        float g1 = 0;
+                        if (floorW(nx, pl[1], pl[2], &g1) && g1 <= pl[2] + liftMax) ny = pl[1];
+                        else if (floorW(pl[0], ny, pl[2], &g1) && g1 <= pl[2] + liftMax) nx = pl[0];
+                        else { nx = pl[0]; ny = pl[1]; }
+                        wallHit = true;
+                        static uint32_t lastLiftLog = 0;
+                        if (netMs - lastLiftLog > 3000) {
+                            lastLiftLog = netMs;
+                            perf::event("step refused: the ground there is %.1f yd above the feet (z %.1f at %.1f %.1f), nothing at the feet's height",
+                                        ground - pl[2], pl[2], pl[0], pl[1]);
+                        }
+                    }
                     if (floorW(nx, ny, pl[2], &ground)) { pl[0] = nx; pl[1] = ny; }
                     else if (!airborne) dir = 0;   // never walk onto an unloaded tile
                 }
