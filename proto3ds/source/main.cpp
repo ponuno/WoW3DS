@@ -1776,19 +1776,29 @@ int main() {
                     // only a cave's roof or the hill over it (a gap in a cave's wall: the walker slipped through it along the wall and was
                     // lifted onto the hillside). Such a point is a wall: the move slides along it (x or y alone) or stops. Only from a
                     // place with proper ground under the feet - a walker already under everything (fallen through) still gets lifted.
+                    // 7.12d: nor a step onto a point where the height is only HELD (7.12b: nothing under the feet, a building's floor
+                    // near): through a gap in a cave's wall that held the walker inside the rock - out of the server's line of sight,
+                    // nobody could hit anybody (melee, ranged), the mobs could not reach it. A walker already held may step out.
                     const float liftMax = kStepHeight + 1.0f;
-                    auto liftsUp = [&](float x, float y, float* g) { return floorW(x, y, pl[2], g) && *g > pl[2] + liftMax; };
+                    auto badStep = [&](float x, float y, float* g) {
+                        if (!floorW(x, y, pl[2], g)) return false;   // (an unloaded tile: the old rule below)
+                        if (*g > pl[2] + liftMax) return true;
+                        bool held = false;
+                        float gs = 0;
+                        streamerFloorHeight(x, y, pl[2], &gs, nullptr, &held);
+                        return held && fabsf(*g - pl[2]) < 1e-3f;   // (an object's platform there is a real floor)
+                    };
                     float gHere = 0;
-                    if (!ride.guid && liftsUp(nx, ny, &ground) && floorW(pl[0], pl[1], pl[2], &gHere) && gHere <= pl[2] + liftMax) {
+                    if (!ride.guid && badStep(nx, ny, &ground) && !badStep(pl[0], pl[1], &gHere)) {
                         float g1 = 0;
-                        if (floorW(nx, pl[1], pl[2], &g1) && g1 <= pl[2] + liftMax) ny = pl[1];
-                        else if (floorW(pl[0], ny, pl[2], &g1) && g1 <= pl[2] + liftMax) nx = pl[0];
+                        if (!badStep(nx, pl[1], &g1)) ny = pl[1];
+                        else if (!badStep(pl[0], ny, &g1)) nx = pl[0];
                         else { nx = pl[0]; ny = pl[1]; }
                         wallHit = true;
                         static uint32_t lastLiftLog = 0;
                         if (netMs - lastLiftLog > 3000) {
                             lastLiftLog = netMs;
-                            perf::event("step refused: the ground there is %.1f yd above the feet (z %.1f at %.1f %.1f), nothing at the feet's height",
+                            perf::event("step refused: nothing to stand on at the feet's height there (ground %.1f yd above the feet, 0 = height only held), z %.1f at %.1f %.1f",
                                         ground - pl[2], pl[2], pl[0], pl[1]);
                         }
                     }
