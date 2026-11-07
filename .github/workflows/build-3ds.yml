@@ -15,7 +15,7 @@ jobs:
 
       - name: Build .3dsx
         working-directory: proto3ds
-        run: make -j"$(nproc)"
+        run: make -j"$(nproc)" all   # (the default goal is "cia")
 
       - name: Tools for the .cia (makerom, bannertool)
         continue-on-error: true
