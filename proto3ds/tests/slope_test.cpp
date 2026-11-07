@@ -70,6 +70,15 @@ int main() {
         // on a building floor (feet 12 yd above this ground) the terrain below does not count
         tx = 261.0f; ty = 260.0f;
         CHECK(!w3d_slope_move(gp, gp, 260.0f, 260.0f, zf + 12.0f, 1.5f, &tx, &ty), "%.0f deg: blocked a walker standing 12 yd above it", deg);
+        // 7.12: in a cave under the hill (feet 5 yd under this ground) the slope is the roof: walking in is free, walking or jumping
+        tx = 261.0f; ty = 260.0f;
+        CHECK(!w3d_slope_move(gp, gp, 260.0f, 260.0f, zf - 5.0f, 1.5f, &tx, &ty), "%.0f deg: blocked a walker 5 yd under it (cave)", deg);
+        tx = 261.0f; ty = 260.0f;
+        CHECK(!w3d_slope_move(gp, gp, 260.0f, 260.0f, zf - 5.0f, 2.4f, &tx, &ty), "%.0f deg: blocked a jump 5 yd under it (cave)", deg);
+        // ... while a walker sunk a little into the slope (0.5 yd) is still held by it
+        tx = 261.0f; ty = 260.0f;
+        cut = w3d_slope_move(gp, gp, 260.0f, 260.0f, zf - 0.5f, 1.5f, &tx, &ty);
+        CHECK(cut == (walkable ? 0 : 1), "%.0f deg: 0.5 yd sunk uphill %s", deg, cut ? "blocked" : "free");
         // 6.95: a jump (feet 1.6 yd above the ground, apex of a jump) does not climb it either: the limit uses the jump's height
         tx = 261.0f; ty = 260.0f;
         cut = w3d_slope_move(gp, gp, 260.0f, 260.0f, zf + 1.6f, 2.4f, &tx, &ty);

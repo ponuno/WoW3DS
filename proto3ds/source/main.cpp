@@ -2067,14 +2067,20 @@ int main() {
                     // 6.16: the terrain is the ground only where it is not far above the character's head (10 yd). Inside a city under a
                     // mountain (Ironforge: the tram exit, Tinker Town), a cave, a cellar, the terrain is the mountain's surface
                     // high above: the camera was put up there. Then the floor under the camera is what it must stay above.
+                    // 7.12: and not at all while the character itself is under the terrain (a cave, a crypt, a cellar: the terrain over
+                    // the character more than 2 yd above the feet, or a hole in it): a shallow cave is less than 10 yd under the surface,
+                    // the old rule put the camera up on the hill over it, looking down through the rock.
+                    float tc;
+                    bool tcHole = false;
+                    const bool charUnder = !streamerGroundHeightEx(pl[0], pl[1], &tc, &tcHole) || tcHole || tc > pl[2] + 2.0f;
                     float g;
                     bool gHole = false;   // (6.17: the membrane over a terrain hole - Ironforge's gate - is not ground either)
-                    if (streamerGroundHeightEx(cp3[0], cp3[1], &g, &gHole) && !gHole && g < eye[2] + 10.0f) {   // (a hill behind us still holds it up)
+                    if (!charUnder && streamerGroundHeightEx(cp3[0], cp3[1], &g, &gHole) && !gHole && g < eye[2] + 10.0f) {   // (a hill behind us still holds it up)
                         if (cp3[2] < g + 0.5f) cp3[2] = g + 0.5f;
                     } else {
                         float fz;
                         bool fOn = false, fHeld = false;
-                        if (streamerFloorHeight(cp3[0], cp3[1], std::min(cp3[2], eye[2]), &fz, &fOn, &fHeld) && fOn && !fHeld &&
+                        if (streamerFloorHeight(cp3[0], cp3[1], std::min(cp3[2], eye[2]), &fz, &fOn, &fHeld) && (fOn || charUnder) && !fHeld &&
                             fz <= eye[2] + 0.5f && cp3[2] < fz + 0.5f)
                             cp3[2] = fz + 0.5f;
                     }

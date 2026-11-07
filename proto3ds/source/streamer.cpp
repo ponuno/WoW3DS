@@ -2834,6 +2834,20 @@ bool streamerGroundHeight(float wx, float wy, float* out) { return streamerGroun
 bool streamerSlopeMove(float fromX, float fromY, float zFeet, float* toX, float* toY, float step) {
     Tile* tb = tileAt(*toX, *toY);
     if (!tb || !tb->grnd) return false;
+    // 7.12: walking on a building's floor (a cave's, a crypt's) under the terrain: the hill over the way in is not climbed, it is
+    // over our heads. Near the mouth the feet are only a little under the terrain (w3d_slope_move's depth rule does not hold yet),
+    // so: terrain above the feet and a floor of the building under them here -> no slope limit.
+    // (Only a building's floor: the rocks half buried in a hillside are doodads with floors too, they must not open steep slopes.)
+    if (tb->coll) {
+        W3dGroundHit b;
+        if (w3d_ground_at(tb->grnd, *toX, *toY, &b) && b.z > zFeet + 0.25f) {
+            float fz[16];
+            uint16_t ff[16];
+            const int nf = w3d_coll_floors_at(tb->coll, *toX, *toY, 16, fz, ff);
+            for (int i = 0; i < nf; ++i)
+                if (!(ff[i] & W3D_COLL_M2) && fz[i] <= zFeet + kStepHeight && fz[i] > zFeet - 3.0f) return false;
+        }
+    }
     Tile* ta = tileAt(fromX, fromY);
     return w3d_slope_move(ta ? ta->grnd : nullptr, tb->grnd, fromX, fromY, zFeet, step >= 0 ? step : kStepHeight, toX, toY) != 0;
 }
