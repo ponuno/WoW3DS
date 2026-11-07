@@ -1,0 +1,49 @@
+name: build-3ds
+
+# 3DS client build (proto3ds) with the official devkitARM container: .3dsx + .cia (178 MB and 124 MB).
+on:
+  push:
+    branches: ["release/**", "main"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: devkitpro/devkitarm:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build .3dsx
+        working-directory: proto3ds
+        run: make -j"$(nproc)"
+
+      - name: Tools for the .cia (makerom, bannertool)
+        continue-on-error: true
+        run: |
+          set -e
+          apt-get update -qq && apt-get install -y -qq unzip curl > /dev/null
+          mkdir -p /tmp/ctr && cd /tmp/ctr
+          curl -fsSL -o makerom.zip https://github.com/3DSGuy/Project_CTR/releases/download/makerom-v0.18.4/makerom-v0.18.4-ubuntu_x86_64.zip
+          unzip -o -q makerom.zip
+          curl -fsSL -o bannertool.zip https://github.com/Epicpkmn11/bannertool/releases/download/v1.2.2/bannertool.zip
+          unzip -o -q bannertool.zip
+          install -m 755 "$(find . -type f -name makerom | head -1)" /usr/local/bin/makerom
+          install -m 755 "$(find . -type f -path '*linux-x86_64*' -name bannertool | head -1)" /usr/local/bin/bannertool
+          makerom -version || true
+
+      - name: Build .cia (178 MB and 124 MB)
+        continue-on-error: true
+        working-directory: proto3ds
+        run: |
+          make cia
+          make cia CIA_MEMORY=124MB
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: w3dproto-${{ github.ref_name == 'main' && 'main' || github.sha }}
+          path: |
+            proto3ds/w3dproto.3dsx
+            proto3ds/w3dproto.cia
+            proto3ds/w3dproto-124.cia
+            proto3ds/w3dproto.elf
+          if-no-files-found: warn
