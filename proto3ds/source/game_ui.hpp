@@ -114,6 +114,7 @@ public:
     enum class Act : uint8_t {
         Tab, Release, Reclaim, ResAccept, ResDecline, HealerYes, HealerNo, HealerTalk, LootItem, LootMoney, LootAll, LootClose,
         GossipOption, GossipClose, SelectItem, Use, Equip, Unequip, Destroy, BindItem, PagePrev, PageNext,
+        UseOnItem, UseOnBack,   // 7.16: an item applied to another item (a lure on the fishing pole, a weapon oil)
         BarCell, BindSpell, ClearSlot, MenuItem, ContextItem, Setting, ClosePanel,
         // stages 5.12-5.14
         GossipQuest, VendorMode, VendorPick, VendorBuy, VendorSell, VendorSellJunk, VendorBuyback, VendorRepair, VendorClose,
@@ -196,7 +197,6 @@ private:
     // 6.95: spells shown with the icon of the weapon in hand (Attack: main hand; Auto Shot, Shoot, Throw ...: the ranged slot)
     ui::Image weaponIcon_[2];
     const w3n::GameSession* gameSess_ = nullptr;
-    static bool weaponSpell(const w3n::GameSession& g, uint32_t spell, int* which);
     ui::Image itemIcon(w3n::GameSession& g, uint32_t entry);
     std::string spellLabel(const w3n::GameSession& g, uint32_t spell) const;
     ui::Font listFont() const;
@@ -333,6 +333,9 @@ private:
     bool selTapped_ = false;          // the selection came from a tap (a second tap shows the tooltip)
     bool bindArmed_ = false;          // the next hotbar press binds bindWhat_ (Empty = clear the slot)
     ActionSlot bindWhat_;
+    // 7.16: "Use" on an item that goes on another one (a lure, a weapon oil): the picker of the items it fits
+    bool useOnPick_ = false;
+    w3n::InvItem useOnFrom_;
     int shownSet_ = 0, classicSet_ = 0;
     uint64_t aim_ = 0, lastHostile_ = 0;
     // vendor (stage 5.13): mode 0 buy, 1 sell, 2 buyback; the selected row (absolute) and page

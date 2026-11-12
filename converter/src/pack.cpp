@@ -266,6 +266,20 @@ bool DataDir::open(const std::string& root) {
                 }
                 break;
             }
+            // 7.14: the same for the selected locale's loose Interface overrides (read() prefers <locale>/<key>).
+            const std::string loc = gameLocaleDir();
+            if (!loc.empty() && loc != "auto")
+                for (const char* sub : {"Interface", "interface"}) {
+                    const fs::path d = fs::path(root) / loc / sub;
+                    if (!fs::is_directory(d, ec)) continue;
+                    for (auto it = fs::recursive_directory_iterator(d, ec); it != fs::recursive_directory_iterator(); it.increment(ec)) {
+                        if (ec) break;
+                        if (!it->is_regular_file(ec)) continue;
+                        std::string rel = fs::relative(it->path(), root, ec).generic_string();
+                        files_.emplace(normalize(rel), it->path().string());
+                    }
+                    break;
+                }
             return ok;
         }
     }
@@ -281,20 +295,27 @@ bool DataDir::open(const std::string& root) {
 
 bool DataDir::read(const std::string& gamePath, std::vector<uint8_t>& out) const {
     if (fdid_) { bool handled = false; const bool ok = readForever(gamePath, out, handled); if (handled) return ok; }
+    const std::string key = normalize(gamePath);
+    const std::string loc = normalize(gameLocaleDir());
+    auto findLoose = [&](const std::string& k) -> const std::string* {
+        auto it = files_.find(k);
+        return it == files_.end() ? nullptr : &it->second;
+    };
+    // 7.14: an extracted client keeps DBFilesClient under Data/<locale>/: prefer it over the English / base copy.
+    if (!loc.empty() && loc != "auto") {
+        const std::string* f = findLoose(loc + "/" + key);
+        if (!f) f = findLoose("data/" + loc + "/" + key);
+        if (f && readFileFast(*f, out)) return true;
+    }
     if (!archives_.empty()) {
         if (readMpq(gamePath, out)) return true;
         if (files_.empty()) return false;
-        auto lf = files_.find(normalize(gamePath));
-        return lf != files_.end() && readFileFast(lf->second, out);
+        const std::string* f = findLoose(key);
+        return f && readFileFast(*f, out);
     }
-    std::string key = normalize(gamePath);
-    auto it = files_.find(key);
-    if (it == files_.end()) {
-        // Some extractors keep a leading "data/" component.
-        it = files_.find("data/" + key);
-        if (it == files_.end()) return false;
-    }
-    return readFileFast(it->second, out);
+    const std::string* f = findLoose(key);
+    if (!f) f = findLoose("data/" + key);   // some extractors keep a leading "data/" component
+    return f && readFileFast(*f, out);
 }
 
 // ------------------------------------------------------------ validator

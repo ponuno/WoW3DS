@@ -1,10 +1,76 @@
 #include "ui_style.hpp"
 
+#include <stdio.h>
 #include <string.h>
+
+#include <unordered_map>
 
 namespace ui {
 
 int g_lang = 0;   // 6.20: English by default (0), also in the main menu
+
+namespace {
+const char* const kLangCodes[kLangCount] = {"enUS", "ruRU", "esES", "deDE", "frFR"};
+const char* const kLangNames[kLangCount] = {"English", "Русский", "Español", "Deutsch", "Français"};
+std::unordered_map<std::string, std::string> g_tr;
+int g_loadedLang = -1;
+
+std::string unescape(const std::string& s) {
+    std::string o;
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] != '\\' || i + 1 >= s.size()) { o += s[i]; continue; }
+        const char c = s[++i];
+        if (c == 'n') o += '\n';
+        else if (c == 't') o += '\t';
+        else o += c;
+    }
+    return o;
+}
+
+bool loadLangFile(const char* path) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return false;
+    g_tr.clear();
+    char line[4096];
+    while (fgets(line, sizeof line, f)) {
+        size_t n = strlen(line);
+        while (n && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = 0;
+        char* tab = strchr(line, '\t');
+        if (!tab) continue;
+        *tab = 0;
+        g_tr.emplace(unescape(line), unescape(tab + 1));
+    }
+    fclose(f);
+    return true;
+}
+}  // namespace
+
+bool loadLanguageTable(const char* path) { return loadLangFile(path); }
+
+void setLanguage(int lang) {
+    if (lang < 0) lang = 0;
+    if (lang >= kLangCount) lang = kLangCount - 1;
+    g_lang = lang;
+    if (lang == g_loadedLang) return;
+    g_loadedLang = lang;
+    g_tr.clear();
+    if (lang <= 1) return;
+    char path[128];
+    snprintf(path, sizeof path, "sdmc:/3ds/w3dproto/lang_%s.txt", kLangCodes[lang]);
+    if (loadLangFile(path)) return;
+    snprintf(path, sizeof path, "romfs:/lang_%s.txt", kLangCodes[lang]);
+    loadLangFile(path);   // no file: English texts, the chosen language is kept in pad.txt
+}
+
+const char* languageCode(int lang) { return lang >= 0 && lang < kLangCount ? kLangCodes[lang] : kLangCodes[0]; }
+const char* languageName(int lang) { return lang >= 0 && lang < kLangCount ? kLangNames[lang] : kLangNames[0]; }
+
+const char* tr(const char* en, const char* ru) {
+    if (g_lang == 1) return ru;
+    if (g_lang <= 0) return en;
+    auto it = g_tr.find(en);
+    return it == g_tr.end() ? en : it->second.c_str();
+}
 
 uint32_t qualityColor(uint32_t q) {
     switch (q) {
@@ -58,6 +124,19 @@ const char* className(uint32_t cls) {
 }
 
 std::string trText(const std::string& en) {
+    if (g_lang >= 2) {   // 7.15: the loaded language table; server lines it does not know stay English
+        auto it = g_tr.find(en);
+        if (it != g_tr.end()) return it->second;
+        // a known prefix ("You receive loot: ", "Your corpse: " ...) + the server's numbers / names
+        const std::string* best = nullptr;
+        size_t bestLen = 0;
+        for (const auto& kv : g_tr) {
+            const std::string& k = kv.first;
+            if (k.size() < 4 || k.size() <= bestLen || (k.back() != ' ' && k.back() != ':')) continue;
+            if (en.compare(0, k.size(), k) == 0) { best = &kv.second; bestLen = k.size(); }
+        }
+        return best ? *best + en.substr(bestLen) : en;
+    }
     if (!g_lang) return en;
     struct Pair { const char* en; const char* ru; };
     static const Pair exact[] = {

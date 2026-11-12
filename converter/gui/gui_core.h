@@ -11,6 +11,7 @@ namespace w3gui {
 
 struct Settings {
     std::string data;                 // WoW 1.12 Data folder (MPQ)
+    std::string locale = "enUS";       // 7.14: game language of the DBC texts (--locale)
     std::string out;                  // the one output folder
     std::string map = "Azeroth";      // Azeroth = Eastern Kingdoms, Kalimdor, or any other map name
     bool world = false;               // every tile of the map (0..63) instead of the rectangle below
@@ -141,6 +142,13 @@ inline std::string worldPackName(const std::string& map) {
 // UI and sound first (minutes), the world last (the long one): a wrong Data folder shows up at once.
 inline std::vector<Step> buildSteps(const Settings& s) {
     std::vector<Step> v;
+    // 7.14: the game language goes to every w3dconv step (the w3docc steps do not read DBC texts).
+    auto addLocale = [&](Step& st) {
+        if (!s.locale.empty() && s.locale != "enUS") {
+            st.args.push_back("--locale");
+            st.args.push_back(s.locale);
+        }
+    };
     if (s.everything) {   // one run: interface, sound, every map, creatures, players, ships into one pool
         Step a;
         a.title = "Everything: every map and dungeon, one shared asset pool (map<ID>.w3dp, common.w3dp)";
@@ -155,6 +163,7 @@ inline std::vector<Step> buildSteps(const Settings& s) {
         a.args.push_back("-o");
         a.args.push_back(s.out);
         a.args.push_back("-v");
+        addLocale(a);
         v.push_back(a);
         if (s.hlod)
             for (int c : {0, 1}) {
@@ -172,9 +181,14 @@ inline std::vector<Step> buildSteps(const Settings& s) {
         Step u{"Interface and texts (ui.w3dp, spells/talents/taxi ...)", "log_ui.txt", {"--data", s.data, "--ui"}, "", false};
         for (auto& x : splitArgs(s.extra)) u.args.push_back(x);
         for (const std::string& x : {std::string("-o"), joinPath(s.out, "ui.w3dp"), std::string("-v")}) u.args.push_back(x);
+        addLocale(u);
         v.push_back(u);
     }
-    if (s.sound) v.push_back({"Sound and music (folder sound)", "log_sound.txt", {"--data", s.data, "--sound", "-o", joinPath(s.out, "sound"), "-v"}, "", false});
+    if (s.sound) {
+        Step sd{"Sound and music (folder sound)", "log_sound.txt", {"--data", s.data, "--sound", "-o", joinPath(s.out, "sound"), "-v"}, "", false};
+        addLocale(sd);
+        v.push_back(sd);
+    }
     if (s.packWorld) {
         Step w;
         w.title = s.world ? "World: all tiles of map " + s.map : "World: tiles " + std::to_string(s.tx0) + "," + std::to_string(s.ty0) + " - " +
@@ -196,6 +210,7 @@ inline std::vector<Step> buildSteps(const Settings& s) {
         w.args.push_back("-o");
         w.args.push_back(joinPath(s.out, worldPackName(s.map)));
         w.args.push_back("-v");
+        addLocale(w);
         v.push_back(w);
     }
     if (s.dungeons) {
@@ -211,6 +226,7 @@ inline std::vector<Step> buildSteps(const Settings& s) {
         d.args.push_back("-o");
         d.args.push_back(s.out);
         d.args.push_back("-v");
+        addLocale(d);
         v.push_back(d);
     }
     if (s.hlod && s.packWorld)
@@ -231,7 +247,7 @@ inline std::string serialize(const Settings& s) {
     std::string r;
     auto put = [&](const char* k, const std::string& v) { r += std::string(k) + "=" + v + "\n"; };
     auto b = [](bool x) { return std::string(x ? "1" : "0"); };
-    put("data", s.data); put("out", s.out); put("map", s.map); put("world", b(s.world));
+    put("data", s.data); put("locale", s.locale); put("out", s.out); put("map", s.map); put("world", b(s.world));
     put("tx0", std::to_string(s.tx0)); put("ty0", std::to_string(s.ty0)); put("tx1", std::to_string(s.tx1)); put("ty1", std::to_string(s.ty1));
     put("packWorld", b(s.packWorld)); put("creatures", b(s.creatures)); put("players", b(s.players)); put("items", b(s.items));
     put("transports", b(s.transports)); put("gameobjects", b(s.gameobjects)); put("dungeons", b(s.dungeons)); put("ui", b(s.ui)); put("sound", b(s.sound));
@@ -256,7 +272,7 @@ inline Settings parse(const std::string& text) {
     auto str = [&](const char* k, std::string& dst) { auto it = kv.find(k); if (it != kv.end()) dst = it->second; };
     auto num = [&](const char* k, int& dst) { auto it = kv.find(k); if (it != kv.end() && !it->second.empty()) dst = std::atoi(it->second.c_str()); };
     auto flag = [&](const char* k, bool& dst) { auto it = kv.find(k); if (it != kv.end()) dst = it->second == "1"; };
-    str("data", s.data); str("out", s.out); str("map", s.map); str("extra", s.extra);
+    str("data", s.data); str("locale", s.locale); str("out", s.out); str("map", s.map); str("extra", s.extra);
     num("tx0", s.tx0); num("ty0", s.ty0); num("tx1", s.tx1); num("ty1", s.ty1); num("quality", s.quality);
     flag("world", s.world); flag("packWorld", s.packWorld); flag("creatures", s.creatures); flag("players", s.players);
     flag("items", s.items); flag("transports", s.transports); flag("gameobjects", s.gameobjects); flag("dungeons", s.dungeons); flag("ui", s.ui); flag("sound", s.sound);

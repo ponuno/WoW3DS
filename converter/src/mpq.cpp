@@ -55,15 +55,33 @@ DataDir::~DataDir() {
 bool DataDir::openMpq(const std::string& dir) {
 #ifdef W3D_WITH_STORMLIB
     std::vector<std::pair<int, fs::path>> found;
+    std::vector<fs::path> localeDirs;
     std::error_code ec;
     for (auto& e : fs::directory_iterator(dir, ec)) {
         if (e.is_regular_file(ec) && lower(e.path().extension().string()) == ".mpq")
             found.push_back({mpqPriority(e.path(), false), e.path()});
         else if (e.is_directory(ec) && e.path().filename().string().size() == 4)  // enUS, ruRU, ...
-            for (auto& l : fs::directory_iterator(e.path(), ec))
-                if (l.is_regular_file(ec) && lower(l.path().extension().string()) == ".mpq")
-                    found.push_back({mpqPriority(l.path(), true), l.path()});
+            localeDirs.push_back(e.path());
     }
+    // 7.14: --locale prefers Data/<locale>/; without it (auto) every locale archive is read as before. A client that lacks
+    // the asked folder falls back to enUS, so the base data still converts.
+    const std::string want = lower(gameLocaleDir());
+    auto addLocale = [&](const fs::path& d) {
+        for (auto& l : fs::directory_iterator(d, ec))
+            if (l.is_regular_file(ec) && lower(l.path().extension().string()) == ".mpq")
+                found.push_back({mpqPriority(l.path(), true), l.path()});
+    };
+    bool anyLocale = false;
+    for (const fs::path& d : localeDirs) {
+        const bool match = want.empty() || want == "auto" || lower(d.filename().string()) == want;
+        if (match) { addLocale(d); anyLocale = true; }
+    }
+    if (!anyLocale && !want.empty() && want != "auto") {   // no such folder (enGB-only client, an extracted copy): read them all
+        std::printf("  locale: Data/%s not found, using every locale archive\n", gameLocaleDir().c_str());
+        for (const fs::path& d : localeDirs) addLocale(d);
+    }
+    if (!want.empty() && want != "auto")
+        std::printf("  locale: %s (DBC text column %d)\n", gameLocaleDir().c_str(), gameLocaleIndex());
     std::stable_sort(found.begin(), found.end(), [](auto& a, auto& b) { return a.first > b.first; });
     for (auto& [pr, path] : found) {
         HANDLE h = nullptr;

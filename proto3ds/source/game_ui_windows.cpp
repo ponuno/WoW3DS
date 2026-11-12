@@ -28,7 +28,7 @@ const char* compass(float dx, float dy) {
     float a = atan2f(-dy, dx);
     int k = (int)floorf(a / 0.785398f + 0.5f);
     k = (k % 8 + 8) % 8;
-    return g_lang ? ru[k] : en[k];
+    return tr(en[k], ru[k]);
 }
 
 // Quest text: paragraphs kept, $B already turned into line breaks by the session.
@@ -52,10 +52,10 @@ std::vector<std::string> paragraphs(const std::string& text, int width, Font f) 
 
 std::string timeLeft(uint32_t ms) {
     uint32_t m = ms / 60000;
-    if (m >= 60 * 12) return g_lang ? "очень долго" : "very long";
-    if (m >= 120) return g_lang ? "долго" : "long";
-    if (m >= 30) return g_lang ? "средне" : "medium";
-    return g_lang ? "коротко" : "short";
+    if (m >= 60 * 12) return tr("very long", "очень долго");
+    if (m >= 120) return tr("long", "долго");
+    if (m >= 30) return tr("medium", "средне");
+    return tr("short", "коротко");
 }
 
 }  // namespace

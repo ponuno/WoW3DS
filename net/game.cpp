@@ -185,6 +185,37 @@ bool GameSession::takeTransferPending(uint32_t* map) {
     return true;
 }
 
+bool GameSession::selfServerMove(uint32_t nowMs, float pos[3], float* yaw, bool* taxi) const {
+    const WorldObject* me = selfObject();
+    if (!me || !me->pathRunning(nowMs)) return false;
+    me->positionAt(nowMs, pos, yaw);
+    if (taxi) *taxi = me->taxiFlight();
+    return true;
+}
+
+void GameSession::endSelfServerMove(const float pos[3], float yaw, uint32_t nowMs) {
+    WorldObject* me = objects.find(self_);
+    if (!me) me = objects.find(objects.self());
+    float end[3] = {pos[0], pos[1], pos[2]};
+    float endYaw = yaw;
+    if (me && me->pathActive) me->positionAt(nowMs, end, &endYaw);   // the exact end of the spline, not the last frame
+    else if (me && me->hasPos) {                                    // a stop packet: the server's place
+        end[0] = me->mv.x; end[1] = me->mv.y; end[2] = me->mv.z; endYaw = me->mv.o;
+    }
+    if (me) {
+        me->mv.x = end[0]; me->mv.y = end[1]; me->mv.z = end[2];
+        me->mv.o = normalizeAngle(endYaw);
+        me->mv.flags &= ~(uint32_t)MoveFlag::MaskMoving;
+        me->hasPos = true;
+        me->posMs = nowMs;
+        me->pathActive = false;
+        me->pathSmooth = false;
+        me->pathDurMs = 0;
+        me->path.clear();
+    }
+    mover.reset(end[0], end[1], end[2], endYaw, nowMs);
+}
+
 bool GameSession::takeTeleport(float pos[3], float* orient) {
     if (!teleported_) return false;
     teleported_ = false;

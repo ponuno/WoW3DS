@@ -19,11 +19,8 @@ std::string clean(std::string s) {
     return s;
 }
 std::string firstLocale(const DbcTable& t, uint32_t r, uint32_t c0, uint32_t c1) {
-    for (uint32_t c = c0; c < c1 && c < t.fields; ++c) {
-        std::string s = t.str(r, c);
-        if (!s.empty()) return clean(s);
-    }
-    return {};
+    // 7.14: the selected language's column, else the first translated column (the DBC may lack it).
+    return clean(t.loc(r, c0, c1 > c0 ? c1 - c0 : 0));
 }
 bool writeText(const std::string& path, const std::string& s) {
     FILE* f = std::fopen(path.c_str(), "wb");
@@ -416,7 +413,7 @@ bool exportGlueTexts(const DataDir& data, const std::string& path, bool verbose)
         }
         if (best)
             for (uint32_t r = 0; r < at.records; ++r) {
-                std::string v = clean(at.str(r, best));
+                std::string v = clean(at.loc(r, best, 8));   // 7.14: best is the English column; +locale inside loc()
                 if (v.empty()) continue;
                 out += "Z\t" + std::to_string(at.u32(r, 0)) + "\t" + v + "\t" + std::to_string(at.u32(r, 2)) + "\n";   // + the parent zone (0 = a zone)
                 ++nz;

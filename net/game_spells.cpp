@@ -14,6 +14,25 @@
 
 namespace w3n {
 
+// 7.13: the action-bar icon of a weapon swing is the weapon's (Attack -> main hand, Auto Shot / Shoot / Throw -> ranged).
+// The server marks every ranged ability (Arcane Shot, Serpent Sting ...) as ranged for the shooting animation, so the
+// subclass alone must not decide this: only the weapon-swing spells themselves do.
+bool weaponSwingSpell(const SpellNames& names, uint32_t spell, int* which) {
+    int w = -1;
+    switch (spell) {
+        case kSpellAttack: w = 0; break;
+        case 75: case 3018: case 2480: case 7918: case 7919: case 2764: case 3137: case 10277: case 5019: w = 1; break;
+        default: {
+            // Custom servers may use another id for the same shots: the spell book carries the English names.
+            const std::string n = names.name(spell);
+            if (n == "Auto Shot" || n == "Throw" || n == "Throw Weapon" || n.rfind("Shoot", 0) == 0) w = 1;
+            break;
+        }
+    }
+    if (which) *which = w;
+    return w >= 0;
+}
+
 namespace {
 enum : uint16_t {
     CMSG_SET_ACTION_BUTTON = 0x128, SMSG_ACTION_BUTTONS = 0x129, SMSG_INITIAL_SPELLS = 0x12A,
@@ -72,6 +91,13 @@ bool SpellNames::load(const char* path) {
             unsigned id = 0;
             float range = 0, radius = 0;
             if (sscanf(line + 8, "%u %f %f", &id, &range, &radius) == 3 && id) addGround(id, range, radius);
+            continue;
+        }
+        if (!strncmp(line, "@item\t", 6)) {   // 7.16: "@item id class subclassMask inventoryTypeMask mainHand"
+            unsigned id = 0, sub = 0, inv = 0, mh = 0;
+            int cls = -1;
+            if (sscanf(line + 6, "%u %d %u %u %u", &id, &cls, &sub, &inv, &mh) >= 4 && id)
+                addItemTarget(id, ItemTarget{(int32_t)cls, sub, inv, mh != 0});
             continue;
         }
         if (!strncmp(line, "@school\t", 8)) {   // 6.40: "@school id school"
@@ -264,11 +290,17 @@ bool GameSession::castsOnSelf(uint32_t spell) const {
     return !t || !t->isUnitLike() || t->dead() || enemyLike(*t);
 }
 
+bool GameSession::corpseSpell(uint32_t spell) const {
+    // 20577 is Cannibalize; the name covers a server that teaches a renamed/ranked copy from spells.txt.
+    return spell == 20577 || spellNames.name(spell) == "Cannibalize";
+}
+
 bool GameSession::castSpell(uint32_t spell, uint32_t nowMs) {
     if (spell == kSpellAttack) {
         if (attackWanted_) stopAttack(nowMs); else startAttack(nowMs);
         return true;
     }
+    const bool corpse = corpseSpell(spell);   // 7.13: Cannibalize - the server finds the corpse, no unit target is sent
     if (!spells.empty() && !knowsSpell(spell)) {
         fail("You do not know " + spellNames.name(spell), nowMs);
         return false;
@@ -288,7 +320,7 @@ bool GameSession::castSpell(uint32_t spell, uint32_t nowMs) {
     // 6.87: range, as the original client checks it before sending (vMaNGOS Spell::CheckRange measures between the bounding
     // spheres: centre distance - both UNIT_BOUNDINGRADIUS; a player gets 1.25 yd of leeway on max range)
     const bool onSelf = castsOnSelf(spell);
-    if (target_ && target_ != self_ && !spellNames.selfCast(spell) && !onSelf) {
+    if (!corpse && target_ && target_ != self_ && !spellNames.selfCast(spell) && !onSelf) {
         const SpellNames::Range* rg = spellNames.range(spell);
         const WorldObject* t = objects.find(target_);
         const WorldObject* me = selfObject();
@@ -305,7 +337,9 @@ bool GameSession::castSpell(uint32_t spell, uint32_t nowMs) {
     }
     Writer w;
     w.u32(spell);
-    if (onSelf && self_) {
+    if (corpse) {
+        w.u16(0);   // Cannibalize: the server picks an edible corpse near us (vMaNGOS Spell::EffectDummy 20577)
+    } else if (onSelf && self_) {
         w.u16(TARGET_FLAG_UNIT);
         w.packedGuid(self_);
     } else if (target_ && !spellNames.selfCast(spell)) {
@@ -315,9 +349,9 @@ bool GameSession::castSpell(uint32_t spell, uint32_t nowMs) {
         w.u16(0);   // self / no explicit target
     }
     send(CMSG_CAST_SPELL, w.b, nowMs);
-    predictCast(spell, onSelf ? self_ : target_ && !spellNames.selfCast(spell) ? target_ : 0, nowMs);
+    predictCast(spell, corpse ? 0 : onSelf ? self_ : target_ && !spellNames.selfCast(spell) ? target_ : 0, nowMs);
     lastCastSpell_ = spell;
-    lastCastTarget_ = target_;
+    lastCastTarget_ = corpse ? 0 : target_;
     combatAfterCast(spell, nowMs);
     return true;
 }

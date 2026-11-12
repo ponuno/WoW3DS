@@ -312,17 +312,18 @@ bool Texts::outfit(uint8_t race, uint8_t cls, uint8_t sex, uint32_t display[19],
 std::string raceDescription(const Texts& t, uint8_t r, int lang) {
     const RaceInfo* ri = race(r);
     if (!ri) return {};
-    if (!lang)
+    // 7.15: the converter's glue.txt carries the game's language (esES/deDE/...); English and the others use it when present.
+    if (lang != 1)
         if (const std::string* s = t.text(std::string("RACE_INFO_") + ri->key)) return *s;
-    return lang ? ri->descRu : ri->descEn;
+    return lang == 1 ? ri->descRu : ri->descEn;
 }
 
 std::string classDescription(const Texts& t, uint8_t c, int lang) {
     const ClassInfo* ci = cls(c);
     if (!ci) return {};
-    if (!lang)
+    if (lang != 1)
         if (const std::string* s = t.text(std::string("CLASS_INFO_") + ci->key)) return *s;
-    return lang ? ci->descRu : ci->descEn;
+    return lang == 1 ? ci->descRu : ci->descEn;
 }
 
 void appearanceFrom(const uint8_t* chrs, uint32_t size, uint8_t skin, uint8_t hairStyle, Appearance& out) {

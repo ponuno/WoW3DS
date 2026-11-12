@@ -40,7 +40,7 @@ bool PadConfig::load(const char* path) {
         else if (!strcmp(key, "invert")) invertY = v != 0;
         else if (!strcmp(key, "camspeed") && v >= 0.3f && v <= 6.0f) camSpeed = v;
         else if (!strcmp(key, "tracker")) questTracker = v != 0;
-        else if (!strcmp(key, "language")) lang = v >= 0.5f ? 1 : 0;   // (6.20: the key "lang" of older files, where Russian was the default, is ignored)
+        else if (!strcmp(key, "language")) lang = v <= 0.0f ? 0 : v >= 4.0f ? 4 : (int)(v + 0.5f);   // 7.15: 0 en, 1 ru, 2 es, 3 de, 4 fr
         else if (!strcmp(key, "dist") && v >= 0 && v <= 3) drawDist = (int)v;
         else if (!strcmp(key, "horizon") && v >= 0 && v <= 2) horizon = (int)v;
         else if (!strcmp(key, "crowd") && v >= 0 && v <= 3) crowd = (int)v;

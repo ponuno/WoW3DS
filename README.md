@@ -28,10 +28,13 @@ server).
 - **Game client:** the original login, realm, character selection and creation screens (with their 3D scenes), chat,
   targeting, auto-attack, spells and hotbars, pets, loot, vendors, trainers, quests, items and tooltips, auras, parties,
   reputation, talents, **skills and their progress (weapon skills, professions)**, **descriptions of spells, talents and
-  item effects** taken from your client's `Spell.dbc` (stage 6.20), flight masters, mail, auction house, bank, trade,
-  duels. See [`PLAN.md`](PLAN.md) for the exact list.
-- **Interface language:** **English by default everywhere** (also in the main menu); Russian can be switched on in the
-  Settings tab.
+  item effects** taken from your client's `Spell.dbc` (stage 6.20), **items used on other items** (a lure on the fishing
+  pole, a weapon oil or a sharpening stone on a weapon), flight masters, mail, auction house, bank, trade, duels. See
+  [`PLAN.md`](PLAN.md) for the exact list.
+- **Interface language:** **English by default everywhere** (also in the main menu); Russian, Spanish, German and French
+  can be switched on in the Settings tab. The translations live in `lang_<code>.txt` (bundled in the app, also read from
+  `sdmc:/3ds/w3dproto/` when present). Re-run the converter's interface step (`ui.bat` / `--ui`) with this release for
+  accented letters in `ui.w3dp`.
 - **Controls:** a controller scheme built for the 3DS ("Forever" layout, or "Classic" for the Old 3DS), touch-screen UI
   on the bottom screen; an optional ConsolePort skin (round crossbar buttons, the segmented experience bar) from your own
   copy of the addon. Top screen: normal 400x240, wide 800x240 or stereoscopic 3D.
@@ -154,8 +157,9 @@ target, R attack, Y chat, A interact, X next hotbar set (on the touch bar), STAR
 
 Tabs: **Chat, Bags, Gear, Spells** (spell book, talents, skills), **Quests, Combat, Map, Social, Settings**. Tap an item
 or spell for its tooltip / description; in the Spells tab tap a spell, then press a button (with ZL / ZR for the other
-sets) or tap a bar cell to put it on the hotbar. The Settings tab has the control scheme, the **language (English /
-Russian)**, draw distance, number of creatures drawn, the top screen mode (wide / 3D), effects, volumes, FPS display and
+sets) or tap a bar cell to put it on the hotbar. **Use** on a lure or a weapon oil applies it to the fitting worn item;
+when several items fit, the Bags page asks which one. The Settings tab has the control scheme, the **language (English /
+Russian / Spanish / German / French)**, draw distance, number of creatures drawn, the top screen mode (wide / 3D), effects, volumes, FPS display and
 the performance log.
 
 ### Login and character screens
@@ -165,8 +169,10 @@ Y delete, SELECT change the realm, B back. Character creation: X random look, Y 
 
 ## Files the client writes, reporting problems
 
-All in `sdmc:/3ds/w3dproto/`: `pad.txt` (settings: `language 0` English, `1` Russian), `login.cfg` (server and account),
-the hotbars per character, and with the performance log on (Settings) `perf.csv` and `perf_events.txt`. When something
+All in `sdmc:/3ds/w3dproto/`: `pad.txt` (settings: `language 0` English, `1` Russian, `2` Spanish, `3` German, `4` French), `login.cfg` (server and account),
+the hotbars per character, and with the performance log on (Settings) `perf.csv` and `perf_events.txt`. The interface
+translations are bundled in the app; put `lang_esES.txt`, `lang_deDE.txt` or `lang_frFR.txt` next to `pad.txt` to override
+one (one `English<TAB>translation` line, `\n` / `\t` escaped). When something
 is wrong in a place (falling through, hanging in the air, a wall where there is none), stand there for 5-10 seconds and
 send `perf_events.txt`: every 3 seconds it records the height of the feet and what is under them. For converter
 problems send the `log_*.txt` of the output folder.
@@ -228,6 +234,11 @@ it starts `w3dconv.exe` once per step and shows its output. Use paths without no
      (e.g. `--gameobjects pumpkin`).
 4. **Interface and texts:** makes `ui.w3dp` (icons, window skin, fonts, zone maps, in-game loading screens) and the text
    files (`spells.txt`, `factions.txt`, `talents.txt`, `taxi.txt`, ...). Without `ui.w3dp` the 3DS draws a plain stub skin.
+   **Game language** picks the language of the game texts taken from your client's DBC files (spell, talent, skill, taxi,
+   zone and glue names/descriptions): `enUS`, `enGB`, `koKR`, `frFR`, `deDE`, `zhCN`, `zhTW`, `esES`, `esMX` or `ruRU`
+   (a Russian fan client that replaced the English column). The 3DS application has its own interface translations for
+   English, Russian, Spanish, German and French; changing the game language in the converter does not switch the app's
+   UI language — use **Settings → Interface → Language** on the console (or `language` in `pad.txt`).
 5. **Sound and music:** makes the `sound` folder.
 6. **Dungeons and raids:** one `map<ID>.w3dp` per instance map, with the same Creatures/Players/Armor options (every pack
    carries its own model copies, so this is slow and big; leave it off until the open world works).
@@ -249,8 +260,8 @@ Point the converter at the client's `Data` folder (the MPQ archives are read dir
 runs all of the steps below with checkboxes; on the command line:
 
 ```
-# interface, texts and in-game loading screens
-w3dconv --data <WoW>/Data --ui -o out/ui.w3dp
+# interface, texts and in-game loading screens (add --locale esES for a Spanish client, deDE for German, ...)
+w3dconv --data <WoW>/Data --ui --locale esES -o out/ui.w3dp
 # sound and music
 w3dconv --data <WoW>/Data --sound -o out/sound
 # Eastern Kingdoms (map 0 -> test.w3dp) or Kalimdor (map 1 -> map1.w3dp); a tile region or --world for all tiles
@@ -262,7 +273,9 @@ w3dconv --data <WoW>/Data --all -o out/
 ```
 
 Run `w3dconv` without arguments for all options. Texture quality (`--tex-quality`), triangle budgets, texture sizes and
-collision options are adjustable. Packs made one by one each carry their own copy of every model and texture they use.
+collision options are adjustable. `--locale CODE` chooses the game language of the text files and the
+`Data/<CODE>/` archives (`enUS`, `enGB`, `koKR`, `frFR`, `deDE`, `zhCN`, `zhTW`, `esES`, `esMX`, `ruRU`); `--all` and
+`--texts-only` accept it too. Packs made one by one each carry their own copy of every model and texture they use.
 
 **Shared pool (`--all`).** `map<ID>.w3dp` then holds only the tiles of a map (terrain, water, floors and walls,
 placements); every texture, model, building, creature, player and item model is stored once in `common.w3dp` (split
@@ -295,6 +308,7 @@ converter/tests/run_gui_tests.sh <build dir>        GUI settings logic
 proto3ds/tests/run_streamer.sh <pack.w3dp>          the streamer on the PC with sanitizers
 proto3ds/tests/run_ui.sh, run_hud.sh, run_anim.sh   UI, HUD and animation checks
 net/tests/run_stage5.sh                             protocol tests against an independent Python server
+net/tests/run_713.sh                                weapon icons, Feed Pet, Cannibalize, Charge splines
 tools/armcheck/armcheck.sh <files>                  ARM compile check (needs a devkitPro-like sysroot)
 ```
 

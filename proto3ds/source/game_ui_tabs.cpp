@@ -12,6 +12,7 @@
 using namespace ui;
 
 const char* gameUiPhrase(int i);
+const char* equipSlotShort(uint8_t slot);   // defined below (the enchant picker); the use-on-item picker uses it too
 
 namespace {
 
@@ -71,8 +72,19 @@ const char* slotShortName(int s) {
                                  "Ring", "Ring", "Trink", "Trink", "Back", "Main", "Off", "Range", "Tabard"};
     static const char* ru[19] = {"Голова", "Шея", "Плечи", "Рубаш", "Грудь", "Пояс", "Ноги", "Ступни", "Запяст", "Кисти",
                                  "Кольцо", "Кольцо", "Аксес", "Аксес", "Спина", "Пр.рука", "Лев.рука", "Дальн", "Гербовая"};
+    static const char* es[19] = {"Cabeza", "Cuello", "Hombro", "Camisa", "Pecho", "Cintura", "Piernas", "Pies", "Muñeca", "Manos",
+                                 "Anillo", "Anillo", "Abalorio", "Abalorio", "Espalda", "Mano der.", "Mano izq.", "Distancia", "Tabardo"};
+    static const char* de[19] = {"Kopf", "Hals", "Schulter", "Hemd", "Brust", "Taille", "Beine", "Füße", "Handgelenk", "Hände",
+                                 "Ring", "Ring", "Schmuck", "Schmuck", "Rücken", "Haupthand", "Nebenhand", "Distanz", "Wappenrock"};
+    static const char* fr[19] = {"Tête", "Cou", "Épaule", "Chemise", "Torse", "Taille", "Jambes", "Pieds", "Poignet", "Mains",
+                                 "Anneau", "Anneau", "Bijou", "Bijou", "Dos", "Main droite", "Main gauche", "Distance", "Tabard"};
     if (s < 0 || s >= 19) return s >= 19 && s < 23 ? tr("Bag", "Сумка") : "";
-    return g_lang ? ru[s] : en[s];
+    // 7.15: the slot short names have their own table: "Back" / "Off" are also buttons and toggles in tr().
+    if (g_lang == 1) return ru[s];
+    if (g_lang == 2) return es[s];
+    if (g_lang == 3) return de[s];
+    if (g_lang == 4) return fr[s];
+    return en[s];
 }
 
 std::string secs(uint32_t ms) {
@@ -712,6 +724,40 @@ void GameUi::drawChat(w3n::GameSession& g, const Input& in) {
 // ------------------------------------------------------------------ Bags: a grid of the bags' contents
 void GameUi::drawItems(w3n::GameSession& g, const Input& in) {
     (void)in;
+    // 7.16: an item that goes on another item (a lure on the fishing pole, a weapon oil / a sharpening stone on a weapon):
+    // the items it fits, worn ones first. A single target is used at once, so this page only appears when there is a choice.
+    if (useOnPick_) {
+        btn(2, kTop + 2, 72, 18, tr("Bags", "Сумки"), Act::SubView, 0, Style::ToggleOn, Font::Small);
+        btn(76, kTop + 2, 84, 18, tr("Equipment", "Экипировка"), Act::SubView, 1, Style::Toggle, Font::Small);
+        list_.textFit(6, kTop + 26, g.itemName(useOnFrom_.entry) + " - " + tr("pick an item", "выберите вещь"), kTouchW - 12, kGold,
+                      true, Font::Small);
+        std::vector<w3n::InvItem> items = g.itemOnItemTargets(useOnFrom_);
+        const int cols = 7, per = cols * 2, cell = 42;
+        const int pages = std::max(1, ((int)items.size() + per - 1) / per);
+        page_ = std::min(page_, pages - 1);
+        if (items.empty())
+            list_.text(10, kTop + 52, tr("No item to use this on.", "Не на что применить."), kGrey, true, Font::Normal);
+        for (int k = 0; k < per; ++k) {
+            const int idx = page_ * per + k;
+            if (idx >= (int)items.size()) break;
+            const w3n::InvItem& it = items[idx];
+            const int x = 6 + (k % cols) * cell, y = kTop + 44 + (k / cols) * cell;
+            const w3n::ItemInfo* info = g.itemInfo(it.entry);
+            iconBox(x + 1, y + 1, cell - 4, itemIcon(g, it.entry), g.itemName(it.entry), qualityColor(info ? info->quality : 1));
+            if (it.equipped()) {   // worn: a gold corner and the slot's name under the icon
+                list_.rect(x + 1, y + 1, 9, 9, kGold);
+                list_.textCentered(x + cell / 2 - 1, y + cell - 12, equipSlotShort(it.slot), kGold, true, Font::Small);
+            }
+            Button& b = region(x - 1, y - 1, cell, cell, Act::UseOnItem, idx);
+            b.infoKind = 4;
+            b.infoId = it.entry;
+            b.guid = it.guid;
+        }
+        const int by = kTabY - 24;
+        btn(2, by, 70, 22, tr("Back", "Назад"), Act::UseOnBack, 0, Style::Normal, Font::Small);
+        if (pages > 1) pager(by, page_, pages);
+        return;
+    }
     btn(2, kTop + 2, 72, 18, tr("Bags", "Сумки"), Act::SubView, 0, Style::ToggleOn, Font::Small);
     btn(76, kTop + 2, 84, 18, tr("Equipment", "Экипировка"), Act::SubView, 1, Style::Toggle, Font::Small);
     std::vector<w3n::InvItem> items = listed(g);
@@ -1634,8 +1680,7 @@ void GameUi::drawSettings(const Input& in) {
     } else {
         y -= 4;   // 8 rows (6.34b: the horizon)
         label(tr("Language", "Язык"));
-        opt(120, 96, "English", c.lang == 0, 100);
-        opt(220, 96, "Русский", c.lang == 1, 101);
+        opt(120, 150, ui::languageName(c.lang), true, 100);   // 7.15: tap to cycle English / Русский / Español / Deutsch / Français
         y += 20;
         label(tr("Text size", "Размер текста"));
         opt(120, 96, tr("Normal", "Обычный"), !c.bigText, 110);
@@ -1783,7 +1828,7 @@ void GameUi::drawInspect(w3n::GameSession& g) {
     char b[80];
     snprintf(b, sizeof b, "%s %u", tr("Level", "Уровень"), (unsigned)o->level());
     list_.textCentered(mid, y0 + 16, b, kText);
-    snprintf(b, sizeof b, "%s %s", race < 11 ? (ui::g_lang ? kRaceRu[race] : kRaceEn[race]) : "", className(cls));
+    snprintf(b, sizeof b, "%s %s", race < 11 ? tr(kRaceEn[race], kRaceRu[race]) : "", className(cls));
     list_.textCentered(mid, y0 + 28, HudList::fit(b, cw), classColor(cls));
     // honour (MSG_INSPECT_HONOR_STATS)
     const w3n::GameSession::HonorView& h = g.honor;
@@ -1794,7 +1839,8 @@ void GameUi::drawInspect(w3n::GameSession& g) {
         static const char* kRuH[14] = {"Разведчик", "Рубака", "Сержант", "Старший сержант", "Старшина", "Каменный страж",
             "Кровавый страж", "Легионер", "Центурион", "Защитник", "Генерал-лейтенант", "Генерал", "Полководец", "Верховный полководец"};
         const char* rank = w3n::pvpRankName(h.highestRank, horde);
-        if (rank[0] && ui::g_lang) rank = (horde ? kRuH : kRuA)[h.highestRank - 5];
+        if (rank[0] && h.highestRank >= 5 && h.highestRank <= 18)
+            rank = tr(rank, (horde ? kRuH : kRuA)[h.highestRank - 5]);
         int y = y0 + 46;
         if (rank[0]) { list_.textCentered(mid, y, HudList::fit(rank, cw), kYellow); y += 12; }
         snprintf(b, sizeof b, "%s: %u", tr("Honorable kills", "Почётные победы"), (unsigned)h.lifetimeHK);

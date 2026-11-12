@@ -1,0 +1,730 @@
+All bags	Tous les sacs
+Backpack	Sac à dos
+Quiver	Carquois
+Ammo pouch	Pochette de munitions
+Soul bag	Sac d'âmes
+Leatherwork	Travail du cuir
+Herb bag	Sac à herbes
+Enchanting	Enchantement
+Engineering	Ingénierie
+Keyring	Porte-clés
+Bag	Sac
+That button is fixed: pick another	Ce bouton est pris : choisissez-en un autre
+Empty slot: drag a spell here (Spells tab)	Emplacement vide : faites glisser un sort ici (onglet Sorts)
+Tap an item, then Buy / Sell	Appuyez sur un article, puis sur Acheter/Vendre
+Tap a spell, then Train	Touchez un sort, puis Apprendre
+Type a message or /command	Tapez un message ou /commande
+Message	Message
+Tab pinned: no automatic switching	Onglet épinglé : pas de commutation automatique
+Tabs switch with combat again	Les onglets changent à nouveau avec le combat
+Sell 	Vendre 
+Sell grey items:	Vendre les objets gris :
+Unlearn 	Désapprendre 
+? Its progress is lost.	? Sa progression est perdue.
+Only 5 quests can be followed.	Seules 5 quêtes peuvent être suivies.
+Abandon "	Abandonner "
+"?	"?
+Passive: cannot be put on a bar	Passif : ne peut pas être mis sur une barre
+Press the button (or tap the cell) to clear	Appuyez sur le bouton (ou appuyez sur la cellule) pour effacer
+Quit the game?	Quitter le jeu ?
+Log out to the character list?	Se déconnecter vers la liste des personnages ?
+Whisper to 	Chuchoter à 
+Destroy 	Détruire 
+Channel name (then password after a space)	Nom de la chaîne (puis mot de passe après un espace)
+Friend's name	Nom de l'ami
+Name to ignore	Nom à ignorer
+Invite whom?	Inviter qui ?
+Remove 	Supprimer 
+ from friends?	 des amis ?
+Leave your guild?	Quitter votre guilde ?
+Buy a bank bag slot?	Acheter un emplacement pour sac bancaire ?
+You have no pet	Vous n'avez pas d'animal
+Pet's name (2-12 letters)	Nom de l'animal (2 à 12 lettres)
+Abandon the pet FOR GOOD? It cannot be called back.	Abandonner l'animal POUR TOUJOURS ? Il ne pourra pas revenir.
+Dismiss the pet?	Renvoyer l'animal ?
+You do not have the reagents	Vous n'avez pas les réactifs
+Delete the letter with what is attached?	Supprimer la lettre avec ses pièces jointes ?
+To	À
+Subject	Sujet
+Text	Texte
+Copper (100 = 1s)	Cuivre (100 = 1s)
+Item name (empty = all)	Nom de l'élément (vide = tout)
+Buy out	Rachat
+Bid	Enchérir
+Starting bid, copper	Enchère de départ, cuivre
+Buyout, copper (0 = none)	Rachat, cuivre (0 = aucun)
+Cancel this auction? The deposit is lost.	Annuler cette enchère ? La caution est perdue.
+Tap one of your items first	Appuyez d'abord sur l'un de vos éléments
+All six slots are used	Les six emplacements sont utilisés
+Copper to give	Cuivre à donner
+Cancel	Annuler
+Say	Dire
+Yell	Crier
+Party	Groupe
+Raid	Raid
+Guild	Guilde
+Whisper	Chuchoter
+h	h
+m	m
+Group and nearby	Groupe et proximité
+Offline	Hors ligne
+Ghost	Fantôme
+Dead	Mort
+yd	yd
+Nobody around.	Personne autour.
+Target of target	Cible de cible
+(none)	(aucun)
+No target	Pas de cible
+Your effects	Vos effets
+none	aucun
+Cooldowns	Temps de recharge
+all ready	tout prêt
+Cancel the cast	Annuler le casting
+no ui.w3dp	pas d'interface utilisateur.w3dp
+ui.w3dp has no maps (log_ui: maps)	ui.w3dp n'a pas de cartes (log_ui: maps)
+no map #%u in ui.w3dp (%u maps)	pas de carte #%u dans ui.w3dp (%u cartes)
+Kalimdor	Kalimdor
+Eastern Kingdoms	Royaumes de l'Est
+World	Monde
+Zone	Zone
+Contin.	Continuer.
+x%d drag	x%d glisser
+Mobs	Foules
+Quests	Quêtes
+Mail!	Courrier !
+All	Tous
+Group	Groupe
+Whisp.	Fouet.
+Chan.	Chan.
+System	Système
+No messages.	Aucun message.
+Write	Écrire
+More	Plus
+Phrases	Phrases
+Emotes	Émoticônes
+Channels	Canaux
+Who	Qui
+Leave	Partir
+Not in any channel.	Pas sur aucune chaîne.
+Join channel...	Rejoindre la chaîne...
+Stand	Support
+Bags	Sacs
+Equipment	Équipement
+Your bags are empty.	Vos sacs sont vides.
+Use	Utiliser
+Bind	Lier
+Open	Ouvert
+Equip	Équiper
+Del	Del
+free	gratuit
+Level	Niveau
+Durability	Durabilité
+Remove	Supprimer
+Info	Informations
+Book	Livre
+Talents	Talents
+Skills	Compétences
+Crafting	Artisanat
+Passive	Passif
+Clear a button	Effacer un bouton
+bar	barre
+points:	points :
+No talents for this class.	Aucun talent pour cette classe.
+No talents.txt on the SD card	Pas de talents.txt sur la carte SD
+(w3dconv --ui or --texts-only writes it)	(w3dconv --ui ou --texts-only l'écrit)
+Tiers ▲	Niveaux ▲
+Tiers ▼	Niveaux ▼
+Tap a talent.	Appuyez sur un talent.
+Rank	Rang
+Needs %u points in %s	A besoin de %u points en %s
+Needs: 	Besoins : 
+Next: 	Suivant : 
+Learn	Apprendre
+No skills.txt on the SD card	Pas de skills.txt sur la carte SD
+No skills yet.	Aucune compétence pour l'instant.
+No description.	Aucune description.
+Tap a skill for its description. Tap a title to fold the group.	Appuyez sur une compétence pour sa description. Appuyez sur un titre pour plier le groupe.
+Unlearn	Oublier
+No recipes.txt on the SD card	Pas de recettes.txt sur la carte SD
+You know no crafting recipes.	Vous ne connaissez aucune recette d'artisanat.
+Learn a profession from a trainer.	Apprenez un métier auprès d'un formateur.
+pick an item	choisir un article
+No item to use this on.	Aucun objet sur lequel l'utiliser.
+Nothing this enchant fits.	Rien de cet enchantement ne correspond.
+Back	Retour
+No recipes.	Aucune recette.
+Tools: 	Outils : 
+Reagents:	Réactifs :
+Stop	Arrêter
+Enchant	Enchanter
+Create	Créer
+Have mats	Avoir des tapis
+Nothing you can make now.	Vous ne pouvez rien faire maintenant.
+Reputation	Réputation
+No factions.txt on the SD card.	Pas de factions.txt sur la carte SD.
+No reputations yet.	Pas encore de réputation.
+(complete)	(complet)
+(failed)	(échec)
+Description	Description
+Choose one reward:	Choisissez une récompense :
+You will also receive:	Vous recevrez également :
+You will receive:	Vous recevrez :
+Money: 	Argent : 
+(asking the server...)	(demandant au serveur...)
+Untrack	Désuivre
+Track	Suivre
+Abandon	Abandonner
+Your quest log is empty.	Votre journal de quête est vide.
+failed	échoué
+done	fait
+Friends	Amis
+Ignore	Ignorer
+You are not in a group.	Vous n'êtes pas dans un groupe.
+Invite	Inviter
+Kick	Exclure
+Leader	Chef
+You are not in a guild.	Vous n'êtes pas dans une guilde.
+offline	hors ligne
+No friends yet.	Pas encore d'amis.
+Add	Ajouter
+Nobody is ignored.	Personne n'est ignoré.
+Controls	Contrôles
+Graphics/sound	Graphiques/son
+Interface	Interface
+Scheme	Schéma
+Run from	Fuir de
+Face movement	Mouvement du visage
+On	Oui
+Off	Main gauche
+Hold	Tenir
+Toggle	Basculer
+Camera	Caméra
+Invert Y	Inverser Y
+Ground spells	Sorts au sol
+Aim	Objectif
+At target	À la cible
+Draw distance	Distance d’affichage
+Near	Près
+Normal	Normal
+Far	Loin
+Max	Max.
+Auto	Auto
+Crowds	Foules
+World objects	Objets du monde
+Fade in: on	Fondu entrant : activé
+Fade in: off	Fondu entrant : désactivé
+Particles	Particules
+Low	Bas
+High	Haut
+Top screen	Écran supérieur
+Music	Musique
+Effects	Effets
+Ambience	Ambiance
+off	éteint
+Language	Langue
+Text size	Taille du texte
+Large	Grand
+Dim HUD / bubbles	Faible HUD / bulles
+Dim: on	Faible : activé
+Dim: off	Faible : éteint
+Bubbles: on	Bulles : activées
+Bubbles: off	Bulles : désactivées
+Auto tabs	Onglets automatiques
+Quest on top	Quête au sommet
+FPS / ping	FPS/ping
+Log / GPU / Frame	Journal/GPU/Frame
+Log	Journal
+no log	pas de journal
+GPU early	GPU tôt
+GPU end	Fin du GPU
+Auto 60/30	Automatique 60/30
+Steady 30	Stable 30
+Free	Gratuit
+Horizon	Horizon
+Debug page	Page de débogage
+Quit	Quitter
+Chat	Discussion
+Spells	Sorts
+Buffs	Effets
+Settings	Options
+Free camera	Caméra gratuite
+Pet	Animal de compagnie
+Characters	Personnages
+Close	Fermer
+Attack	Attaquer
+Interact	Interagir
+Assist	Assister
+Clear target	Effacer la cible
+Uninvite	Désinviter
+Make leader	Faire un leader
+Leave party	Quitter la fête
+Trade	Commerce
+Add friend	Ajouter un ami
+Guild invite	Invitation de guilde
+Inspect	Inspecter
+Follow	Suivre
+Duel	Duel
+Stop following	Arrêtez de suivre
+Out of range	Hors de portée
+You	Vous
+Honorable kills	Victoires honorables
+Today	Aujourd'hui
+tap an item for its tooltip	appuyez sur un élément pour son info-bulle
+No buffs or debuffs.	Pas de buffs ni de débuffs.
+Cancel buff	Annuler le buff
+tap a buff to cancel it	appuyez sur un buff pour l'annuler
+g	g
+s	s
+c	c
+Fight	Combat
+Map	Carte
+Social	Social
+Setup	Options
+Clear which button?	Effacer quel bouton ?
+Bind: 	Lier : 
+Drop it on a button	Déposez-le sur un bouton
+Tap a cell or press the button	Appuyez sur une cellule ou appuyez sur le bouton
+Resurrection	Résurrection
+Loot: 	Butin : 
+corpse	cadavre
+Vendor	Marchand
+Quest	Quête
+Trainer	Instructeur
+Innkeeper	Aubergiste
+Bank	Banque
+Flight master	Maître de vol
+Mailbox	Boîte aux lettres
+Auction house	Hôtel des ventes
+Item	Objet
+Spell	Sort
+Buffs and debuffs	Buffs et débuffs
+Loot roll 	Jet de butin 
+Loot roll	Jet de butin
+Group invitation	Invitation de groupe
+Guild invitation	Invitation de guilde
+Menu	Menus
+Are you sure?	Etes-vous sûr ?
+Target	Cible
+Stable master	Maître stable
+Combat	Combat
+Spellbook	Grimoire
+Quest log	Journal des quêtes
+challenges you to a duel.	vous défie en duel.
+Accept	Accepter
+Decline	Refuser
+Duel requested. Waiting...	Duel demandé. En attendant...
+invites you to a group.	vous invite à un groupe.
+invites you to the guild 	vous invite à la guilde 
+Do you want to make this inn	Voulez-vous faire de cette auberge
+your new home?	ta nouvelle maison ?
+Yes	Oui
+No	Non
+very long	très longtemps
+long	longtemps
+medium	moyen
+short	court
+You have died.	Vous êtes mort.
+Release Spirit	Libérer l'esprit
+You will return as a ghost at the nearest graveyard.	Vous reviendrez en fantôme au cimetière le plus proche.
+You are a ghost.	Vous êtes un fantôme.
+Your corpse: %.0f yd %s	Votre cadavre : %.0f yd %s
+Your corpse is on another map.	Votre corps est sur une autre carte.
+Looking for your corpse...	Recherche de votre corps...
+Resurrect	Ressusciter
+You can resurrect in %u s	Vous pouvez ressusciter en %u s
+Run back to your body (within 39 yd)	Retournez vers votre corps (dans un rayon de 39 mètres)
+Spirit healer: %.0f yd %s	Guérisseur spirituel : %.0f yd %s
+The spirit healer is on another map.	Le guérisseur spirituel est sur une autre carte.
+No spirit healer seen yet.	Aucun guérisseur spirituel vu pour l'instant.
+Talk to the spirit healer	Parler au guérisseur spirituel
+Return to life now? You will suffer resurrection sickness.	Revenir à la vie maintenant ? Vous souffrirez du mal de résurrection.
+Someone	Quelqu'un
+ wants to resurrect you.	 veut te ressusciter.
+Money	Argent
+(empty)	(vide)
+Take all	Tout prendre
+ s	 s
+Need	Besoin
+Greed	La cupidité
+Pass	Passer
+Goodbye	Au revoir
+Buy	Acheter
+Sell	Vendre
+Buyback	Rachat
+Repair	Réparer
+This vendor has nothing to sell.	Ce vendeur n'a rien à vendre.
+Buy 5	Achetez-en 5
+tap an item	appuyez sur un élément
+Sell junk	Vendre des déchets
+tap an item to sell it	appuyez sur un article pour le vendre
+Nothing sold here yet.	Rien de vendu ici pour l'instant.
+Buy back	Racheter
+tap an item to buy it back	appuyez sur un article pour le racheter
+Show: all	Afficher : tout
+Show: learnable	Spectacle : apprenable
+I can teach you nothing.	Je ne peux rien t'apprendre.
+You know everything I can teach.	Vous savez tout ce que je peux enseigner.
+Train	Apprendre
+not available yet	pas encore disponible
+tap a spell	appuyez sur un sort
+To chat	Pour discuter
+Cooldown: %.1f s	Temps de recharge : %.1f s
+%u s left	Il reste %u
+Debuff	Débuff
+Buff	Buff
+In your spell book: drag it to a button or tap Bind.	Dans votre livre de sorts : faites-le glisser vers un bouton ou appuyez sur Lier.
+Quest Objectives	Objectifs de quête
+Required items	Éléments requis
+Continue	Continuer
+not done yet	pas encore fait
+Complete	Terminer
+bag slots	fentes pour sacs
+The bank is empty.	La banque est vide.
+To the bags	Aux sacs
+To the bank	À la banque
+Buy bag slot	Acheter un emplacement pour sac
+Node 	Nœud 
+From: 	De : 
+You know no other flight path here.	Vous ne connaissez aucune autre trajectoire de vol ici.
+Fly	Voler
+tap a destination	appuyez sur une destination
+(none: tap)	(aucun : appuyez sur)
+Send	Envoyer
+postage 30c	frais de port 30c
+(loading the text...)	(chargement du texte...)
+Take 	Prendre 
+Take item	Prendre l'objet
+Cash on delivery: 	Paiement à la livraison : 
+Delete	Supprimer
+Letters	Lettres
+Checking the mail...	Vérification du courrier...
+No mail.	Aucun courrier.
+New letter	Nouvelle lettre
+Browse	Rechercher
+My auctions	Mes enchères
+Search: everything (tap)	Rechercher : tout (appuyez)
+Refresh	Actualiser
+Searching...	Recherche...
+Nothing found.	Rien trouvé.
+Bid 	Enchérir 
+Buy 	Acheter 
+in all	en tout
+You have no auctions here.	Vous n'avez pas d'enchères ici.
+Cancel auction	Annuler l'enchère
+Buyout 	Rachat 
+Tap an item to sell.	Appuyez sur un article à vendre.
+someone	quelqu'un
+wants to trade with you.	veut échanger avec vous.
+Waiting for 	En attendant 
+Offer	Offre
+Gold	Or
+Accepted	Accepté
+You have no pet.	Vous n'avez pas d'animal.
+Feed Pet: pick the food	Nourrir l'animal : choisissez la nourriture
+No food in the bags.	Pas de nourriture dans les sacs.
+Happy	Heureux
+Content	Contenu
+Unhappy	Malheureux
+loyalty	fidélité
+Orders	Commandes
+Pet spells	Sorts de familier
+Feed	Nourrir
+Rename	Renommer
+Dismiss	Rejeter
+Stable slots	Emplacements stables
+No pets here.	Pas d'animaux ici.
+with you	avec toi
+in the stable	dans l'écurie
+Stable it	Stable-le
+Swap	Échange
+Take out	Sortir
+Buy a slot	Acheter un emplacement
+PvP	PvP
+RP	PR
+RP PvP	JcJ RP
+Medium	Moyen
+Skin Color	Couleur de la peau
+Face	Visage
+Hair Style	Coiffure
+Hair Color	Couleur des cheveux
+Facial Hair	Poils du visage
+Okay	OK
+Delete 	Supprimer 
+Server	Serveur
+Account Name	Nom du compte
+Account Password	Mot de passe
+Login	Connexion
+Realm Selection	Choix du royaume
+Realm Name	Nom du royaume
+Type	Tapez
+Chars	Caractères
+Population	Population
+No realms	Aucun royaume
+Change Realm	Changer de royaume
+No characters	Aucun personnage
+Create New Character	Créer un personnage
+Enter World	Entrer dans le monde
+L / R: turn	L/R : tourner
+Alliance	Alliance
+Horde	Horde
+Female	Femme
+Male	Mâle
+Randomize	Randomiser
+Name	Nom
+Y: enter a name	Y : entrez un nom
+Account Login	Connexion
+Account	Compte
+(tap to enter)	(appuyez pour entrer)
+Password	Mot de passe
+Protocol	Protocole
+on	sur
+D-pad, A: the top screen	D-pad, A : l'écran supérieur
+The password is never saved	Le mot de passe n'est jamais enregistré
+ chars	 caractères
+No characters on this realm yet	Aucun personnage sur ce royaume pour l'instant
+Race	Course
+Class	Classe
+Racial traits	Traits raciaux
+Races	Races
+away	loin
+passive	passif
+stay	rester
+attack	attaque
+loading...	chargement...
+Average item level	Niveau d'objet moyen
+items known	objets connus
+Attributes	Attributs
+Armor	Armure
+Resistance	Résistance
+Melee	Mêlée
+Damage	Dégâts
+Attack power	Puissance d'attaque
+Crit	Critique
+Defense	Défense
+Dodge	Esquive
+Parry	Parade
+Block	Blocage
+Ranged	Distance
+Bonus damage	Dégâts bonus
+Lootable	Fouillable
+Leaving the duel area: you lose in %u s	Sortie de la zone de duel : vous perdez en %u s
+Following 	Suit 
+C-Stick aim | again: cast | cancel	Visée C-Stick | encore une fois : lancer | annuler
+Congratulations, you have reached level %u!	Félicitations, vous avez atteint le niveau %u !
+Server: host or host:port (3724 by default)	Serveur : hôte ou hôte:port (3724 par défaut)
+Account name	Nom du compte
+Connecting...	Connexion...
+That realm is offline.	Ce royaume est hors ligne.
+Connecting to 	Connexion à 
+Deleting character...	Suppression d'un personnage...
+Name (2 to 12 letters)	Nom (2 à 12 lettres)
+Creating character...	Créer du personnage...
+Entering world...	Entrer dans le monde...
+Authenticating...	Authentification...
+Position in queue:	Position dans la file d'attente :
+Retrieving character list...	Récupération de la liste des personnages...
+Disconnected: 	Déconnecté : 
+The server did not answer.	Le serveur n'a pas répondu.
+You can't log out now.	Vous ne pouvez pas vous déconnecter maintenant.
+Logging out... move to cancel.	Déconnexion... déplacez-vous pour annuler.
+Logout cancelled.	Déconnexion annulée.
+Warrior	Guerrier
+Paladin	Paladin
+Hunter	Chasseur
+Rogue	Voleur
+Priest	Prêtre
+Shaman	Chaman
+Mage	Mage
+Warlock	Démoniste
+Druid	Druide
+Head	Tête
+Neck	Cou
+Shoul	Épau.
+Shirt	Chemise
+Chest	Torse
+Waist	Taille
+Legs	Jambes
+Feet	Pieds
+Wrist	Poignet
+Hands	Mains
+Ring	Anneau
+Trink	Bijou
+Main	Main droite
+Range	Distance
+Tabard	Tabard
+north	nord
+north-east	nord-est
+east	est
+south-east	sud-est
+south	sud
+south-west	sud-ouest
+west	ouest
+north-west	nord-ouest
+Hello!	Bonjour !
+Thanks!	Merci!
+Need help?	Besoin d'aide ?
+Ready.	Prêt.
+Wait a moment.	Attendez un instant.
+Follow me.	Suis-moi.
+Good game!	Bon jeu !
+Bye!	Au revoir!
+Human	Humain
+Orc	Orc
+Dwarf	Nain
+Night Elf	Elfe de la nuit
+Undead	Mort-vivant
+Tauren	Tauren
+Gnome	Gnome
+Troll	Troll
+Goblin	Gobelin
+High Elf	Haut-elfe
+Private	Privé
+Corporal	Caporal
+Sergeant	Sergent
+Master Sergeant	Sergent-chef
+Sergeant Major	Sergent-major
+Knight	Chevalier
+Knight-Lieutenant	Chevalier-Lieutenant
+Knight-Captain	Chevalier-Capitaine
+Knight-Champion	Chevalier-Champion
+Lieutenant Commander	Lieutenant-commandant
+Commander	Commandant
+Marshal	Maréchal
+Field Marshal	Maréchal
+Grand Marshal	Grand Maréchal
+Scout	Éclaireur
+Grunt	Grunt
+Senior Sergeant	Sergent supérieur
+First Sergeant	Premier sergent
+Stone Guard	Garde de pierre
+Blood Guard	Garde de sang
+Legionnaire	Légionnaire
+Centurion	Centurion
+Champion	Champion
+Lieutenant General	Lieutenant-général
+General	Général
+Warlord	Seigneur de guerre
+High Warlord	Grand seigneur de guerre
+Loot	Butin
+Talk	Parler
+Mail	Courrier
+Auction	Vente aux enchères
+Herb	Herbe
+Mine	Le mien
+Pick	Choisir
+Requires Herbalism	Nécessite de l'herboristerie
+Requires Mining	Nécessite une exploitation minière
+Requires Lockpicking	Nécessite un crochetage
+Requires a key	Nécessite une clé
+You can't open that	Tu ne peux pas ouvrir ça
+Too far away	Trop loin
+You are too far away	Tu es trop loin
+You are too far away to loot that corpse	Tu es trop loin pour piller ce cadavre
+Nothing to loot	Rien à piller
+It is hostile to you	Il vous est hostile
+Ghosts can only talk to spirit healers	Les fantômes ne peuvent parler qu'aux guérisseurs spirituels
+You are dead (release your spirit first)	Vous êtes mort (libérez d'abord votre esprit)
+Your bags are full.	Vos valises sont pleines.
+You don't have enough money.	Vous n'avez pas assez d'argent.
+Trade cancelled.	Commerce annulé.
+Trade complete.	Commerce terminé.
+Mail sent.	Courrier envoyé.
+You have new mail.	Vous avez un nouveau courrier.
+Auction created.	Enchère créée.
+Auction cancelled.	Enchère annulée.
+Bid accepted.	Offre acceptée.
+You take a flight.	Vous prenez un vol.
+New flight path discovered!	Nouvelle trajectoire de vol découverte !
+You have no talent points.	Vous n'avez aucun point de talent.
+You need the talent before it first.	Vous avez d’abord besoin du talent avant cela.
+You already know every rank of that talent.	Vous connaissez déjà tous les niveaux de ce talent.
+You bought a bank slot.	Vous avez acheté une fente bancaire.
+You are already there.	Vous y êtes déjà.
+You haven't learned that flight path yet.	Vous n'avez pas encore appris cette trajectoire de vol.
+There is no flight path to that destination.	Il n'y a pas de trajectoire de vol vers cette destination.
+Your bid is too low.	Votre enchère est trop basse.
+You cannot bid on your own auction.	Vous ne pouvez pas enchérir sur votre propre enchère.
+Unequip it first.	Déséquipez-le d’abord.
+You are already trading.	Vous faites déjà du trading.
+Whom to send it to?	A qui l'envoyer ?
+A letter needs a subject.	Une lettre a besoin d'un sujet.
+You don't have enough money (postage is 30c).	Vous n'avez pas assez d'argent (les frais de port sont de 30c).
+Choose a reward first.	Choisissez d'abord une récompense.
+Choose a reward first (tap it)	Choisissez d'abord une récompense (appuyez dessus)
+Your target is dead	Votre cible est morte
+You cannot attack that target	Vous ne pouvez pas attaquer cette cible
+Already casting	Déjà casting
+You are dead.	Vous êtes mort.
+You are alive again.	Vous êtes à nouveau en vie.
+Friend added	Ami ajouté
+Friend removed	Ami supprimé
+Player not found	Joueur introuvable
+Player ignored	Joueur ignoré
+No longer ignored	N'est plus ignoré
+Already on your friend list	Déjà sur ta liste d'amis
+Trade declined	Le commerce a diminué
+That player is busy	Ce joueur est occupé
+Trade target is too far away	L’objectif commercial est trop loin
+Your corpse could not be found.	Votre cadavre n'a pas pu être retrouvé.
+Nothing to repair.	Rien à réparer.
+Your quest log is full.	Votre journal de quête est plein.
+That item is sold out.	Cet article est épuisé.
+No recent enemy	Aucun ennemi récent
+Your target has no target	Votre cible n'a pas de cible
+Target a player first	Ciblez d'abord un joueur
+Binding cancelled	Reliure annulée
+You are dead	Tu es mort
+You have no target	Tu n'as pas de cible
+Invalid target	Cible invalide
+Not enough mana	Pas assez de mana
+Not enough rage	Pas assez de rage
+Not enough energy	Pas assez d'énergie
+Not enough focus	Pas assez de concentration
+Spell is not ready yet	Le sort n'est pas encore prêt
+Ability is not ready yet	La capacité n'est pas encore prête
+Item is not ready yet	L'article n'est pas encore prêt
+Another action is in progress	Une autre action est en cours
+Interrupted	Interrompu
+You are facing the wrong way	Vous êtes dans la mauvaise direction
+You must be standing	Tu dois être debout
+Inventory is full	L'inventaire est plein
+That bag is full	Ce sac est plein
+Out of ammo	À court de munitions
+Target not in line of sight	Cible pas en ligne de mire
+Can't do that while moving	Je ne peux pas faire ça en bougeant
+You can't do that yet	Tu ne peux pas encore faire ça
+You can't carry any more of those items	Vous ne pouvez plus transporter de tels objets
+You can't carry any more of those items.	Vous ne pouvez plus transporter de tels objets.
+You can't learn that yet.	Vous ne pouvez pas encore apprendre cela.
+You don't have permission to loot that corpse.	Vous n'avez pas la permission de piller ce cadavre.
+You are too far away to loot that corpse.	Vous êtes trop loin pour piller ce cadavre.
+You cannot loot that.	Vous ne pouvez pas piller cela.
+Someone is already looting that corpse.	Quelqu'un est déjà en train de piller ce cadavre.
+You must be facing the corpse to loot it.	Vous devez faire face au cadavre pour le piller.
+You need to be standing up to loot something!	Vous devez être debout pour piller quelque chose !
+Target is friendly	La cible est amicale
+Target is hostile	La cible est hostile
+Target needs to be in front of you	La cible doit être devant vous
+You must be in front of your target	Vous devez être devant votre cible
+Target too close	Cible trop proche
+You are already in a duel	Tu es déjà en duel
+You decline the duel.	Vous refusez le duel.
+The duel was cancelled.	Le duel a été annulé.
+You loot 	Vous pillez 
+You are no longer following 	Vous ne suivez plus 
+You have requested a duel with 	Vous avez demandé un duel avec 
+Quest accepted: 	Quête acceptée : 
+You have learned a new spell: 	Vous avez appris un nouveau sort : 
+You gain 	Vous gagnez 
+Sold 	Vendu 
+Bought 	Acheté 
+Your corpse is 	Ton cadavre est 
+You can resurrect in 	Vous pouvez ressusciter 
+Nothing to do with 	Rien à voir avec 
+None left: 	Il n'en reste plus : 
+Empty slot	Emplacement vide
+Hotbar page 	Page de la barre de raccourcis 
+Bound to 	Lié à 
+Cleared 	Effacé 
+Press a button (or tap a bar cell) for 	Appuyez sur un bouton (ou appuyez sur une cellule de barre) pour 
+You need 	Vous avez besoin 

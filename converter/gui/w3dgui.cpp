@@ -29,9 +29,20 @@ namespace {
 
 enum {
     ID_DATA = 100, ID_DATA_BROWSE, ID_OUT, ID_OUT_BROWSE, ID_MAP, ID_RADIO_WORLD, ID_RADIO_REGION, ID_TX0, ID_TY0, ID_TX1, ID_TY1,
-    ID_PACKWORLD, ID_CREATURES, ID_PLAYERS, ID_ITEMS, ID_TRANSPORTS, ID_GAMEOBJECTS, ID_DUNGEONS, ID_UI, ID_SOUND, ID_QUALITY, ID_EXTRA,
-    ID_MODE_ALL, ID_MODE_SEL, ID_START, ID_CANCEL, ID_OPEN, ID_LOG, ID_STATUS, ID_STAGE, ID_PROGRESS, ID_LAB_TILES, ID_PVS, ID_HLOD
+    ID_PACKWORLD, ID_CREATURES, ID_PLAYERS, ID_ITEMS, ID_TRANSPORTS, ID_GAMEOBJECTS, ID_DUNGEONS, ID_UI, ID_SOUND, ID_QUALITY, ID_LOCALE,
+    ID_EXTRA, ID_MODE_ALL, ID_MODE_SEL, ID_START, ID_CANCEL, ID_OPEN, ID_LOG, ID_STATUS, ID_STAGE, ID_PROGRESS, ID_LAB_TILES, ID_PVS, ID_HLOD
 };
+// 7.14: the game languages of the DBC text columns (the GUI writes --locale).
+const wchar_t* const kLocaleLabels[] = {L"English (enUS)", L"English UK (enGB)", L"Korean (koKR)", L"French (frFR)", L"German (deDE)",
+                                        L"Chinese (zhCN)", L"Taiwanese (zhTW)", L"Spanish (esES)", L"Mexican Spanish (esMX)", L"Russian (ruRU)"};
+const char* const kLocaleCodes[] = {"enUS", "enGB", "koKR", "frFR", "deDE", "zhCN", "zhTW", "esES", "esMX", "ruRU"};
+constexpr int kLocaleCount = (int)(sizeof(kLocaleCodes) / sizeof(kLocaleCodes[0]));
+int localeIndex(const std::string& code) {
+    for (int i = 0; i < kLocaleCount; ++i) if (code == kLocaleCodes[i]) return i;
+    return 0;
+}
+const char* localeCode(int index) { return index >= 0 && index < kLocaleCount ? kLocaleCodes[index] : "enUS"; }
+
 constexpr UINT_PTR kTimer = 1;
 constexpr size_t kLogLines = 600;   // lines kept in the window (the whole log is in log_*.txt)
 
@@ -99,6 +110,8 @@ w3gui::Settings readUi() {
     s.hlod = checked(ID_HLOD);
     s.quality = (int)SendDlgItemMessageW(g_wnd, ID_QUALITY, CB_GETCURSEL, 0, 0);
     if (s.quality < 0) s.quality = 0;
+    int loc = (int)SendDlgItemMessageW(g_wnd, ID_LOCALE, CB_GETCURSEL, 0, 0);
+    s.locale = localeCode(loc);
     s.extra = narrow(getText(ID_EXTRA));
     return s;
 }
@@ -118,6 +131,7 @@ void writeUi(const w3gui::Settings& s) {
     setChecked(ID_MODE_SEL, !s.everything);
     setChecked(ID_HLOD, s.hlod);
     SendDlgItemMessageW(g_wnd, ID_QUALITY, CB_SETCURSEL, (WPARAM)s.quality, 0);
+    SendDlgItemMessageW(g_wnd, ID_LOCALE, CB_SETCURSEL, (WPARAM)localeIndex(s.locale), 0);
     setText(ID_EXTRA, widen(s.extra));
 }
 
@@ -484,13 +498,16 @@ void createControls() {
     check(L"Horizon meshes (far buildings; minutes)", c1 + gw / 2 - 10, y + 94, gw / 2 - 10, ID_HLOD);
     y += 134;
     // ---- options
-    group(L"Options", kM, y, gw, 58);
+    group(L"Options", kM, y, gw, 94);
     label(L"Texture quality:", kM + 12, y + 26, 100);
-    HWND q = mk(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, kM + 112, y + 22, 110, 100, ID_QUALITY);
+    HWND q = mk(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, kM + 112, y + 22, 100, 100, ID_QUALITY);
     for (const wchar_t* m : {L"fast", L"better", L"best"}) SendMessageW(q, CB_ADDSTRING, 0, (LPARAM)m);
-    label(L"Extra options:", kM + 244, y + 26, 88);
-    mk(L"EDIT", L"", edit, kM + 334, y + 22, gw - 346, 24, ID_EXTRA, WS_EX_CLIENTEDGE);
-    y += 68;
+    label(L"Game language:", kM + 224, y + 26, 100);
+    HWND lc = mk(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, kM + 326, y + 22, 170, 160, ID_LOCALE);
+    for (const wchar_t* l : kLocaleLabels) SendMessageW(lc, CB_ADDSTRING, 0, (LPARAM)l);
+    label(L"Extra options:", kM + 12, y + 60, 100);
+    mk(L"EDIT", L"", edit, kM + 112, y + 56, gw - 124, 24, ID_EXTRA, WS_EX_CLIENTEDGE);
+    y += 104;
     // ---- run
     mk(L"BUTTON", L"Start", BS_DEFPUSHBUTTON | WS_TABSTOP, kM, y, 130, 32, ID_START, 0, g_bold);
     mk(L"BUTTON", L"Cancel", WS_TABSTOP | WS_DISABLED, kM + 138, y, 100, 32, ID_CANCEL);
@@ -506,7 +523,7 @@ void createControls() {
                      WS_EX_CLIENTEDGE, g_mono);
     SendMessageW(logBox, EM_SETLIMITTEXT, 0x7FFFFFFE, 0);
 }
-constexpr int kH = 10 + 128 + 186 + 134 + 68 + 40 + 18 + 20 + 22 + 126 + 14;   // client height
+constexpr int kH = 10 + 128 + 186 + 134 + 104 + 40 + 18 + 20 + 22 + 126 + 14;   // client height
 
 LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {

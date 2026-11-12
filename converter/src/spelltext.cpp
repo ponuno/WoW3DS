@@ -347,8 +347,8 @@ bool exportSpellDescriptions(const DataDir& data, const std::string& path, bool 
     for (uint32_t r = 0; r < spell.records; ++r) {
         const uint32_t id = spell.u32(r, 0);
         if (!id) continue;
-        std::string raw = spell.str(r, descCol);
-        if (raw.empty()) { raw = spell.str(r, tipCol); withTip += !raw.empty(); }
+        std::string raw = spell.loc(r, descCol);   // 7.14: the selected language's description / tooltip
+        if (raw.empty()) { raw = spell.loc(r, tipCol); withTip += !raw.empty(); }
         if (raw.empty()) continue;
         const SpellTextVals* v = other(id);
         std::string t = resolveSpellText(raw, *v, other, 1);

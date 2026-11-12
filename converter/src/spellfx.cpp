@@ -340,7 +340,7 @@ int explainSpells(const DataDir& data, const std::vector<uint32_t>& ids) {
         std::printf("spell %u\n", id);
         const int r = row(spell, id);
         if (r < 0) { std::puts("  not in Spell.dbc"); continue; }
-        std::printf("  name '%s'\n", spell.str((uint32_t)r, (uint32_t)nameCol).c_str());
+        std::printf("  name '%s'\n", spell.loc((uint32_t)r, (uint32_t)nameCol).c_str());
         dump("Spell", spell, r, (uint32_t)nameCol - 8, (uint32_t)nameCol);
         const uint32_t vis = spell.u32((uint32_t)r, (uint32_t)nameCol - 5);
         const int vr = row(sv, vis);

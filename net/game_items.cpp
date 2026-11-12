@@ -246,8 +246,57 @@ static uint32_t itemUseSpell(const ItemInfo* i, uint8_t* index) {
 uint32_t GameSession::itemTargetSpell(uint32_t entry) const {
     uint8_t idx;
     const uint32_t sp = itemUseSpell(itemInfoIfKnown(entry), &idx);
-    if (!sp || !spellNames.selfCastCount() || spellNames.selfCast(sp) || spellNames.ground(sp)) return 0;   // (no spell data: as before)
+    // 7.16: an item-on-item spell (a lure, a weapon oil) names an item, not a unit / object
+    if (!sp || spellNames.itemTarget(sp) || !spellNames.selfCastCount() || spellNames.selfCast(sp) || spellNames.ground(sp)) return 0;
     return sp;
+}
+
+// 7.16: the first on-use spell of an item that the game casts on another item (Spell.dbc Targets 0x10; spells.txt "@item").
+uint32_t GameSession::itemOnItemSpell(uint32_t entry) const {
+    const ItemInfo* i = itemInfoIfKnown(entry);
+    if (!i) return 0;
+    for (int k = 0; k < 5; ++k)
+        if (i->spellId[k] && i->spellTrigger[k] == 0 && spellNames.itemTarget(i->spellId[k])) return i->spellId[k];
+    return 0;
+}
+
+// Which inventory items an item-on-item spell may go on. Unknown item data is not a reason to hide a worn item: the
+// server checks the requirements itself (and answers with its own message). Bag items need their data - without it there
+// is no class / subclass / slot to test. Bags and ammunition are never targets (they are not what a lure / oil goes on).
+static bool fitsOnItem(const SpellNames::ItemTarget& fit, const ItemInfo* info, const InvItem& it) {
+    if (fit.mainHand && !(it.equipped() && it.slot == 15)) return false;   // the server takes only the main hand
+    if (!info) return it.equipped();
+    if (!info->equippable() || info->inventoryType == 18 || info->inventoryType == 24) return false;
+    return fit.fits(info->cls, info->subclass, info->inventoryType);
+}
+
+std::vector<InvItem> GameSession::itemOnItemTargets(const InvItem& source) const {
+    std::vector<InvItem> out;
+    const uint32_t sp = itemOnItemSpell(source.entry);
+    const SpellNames::ItemTarget* fit = sp ? spellNames.itemTarget(sp) : nullptr;
+    if (!fit) return out;
+    for (const InvItem& it : inventory()) {
+        if (!it.guid || it.guid == source.guid) continue;
+        if (fitsOnItem(*fit, itemInfoIfKnown(it.entry), it)) out.push_back(it);
+    }
+    return out;
+}
+
+bool GameSession::itemOnItemTarget(const InvItem& source, InvItem* out) const {
+    const uint32_t sp = itemOnItemSpell(source.entry);
+    const SpellNames::ItemTarget* fit = sp ? spellNames.itemTarget(sp) : nullptr;
+    if (!fit || !out) return false;
+    const std::vector<InvItem> inv = inventory();
+    if (fit->mainHand) {   // SPELL_ATTR_HELD_ITEM_ONLY: the original client picks the item from the main hand
+        for (const InvItem& it : inv)
+            if (it.equipped() && it.slot == 15 && it.guid && it.guid != source.guid) { *out = it; return true; }
+        return false;   // no main-hand item: a bag item would be refused by the server's held-item check
+    }
+    for (const InvItem& it : inv) {   // inventory() puts the equipment first, so a worn item wins over a bag item
+        if (!it.guid || it.guid == source.guid) continue;
+        if (fitsOnItem(*fit, itemInfoIfKnown(it.entry), it)) { *out = it; return true; }
+    }
+    return false;
 }
 
 void GameSession::useItem(const InvItem& it, uint32_t nowMs, const WorldObject* forced) {
@@ -263,6 +312,12 @@ void GameSession::useItem(const InvItem& it, uint32_t nowMs, const WorldObject* 
         q.u32(qi->startQuest);
         send(kCmsgQuestgiverQueryQuest, q.b, nowMs);
         return;
+    }
+    // 7.16: the spell goes on another item (a lure on the fishing pole, a weapon oil / sharpening stone on a weapon):
+    // name that item as the target. A "held item" spell always takes the main hand, as the original client does.
+    if (itemOnItemSpell(it.entry)) {
+        InvItem tgt;
+        if (itemOnItemTarget(it, &tgt)) { useItemOnItem(it, tgt.guid, nowMs); return; }
     }
     Writer w;
     w.u8(it.bag);
@@ -287,6 +342,30 @@ void GameSession::useItem(const InvItem& it, uint32_t nowMs, const WorldObject* 
     } else {
         w.u16(0);
     }
+    send(CMSG_USE_ITEM, w.b, nowMs);
+}
+
+// 7.16: use an item on another one. CMSG_USE_ITEM: bag, slot, the spell's slot among the item's spells, then the
+// SpellCastTargets mask TARGET_FLAG_ITEM 0x10 and the packed GUID of the item it goes on (vMaNGOS
+// SpellCastTargets::read / Spell::CheckCast; the same fields castSpellOnItem sends for an enchant).
+void GameSession::useItemOnItem(const InvItem& it, uint64_t itemGuid, uint32_t nowMs) {
+    const ItemInfo* info = itemInfoIfKnown(it.entry);
+    uint8_t index = 0;
+    uint32_t spell = 0;
+    if (info)
+        for (int k = 0; k < 5; ++k)
+            if (info->spellId[k] && info->spellTrigger[k] == 0 && spellNames.itemTarget(info->spellId[k])) {
+                index = (uint8_t)k;
+                spell = info->spellId[k];
+                break;
+            }
+    if (!spell || !itemGuid) { useItem(it, nowMs); return; }   // not a use-on-item spell / nothing to put it on
+    Writer w;
+    w.u8(it.bag);
+    w.u8(it.slot);
+    w.u8(index);
+    w.u16(0x10);   // TARGET_FLAG_ITEM: the packed GUID of the item
+    w.packedGuid(itemGuid);
     send(CMSG_USE_ITEM, w.b, nowMs);
 }
 

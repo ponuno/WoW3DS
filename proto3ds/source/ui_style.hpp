@@ -1,6 +1,6 @@
-// ui_style.hpp — the interface's palette (dark gold, after the original but with more contrast) and its two
+// ui_style.hpp — the interface's palette (dark gold, after the original but with more contrast) and its
 // languages (UI stage 7): tr("Bags", "Сумки") picks by PadConfig::lang; texts the network layer writes (English) are
-// translated where they are common (trText).
+// translated where they are common (trText). 7.15: Spanish / German / French come from lang_<code>.txt.
 #pragma once
 #include <stdint.h>
 
@@ -10,8 +10,16 @@
 
 namespace ui {
 
-extern int g_lang;   // 0 English, 1 Russian
-inline const char* tr(const char* en, const char* ru) { return g_lang ? ru : en; }
+extern int g_lang;   // 0 English, 1 Russian, 2 Spanish, 3 German, 4 French
+// 7.15: the interface languages. Russian is built in (the second argument of tr); the others are loaded from
+// sdmc:/3ds/w3dproto/lang_<code>.txt (or romfs:/lang_<code>.txt), a table of English<TAB>translation.
+constexpr int kLangCount = 5;
+constexpr int kLangSpanish = 2, kLangGerman = 3, kLangFrench = 4;
+void setLanguage(int lang);                 // switches g_lang and loads that language's table
+bool loadLanguageTable(const char* path);   // loads one lang_<code>.txt (tests / tools; setLanguage uses it)
+const char* languageCode(int lang);         // "enUS", "ruRU", "esES", ...
+const char* languageName(int lang);         // "English", "Русский", "Español", ...
+const char* tr(const char* en, const char* ru);
 std::string trText(const std::string& en);   // known server / session lines in the interface language
 
 // palette

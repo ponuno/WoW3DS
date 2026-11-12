@@ -22,6 +22,8 @@ static void usage() {
         "                        [--no-world-sounds] [--sound-variants N]\n"
         "                        sounds: interface + events (sfx.w3ds), zone music, ambience, zone grid\n"
         "options:\n"
+        "  --locale CODE         game language of the DBC texts and the Data/<CODE>/ archives (default enUS):\n"
+        "                        enUS, koKR, frFR, deDE, zhCN, zhTW, esES, esMX, ruRU (fan client; enGB = enUS)\n"
         "  --tiles X0 Y0 X1 Y1   convert a rectangle of tiles into one pack (streaming test)\n"
         "  --grid 9|5|3          terrain vertices per chunk edge (default 9)\n"
         "  --terrain-tex N       max terrain texture size (default 64)\n"
@@ -118,6 +120,7 @@ int main(int argc, char** argv) {
             return argv[++i];
         };
         if (a == "--data") o.dataDir = next();
+        else if (a == "--locale") o.locale = next();
         else if (a == "--casc") cascDir = next();
         else if (a == "--wdt-names") wdtNames = next();
         else if (a == "--map") o.map = next();
@@ -259,6 +262,7 @@ int main(int argc, char** argv) {
     if (!info.empty()) return printPackInfo(info);
     if (o.grid != 9 && o.grid != 5 && o.grid != 3) { std::fputs("--grid must be 9, 5 or 3\n", stderr); return 1; }
     if (!pow2ok(o.terrainTex) || !pow2ok(o.modelTex) || !pow2ok(o.waterTex)) { std::fputs("texture sizes must be pow2 in 8..1024\n", stderr); return 1; }
+    setGameLocale(o.locale);
 
     auto t0 = std::chrono::steady_clock::now();
     PackWriter pack;

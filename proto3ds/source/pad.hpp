@@ -37,7 +37,7 @@ struct PadConfig {
     float camSpeed = 1.8f;            // radians per second at full C-Stick
     bool questTracker = true;         // stage 5.14: the followed quests' objectives on the top screen (6.63: on)
     // UI stages 3/6 (the Settings tab)
-    int lang = 0;                     // interface language: 0 English (default), 1 Russian
+    int lang = 0;                     // interface language: 0 English, 1 Russian, 2 Spanish, 3 German, 4 French
     int drawDist = 1;                 // index into the draw distances (main.cpp kDrawDists)
     int horizon = 0;                  // 6.34b: the ground and far buildings past the draw distance: 0 off, 1 to 800 yd, 2 to 1200 yd
     int crowd = 2;                    // creatures drawn at most: 0 = 10, 1 = 20, 2 = 40, 3 = all

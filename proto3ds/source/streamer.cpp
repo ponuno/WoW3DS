@@ -2726,6 +2726,20 @@ int streamerFloorsAt(float wx, float wy, int max, float* zs, uint16_t* flags) { 
     return t && t->coll ? w3d_coll_floors_at(t->coll, wx, wy, max, zs, flags) : 0;
 }
 
+// 7.12b: a building's floor (WMO, not a doodad) near the feet's height within 2.5 yd around (x, y): the walker is inside a building
+// or a cave, not fallen through the open world's ground.
+static bool buildingFloorNear(const uint8_t* coll, float x, float y, float zFeet) {
+    static const float kOff[9][2] = {{0, 0}, {2.5f, 0}, {-2.5f, 0}, {0, 2.5f}, {0, -2.5f}, {1.8f, 1.8f}, {-1.8f, 1.8f}, {1.8f, -1.8f}, {-1.8f, -1.8f}};
+    for (const auto& o : kOff) {
+        float fz[16];
+        uint16_t ff[16];
+        const int n = w3d_coll_floors_at(coll, x + o[0], y + o[1], 16, fz, ff);
+        for (int i = 0; i < n; ++i)
+            if (!(ff[i] & W3D_COLL_M2) && fz[i] > zFeet - 3.0f && fz[i] <= zFeet + kStepHeight) return true;
+    }
+    return false;
+}
+
 bool streamerFloorHeight(float wx, float wy, float zFeet, float* out, bool* onFloor, bool* held) {
     float terrain = 0;
     bool hole = false;
@@ -2762,7 +2776,11 @@ bool streamerFloorHeight(float wx, float wy, float zFeet, float* out, bool* onFl
     // (Only for those cases: under the open world's ground with nothing of a building around - fallen through - the old lift
     // onto the terrain is the right way back; so is a short lift onto a floor just above, sunk through it.)
     const bool collPending = !coll && t && g_index->find(W3D_ENTRY_COLLISION, w3d_tile_id(t->tx, t->ty));
-    if (*out > zFeet + kStepHeight + 1.0f && (collPending || (f != 0 && *out > zFeet + 6.0f))) {
+    // 7.12b: in a cave, a crypt, a building: a gap in its floor (no floor triangle under this one point) lifted the walker onto the
+    // lowest surface above - the cave's roof or the hill over it (Teldrassil: thrown up onto the hillside over the Webwood cave,
+    // out only by the hearthstone). With a building's floor around at the feet's height the height is kept: the gap is walked over.
+    const bool inBuilding = *out > zFeet + kStepHeight + 1.0f && coll && buildingFloorNear(coll, wx, wy, zFeet);
+    if (*out > zFeet + kStepHeight + 1.0f && (collPending || inBuilding || (f != 0 && *out > zFeet + 6.0f))) {
         *out = zFeet;
         f = 1;
         if (held) *held = true;
@@ -2834,6 +2852,20 @@ bool streamerGroundHeight(float wx, float wy, float* out) { return streamerGroun
 bool streamerSlopeMove(float fromX, float fromY, float zFeet, float* toX, float* toY, float step) {
     Tile* tb = tileAt(*toX, *toY);
     if (!tb || !tb->grnd) return false;
+    // 7.12: walking on a building's floor (a cave's, a crypt's) under the terrain: the hill over the way in is not climbed, it is
+    // over our heads. Near the mouth the feet are only a little under the terrain (w3d_slope_move's depth rule does not hold yet),
+    // so: terrain above the feet and a floor of the building under them here -> no slope limit.
+    // (Only a building's floor: the rocks half buried in a hillside are doodads with floors too, they must not open steep slopes.)
+    if (tb->coll) {
+        W3dGroundHit b;
+        if (w3d_ground_at(tb->grnd, *toX, *toY, &b) && b.z > zFeet + 0.25f) {
+            float fz[16];
+            uint16_t ff[16];
+            const int nf = w3d_coll_floors_at(tb->coll, *toX, *toY, 16, fz, ff);
+            for (int i = 0; i < nf; ++i)
+                if (!(ff[i] & W3D_COLL_M2) && fz[i] <= zFeet + kStepHeight && fz[i] > zFeet - 3.0f) return false;
+        }
+    }
     Tile* ta = tileAt(fromX, fromY);
     return w3d_slope_move(ta ? ta->grnd : nullptr, tb->grnd, fromX, fromY, zFeet, step >= 0 ? step : kStepHeight, toX, toY) != 0;
 }

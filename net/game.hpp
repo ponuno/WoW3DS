@@ -83,6 +83,23 @@ public:
     bool friendly(uint32_t id) const { return friend_.count(id) != 0; }
     void addFriendly(uint32_t id) { friend_.insert(id); }
     size_t friendlyCount() const { return friend_.size(); }   // 0 = spells.txt not loaded: we cannot tell what needs a target
+    // 7.16: spells cast on another item (a lure on the fishing pole, a weapon oil, a sharpening stone, a poison;
+    // spells.txt "@item id class subclassMask inventoryTypeMask mainHand"). The masks are Spell.dbc's EquippedItem*.
+    struct ItemTarget {
+        int32_t itemClass = -1;   // -1 = any item class
+        uint32_t subMask = 0, invMask = 0;
+        bool mainHand = false;    // SPELL_ATTR_HELD_ITEM_ONLY: only the item in the main hand (the original client picks it)
+        bool fits(uint32_t cls, uint32_t subclass, uint32_t inventoryType) const {
+            if (itemClass < 0) return true;
+            if (cls != (uint32_t)itemClass) return false;
+            if (subMask && (subclass >= 32 || !(subMask & (1u << subclass)))) return false;
+            if (invMask && (inventoryType >= 32 || !(invMask & (1u << inventoryType)))) return false;
+            return true;
+        }
+    };
+    const ItemTarget* itemTarget(uint32_t id) const { auto it = itemTarget_.find(id); return it == itemTarget_.end() ? nullptr : &it->second; }
+    void addItemTarget(uint32_t id, const ItemTarget& t) { itemTarget_[id] = t; }
+    size_t itemTargetCount() const { return itemTarget_.size(); }
     // UI stage 12: the cooldowns of Spell.dbc (spells.txt "@cd id recovery category categoryRecovery onEvent", ms). The
     // 1.12 server does not send them for ordinary casts: the client starts them itself when its cast goes off.
     struct Cooldown { uint32_t rec = 0, category = 0, catRec = 0; bool onEvent = false; };
@@ -128,6 +145,7 @@ private:
     std::unordered_map<uint32_t, Ground> ground_;
     std::unordered_set<uint32_t> selfCast_;
     std::unordered_set<uint32_t> friend_;
+    std::unordered_map<uint32_t, ItemTarget> itemTarget_;
     std::unordered_map<uint32_t, Cooldown> cd_;
 };
 
@@ -477,6 +495,10 @@ struct ResurrectOffer { bool active = false; uint64_t from = 0; std::string name
 constexpr uint32_t kSpellAttack = 6603;           // "Attack": toggles auto-attack, never sent as a cast
 constexpr uint32_t kGlobalCooldownMs = 1500;
 
+// 7.13: a spell that is a swing with the weapon in hand (Attack, Auto Shot / Shoot / Throw): its action-bar icon is the
+// weapon's, not the generic picture of the spell. which: 0 = main hand, 1 = the ranged slot.
+bool weaponSwingSpell(const SpellNames& names, uint32_t spell, int* which = nullptr);
+
 // Client texts of SpellCastResult / InventoryResult codes (result_text.cpp, generated from vMaNGOS).
 std::string castResultText(uint32_t code);
 std::string inventoryResultText(uint32_t code);
@@ -518,6 +540,12 @@ public:
     // SMSG_TRANSFER_PENDING: the server is about to move us to another map (portal, dungeon door, ship to another
     // continent). True once per notice; the new position follows with SMSG_NEW_WORLD (takeTeleport).
     bool takeTransferPending(uint32_t* map);
+    // 7.13: the server moves us itself (a taxi flight, Charge): our own object carries a running SMSG_MONSTER_MOVE spline.
+    // True while it runs; pos/yaw are the point on it, taxi says whether the mount camera is wanted. We send no movement
+    // packets meanwhile; main.cpp follows the spline with the camera.
+    bool selfServerMove(uint32_t nowMs, float pos[3], float* yaw, bool* taxi) const;
+    // The spline ended: put the mover and the object at its final point and forget the spline, so the next frame walks normally.
+    void endSelfServerMove(const float pos[3], float yaw, uint32_t nowMs);
     uint32_t mapId() const { return map_; }
     // 6.60: the server's game clock (SMSG_LOGIN_SETTIMESPEED / GAMETIME_*): the realm's time of day, which the sky follows.
     struct GameClock {
@@ -678,6 +706,12 @@ public:
     uint32_t freeBagSlots() const;
     void useItem(const InvItem& it, uint32_t nowMs, const WorldObject* forced = nullptr);   // forced: the object a quest item goes on (6.75)   // CMSG_USE_ITEM on self, or on the selected unit / object when its spell needs a target
     uint32_t itemTargetSpell(uint32_t entry) const;    // the on-use spell when it needs a target (quest items used on a creature), else 0
+    // 7.16: an item used on another item (Shiny Bauble on the fishing pole, a weapon oil, a sharpening stone, a poison):
+    // the on-use spell, the items it fits in the bags / equipment (worn first) and CMSG_USE_ITEM with TARGET_FLAG_ITEM.
+    uint32_t itemOnItemSpell(uint32_t entry) const;
+    std::vector<InvItem> itemOnItemTargets(const InvItem& source) const;
+    bool itemOnItemTarget(const InvItem& source, InvItem* out) const;   // main hand for a held-item spell, else the first fit
+    void useItemOnItem(const InvItem& it, uint64_t itemGuid, uint32_t nowMs);
     const WorldObject* objectForItem() const;          // 6.59b: the nearest usable object within 10 yd (an item's target when none is selected)
     // UI stage 10: an item whose spell is placed on the ground (grenades, bombs, target dummies): its on-use spell, or 0
     uint32_t itemGroundSpell(uint32_t entry) const;
@@ -811,6 +845,9 @@ public:
     bool castSpell(uint32_t spell, uint32_t nowMs);
     // 7.11: true when a helpful spell must go at ourselves now (the target is an enemy / dead / not set)
     bool castsOnSelf(uint32_t spell) const;
+    // 7.13: a spell that works on a corpse (Cannibalize): its target must not be replaced by the soft-target enemy, and
+    // the cast goes without an explicit unit target - the server picks the corpse itself (vMaNGOS Spell::EffectDummy 20577).
+    bool corpseSpell(uint32_t spell) const;
     uint32_t lastCastSpell_ = 0, lastCastRetry_ = 0;
     uint64_t lastCastTarget_ = 0;
     // 6.64: our own cast starts on send, not when the server answers (rolled back by SMSG_CAST_FAILED / SPELL_FAILURE)

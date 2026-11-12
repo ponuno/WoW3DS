@@ -19,6 +19,7 @@
 
 #define W3D_GROUND_CHUNK_PRESENT 1u
 #define W3D_GROUND_TILE_SIZE 533.33333f
+#define W3D_SLOPE_UNDER_DEPTH 2.0f   // 7.12: feet this far under the terrain are under it (a cave), not on its slope
 
 typedef struct {
     uint16_t h[145];              // z = origin[2] + h * zScale
@@ -116,14 +117,19 @@ static inline int w3d_slope_move(const uint8_t* gFrom, const uint8_t* gTo, float
     if (!w3d_ground_at(gTo, *toX, *toY, &b) || b.hole) return 0;
     if (b.nz >= W3D_WALK_MIN_NZ) return 0;   // walkable
     if (zFeet > b.z + step) return 0;          // standing on a floor or in the air above it
+    // 7.12: feet well under the terrain where the walker stands = in a cave, a crypt, a cellar under the hill: the slope above is
+    // its roof, not ground to climb. The limit blocked walking into a cave (the hill rises the way in) like an invisible wall.
+    // (Measured at the start of the move: at its end a very steep slope is already high over the feet after one step.)
+    W3dGroundHit a;
+    const int haveA = gFrom && w3d_ground_at(gFrom, fromX, fromY, &a) && !a.hole;
+    if (zFeet < (haveA ? a.z : b.z) - W3D_SLOPE_UNDER_DEPTH) return 0;
     float dx = *toX - fromX, dy = *toY - fromY;
     float gl = sqrtf(b.gx * b.gx + b.gy * b.gy);
     if (gl < 1e-6f) return 0;
     const float ux = b.gx / gl, uy = b.gy / gl;          // uphill, horizontal
     const float up = dx * ux + dy * uy;
     if (up <= 1e-5f) return 0;                           // downhill or along the contour
-    W3dGroundHit a;
-    if (gFrom && w3d_ground_at(gFrom, fromX, fromY, &a) && !a.hole && a.z >= b.z - 0.001f) return 0;   // (not actually rising)
+    if (haveA && a.z >= b.z - 0.001f) return 0;   // (not actually rising)
     *toX = fromX + dx - up * ux;
     *toY = fromY + dy - up * uy;
     return 1;

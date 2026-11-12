@@ -17,6 +17,16 @@ int main() {
     CHECK(worldPackName("Kalimdor") == "map1.w3dp" && worldPackName("Azeroth") == "test.w3dp");
     CHECK(w.back() == "-v" && w[w.size() - 2] == "D:\\sd\\w3dproto\\test.w3dp" && w[w.size() - 3] == "-o");
     CHECK(commandLine("C:\\t\\w3dconv.exe", st[0]).find("--data \"E:\\Wow Classic\\Data\" --ui -o D:\\sd\\w3dproto\\ui.w3dp") != std::string::npos);
+    // 7.14: a non-English game language goes to the converter; enUS leaves the line as before
+    s.locale = "esES";
+    auto stEs = buildSteps(s);
+    auto hasEs = [&](const std::vector<std::string>& a) {
+        for (size_t i = 0; i + 1 < a.size(); ++i) if (a[i] == "--locale" && a[i + 1] == "esES") return true;
+        return false;
+    };
+    CHECK(stEs.size() == 4 && hasEs(stEs[0].args) && hasEs(stEs[1].args) && hasEs(stEs[2].args));
+    CHECK(parse(serialize(s)).locale == "esES");
+    s.locale = "enUS";
     s.world = true; s.items = false; s.quality = 2; s.extra = "--creature-tris 600 --transport-filter \"ship,zeppelin\"";
     w3gui::Settings s2 = parse(serialize(s));
     CHECK(s2.world && !s2.items && s2.quality == 2 && s2.extra == s.extra && s2.data == s.data && s2.tx1 == 34);

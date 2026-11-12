@@ -26,5 +26,7 @@ g++ -std=c++20 -O1 -g -fsanitize=address,undefined -Wall $INC "$P/tests/ui_test.
 g++ -std=c++20 -O1 -g -fsanitize=address,undefined -Wall -I"$P/tests/ui_stub" -I"$N" -I"$P/source" "$P/tests/pad_test.cpp" \
     "$P/source/pad.cpp" -o "$OUT/pad_test"
 "$OUT/pad_test"
+g++ -std=c++20 -O1 -g -fsanitize=address,undefined -Wall -I"$P/source" -I"$P/../common" "$P/tests/lang_test.cpp" "$P/source/ui_style.cpp" -o "$OUT/lang_test"
+"$OUT/lang_test" "$P/romfs/lang_esES.txt"
 "$OUT/ui_test" "$LOG" "$FIGHT" "$OUT" "$TRADE" "$P/../net/tests/data/factions_test.txt" "$PARTY"
 echo "wrote $OUT/ui_*.png and $OUT/ui_sheet.png"

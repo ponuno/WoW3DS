@@ -45,8 +45,8 @@ uint32_t realmPopColor(const w3n::Realm& r) {
 }
 std::string charLine(const w3n::Character& c) {
     char b[96];
-    snprintf(b, sizeof b, "%s %u %s %s", tr("Level", "Уровень"), (unsigned)c.level, glue::raceName(c.race, g_lang),
-             glue::className(c.cls, g_lang));
+    snprintf(b, sizeof b, "%s %u %s %s", tr("Level", "Уровень"), (unsigned)c.level,
+             tr(glue::raceName(c.race, 0), glue::raceName(c.race, 1)), tr(glue::className(c.cls, 0), glue::className(c.cls, 1)));
     return b;
 }
 std::string zoneOf(const GlueModel& m, const w3n::Character& c) {
@@ -565,7 +565,7 @@ void GlueUi::topCreate(HudList& l, const GlueModel& m) {
         const int x = alliance ? 10 : 58, y = 14 + (alliance ? ai++ : hi++) * step;
         char icon[16];
         snprintf(icon, sizeof icon, "race_%d", r.id * 2 + create.sex);
-        iconButton(l, x, y, sz, icon, g_lang ? r.ru : r.en, create.race == r.id, focused(kRace, GlueAction::None, r.id), true);
+        iconButton(l, x, y, sz, icon, tr(r.en, r.ru), create.race == r.id, focused(kRace, GlueAction::None, r.id), true);
         addTop(x, y, sz, sz, GlueAction::None, r.id, kRace);
     }
     for (int s = 0; s < 2; ++s) {
@@ -589,7 +589,7 @@ void GlueUi::topCreate(HudList& l, const GlueModel& m) {
         char icon[16];
         snprintf(icon, sizeof icon, "class_%d", c.id);
         const bool ok = glue::allowed(create.race, c.id);
-        iconButton(l, x, y, 27, icon, g_lang ? c.ru : c.en, create.cls == c.id, focused(kClass, GlueAction::None, c.id), ok);
+        iconButton(l, x, y, 27, icon, tr(c.en, c.ru), create.cls == c.id, focused(kClass, GlueAction::None, c.id), ok);
         addTop(x, y, 27, 27, GlueAction::None, c.id, kClass);
     }
     const uint8_t vals[5] = {create.skin, create.face, create.hairStyle, create.hairColor, create.facial};
@@ -617,7 +617,8 @@ void GlueUi::topCreate(HudList& l, const GlueModel& m) {
            "ST");
     addTop(306, 212, 88, 24, GlueAction::CreateAccept, 0, kButton);
     // centre: race and class, the name
-    std::string title = std::string(glue::raceName(create.race, g_lang)) + " " + glue::className(create.cls, g_lang);
+    std::string title = std::string(tr(glue::raceName(create.race, 0), glue::raceName(create.race, 1))) + " " +
+                        tr(glue::className(create.cls, 0), glue::className(create.cls, 1));
     l.textCentered(200, 3, title, kGlueGold, true, Font::Normal);
     l.textCentered(200, 186, tr("Name", "Имя"), kGlueGold, true, Font::Small);
     field(l, 130, 197, 140, 21, create.name, focused(kField, GlueAction::EditName, 0), false, tr("Y: enter a name", "Y: введите имя"));
@@ -769,29 +770,29 @@ void GlueUi::bottomCreate(HudList& l, const GlueModel& m) {
         snprintf(icon, sizeof icon, "race_%d", create.race * 2 + create.sex);
         Image im = assets().namedIcon(icon);
         if (im.ok()) l.image(8, y, 32, 32, im);
-        l.text(46, y + 2, glue::raceName(create.race, g_lang), kGlueGold, true, Font::Large);
+        l.text(46, y + 2, tr(glue::raceName(create.race, 0), glue::raceName(create.race, 1)), kGlueGold, true, Font::Large);
         if (r) l.text(46, y + 2 + HudList::lineHeight(Font::Large),
                       r->faction == glue::Faction::Alliance ? tr("Alliance", "Альянс") : tr("Horde", "Орда"),
                       r->faction == glue::Faction::Alliance ? kAllianceBlue : kHordeRed, true, Font::Small);
         y += 38;
         static const glue::Texts kNone;
         paras.push_back(glue::raceDescription(m.texts ? *m.texts : kNone, create.race, g_lang));
-        if (r) { traitsTitle = tr("Racial traits", "Расовые способности"); paras.push_back(g_lang ? r->traitsRu : r->traitsEn); }
+        if (r) { traitsTitle = tr("Racial traits", "Расовые способности"); paras.push_back(g_lang == 1 ? r->traitsRu : r->traitsEn); }
     } else {
         const glue::ClassInfo* c = glue::cls(create.cls);
         snprintf(icon, sizeof icon, "class_%d", create.cls);
         Image im = assets().namedIcon(icon);
         if (im.ok()) l.image(8, y, 32, 32, im);
-        l.text(46, y + 2, glue::className(create.cls, g_lang), classColor(create.cls), true, Font::Large);
+        l.text(46, y + 2, tr(glue::className(create.cls, 0), glue::className(create.cls, 1)), classColor(create.cls), true, Font::Large);
         y += 38;
         static const glue::Texts kNone;
-        if (c) paras.push_back(g_lang ? c->roleRu : c->roleEn);
+        if (c) paras.push_back(g_lang == 1 ? c->roleRu : c->roleEn);
         paras.push_back(glue::classDescription(m.texts ? *m.texts : kNone, create.cls, g_lang));
         std::string who;
         int nr = 0;
         const glue::RaceInfo* rs = glue::races(&nr);
         for (int i = 0; i < nr; ++i)
-            if (glue::allowed(rs[i].id, create.cls)) who += (who.empty() ? "" : ", ") + std::string(g_lang ? rs[i].ru : rs[i].en);
+            if (glue::allowed(rs[i].id, create.cls)) who += (who.empty() ? "" : ", ") + std::string(tr(rs[i].en, rs[i].ru));
         traitsTitle = tr("Races", "Расы");
         paras.push_back(who);
     }

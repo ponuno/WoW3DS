@@ -269,8 +269,9 @@ static void collectCreatures(w3n::GameSession& g, uint32_t nowMs, const float ca
             if (c.lookParts.race) c.look = w3d_look_key(&c.lookParts);
         }
         if (!c.displayId && !c.look) continue;
-        const bool taxi = o.taxiFlight() && o.pathActive;   // on a flight the server's spline is the truth, for us too
-        if (o.self && !taxi) {   // our own position is the one we send, not the table's
+        // On a taxi / Charge the server's spline is the truth, for us too; otherwise our own position is the one we send.
+        const bool serverMove = o.self && o.pathActive;
+        if (o.self && !serverMove) {
             const w3n::MovementInfo& me = g.mover.info();
             c.pos[0] = me.x; c.pos[1] = me.y; c.pos[2] = me.z;
             c.yaw = me.o;
@@ -283,8 +284,9 @@ static void collectCreatures(w3n::GameSession& g, uint32_t nowMs, const float ca
         c.farFade = farFadeAt(d2);
         float scale = o.fieldF(w3n::UF::OBJECT_SCALE_X);
         c.scale = (scale > 0.05f && scale < 20.0f) ? scale : 1.0f;
-        c.speed = o.self && !taxi ? ((g.mover.info().flags & w3n::MoveFlag::MaskMoving) ? g.mover.speeds.forFlags(g.mover.info().flags) : 0.0f)
-                         : o.groundSpeedAt(nowMs);
+        c.speed = o.self && !serverMove
+                      ? ((g.mover.info().flags & w3n::MoveFlag::MaskMoving) ? g.mover.speeds.forFlags(g.mover.info().flags) : 0.0f)
+                      : o.groundSpeedAt(nowMs);
         fillUnitState(g, o, nowMs, c);   // the animation stage: everything the unit is doing
         if (!o.self && o.type == w3n::ObjType::Unit && !snapToGround(o, c, nowMs)) continue;   // 6.83
         // 6.62: ghosts (PLAYER_FLAGS_GHOST: we ourselves, or another ghost we can see) and spirit healers / guides are translucent
@@ -858,7 +860,7 @@ int main() {
     bool walk = false;
     // Online character state (stage 5): feet position, jump, last held direction.
     float pl[3] = {0, 0, 0}, plVz = 0;
-    float fallFromZ = 0; bool airborne = false, jumped = false, wasOnlineWalk = false, onFloor = false, wasFlight = false, wasFlightSent = false;
+    float fallFromZ = 0; bool airborne = false, jumped = false, wasOnlineWalk = false, onFloor = false, wasServerMove = false, wasServerMoveSent = false;
     swim::State swimState;           // stage 5.26: momentum of a plunge, floating back up
     bool wallHit = false;          // a wall stopped/deflected this frame's step (HUD)
     std::vector<W3dBlockBox> doorBoxes;   // stage 5.41: closed doors near us
@@ -935,7 +937,7 @@ int main() {
     padCfg.load(padPath);
     rendererSetHorizon(kHorizons[std::clamp(padCfg.horizon, 0, 2)]);   // 6.34b
     rendererSetProjection(cam.drawDist);
-    ui::g_lang = padCfg.lang;   // 6.20: the language from the first frame on (the main menu too)
+    ui::setLanguage(padCfg.lang);   // 6.20: the language from the first frame on (the main menu too); 7.15: loads lang_<code>.txt
     rs.effects = padCfg.effects;
     perf::init(kOutDir, padCfg.perfLog);   // stage 6: perf.csv (a row a second) + perf_events.txt
     perf::event("PVS: %s", pvs::status());   // 6.54
@@ -1552,18 +1554,16 @@ int main() {
                 doorBoxes.clear();
                 staticDecksNear.clear();
             }
-            // Taxi flight (stage 5.20): the server flies us along a spline (SMSG_MONSTER_MOVE with the flying flag) with
-            // UNIT_FLAG_TAXI_FLIGHT set; we send no movement, follow the spline and look around from behind the mount.
-            bool flightNow = false;
+            // Server-driven movement (stage 5.20 taxi, 7.13 Charge): the server flies / charges us along a spline
+            // (SMSG_MONSTER_MOVE on our own object). We send no movement, follow the spline; a taxi also puts the camera
+            // behind the mount. Charge uses the normal third-person camera.
+            bool serverMoveNow = false, taxiNow = false;
             float fpos[3] = {0, 0, 0}, fyaw = 0;
-            if (onlineWalk) {
-                const w3n::WorldObject* me = game->objects.find(game->selfGuid());
-                if (me && me->taxiFlight() && me->pathActive) {
-                    flightNow = true;
-                    me->positionAt(netMs, fpos, &fyaw);
-                }
-            }
-            if (wasFlight && !flightNow && onlineWalk) {   // landed: stand on the ground where the flight ended
+            if (onlineWalk) serverMoveNow = game->selfServerMove(netMs, fpos, &fyaw, &taxiNow);
+            if (wasServerMove && !serverMoveNow && onlineWalk) {   // landed / charge ended: stand on the ground where it ended
+                game->endSelfServerMove(pl, charYaw, netMs);   // puts the mover at the exact end of the spline
+                const w3n::MovementInfo& end = game->mover.info();
+                pl[0] = end.x; pl[1] = end.y; pl[2] = end.z; charYaw = end.o;
                 float gz;
                 if (streamerFloorHeight(pl[0], pl[1], pl[2] + 3.0f, &gz)) pl[2] = gz;
                 game->mover.reset(pl[0], pl[1], pl[2], charYaw, netMs);
@@ -1572,29 +1572,29 @@ int main() {
                 heldDir = 0;
                 eyeValid = false;
             }
-            wasFlight = flightNow;
+            wasServerMove = serverMoveNow;
             // Stage 5.28: walking into a dungeon door / the tram entrance / any area trigger tells the server (CMSG_AREATRIGGER);
             // not while a map is loading, not on a taxi (the server ignores those anyway), not under the transfer screen.
-            if (game && onlineWalk && !flightNow && !loadingWorld && portal.phase() == PortalFx::Phase::Idle) game->checkAreaTriggers(pl, netMs);
-            if (flightNow) {
-                if (!wasFlightSent) { game->mover.stopAll(netMs); wasFlightSent = true; game->stopFollow(netMs, false); }
+            if (game && onlineWalk && !serverMoveNow && !loadingWorld && portal.phase() == PortalFx::Phase::Idle) game->checkAreaTriggers(pl, netMs);
+            if (serverMoveNow) {
+                if (!wasServerMoveSent) { game->mover.stopAll(netMs); wasServerMoveSent = true; game->stopFollow(netMs, false); }
                 pl[0] = fpos[0]; pl[1] = fpos[1]; pl[2] = fpos[2];
                 charYaw = fyaw;
                 airborne = jumped = false;
                 plVz = 0;
                 heldDir = 0;
-                eye[0] = pl[0]; eye[1] = pl[1]; eye[2] = pl[2] + 2.2f;   // above the mount's back
+                eye[0] = pl[0]; eye[1] = pl[1]; eye[2] = pl[2] + (taxiNow ? 2.2f : 1.7f);   // above the mount's back / our head
                 eyeValid = true;
-                const float d = std::max(camDist, 9.0f);
+                const float d = taxiNow ? std::max(camDist, 9.0f) : camDist;
                 float fw[3] = {cosf(cam.pitch) * cosf(cam.yaw), cosf(cam.pitch) * sinf(cam.yaw), sinf(cam.pitch)};
                 cam.pos[0] = eye[0] - fw[0] * d;
                 cam.pos[1] = eye[1] - fw[1] * d;
                 cam.pos[2] = eye[2] - fw[2] * d + 0.4f;
                 audio::setListener(pl[0], pl[1], pl[2], cam.yaw);
             } else {
-                wasFlightSent = false;
+                wasServerMoveSent = false;
             }
-            if (flightNow) {
+            if (serverMoveNow) {
                 // handled above
             } else if (onlineWalk) {
                 soundReqs.clear();   // this frame's sounds (the movement below may add a splash)
@@ -1772,6 +1772,36 @@ int main() {
                     // jump's height (2.4 yd) of the ground ahead (bunny-hopping up a cliff): the walker slides along the slope
                     if (!ride.guid) wallHit |= streamerSlopeMove(pl[0], pl[1], pl[2], &nx, &ny, airborne ? 2.4f : -1.0f);
                     wallUs += (float)(ticksToMs(svcGetSystemTick() - w0) * 1000.0);
+                    // 7.12c: a step whose ground is far ABOVE the feet (more than a step + 1 yd) has nothing to stand on at the feet's height:
+                    // only a cave's roof or the hill over it (a gap in a cave's wall: the walker slipped through it along the wall and was
+                    // lifted onto the hillside). Such a point is a wall: the move slides along it (x or y alone) or stops. Only from a
+                    // place with proper ground under the feet - a walker already under everything (fallen through) still gets lifted.
+                    // 7.12d: nor a step onto a point where the height is only HELD (7.12b: nothing under the feet, a building's floor
+                    // near): through a gap in a cave's wall that held the walker inside the rock - out of the server's line of sight,
+                    // nobody could hit anybody (melee, ranged), the mobs could not reach it. A walker already held may step out.
+                    const float liftMax = kStepHeight + 1.0f;
+                    auto badStep = [&](float x, float y, float* g) {
+                        if (!floorW(x, y, pl[2], g)) return false;   // (an unloaded tile: the old rule below)
+                        if (*g > pl[2] + liftMax) return true;
+                        bool held = false;
+                        float gs = 0;
+                        streamerFloorHeight(x, y, pl[2], &gs, nullptr, &held);
+                        return held && fabsf(*g - pl[2]) < 1e-3f;   // (an object's platform there is a real floor)
+                    };
+                    float gHere = 0;
+                    if (!ride.guid && badStep(nx, ny, &ground) && !badStep(pl[0], pl[1], &gHere)) {
+                        float g1 = 0;
+                        if (!badStep(nx, pl[1], &g1)) ny = pl[1];
+                        else if (!badStep(pl[0], ny, &g1)) nx = pl[0];
+                        else { nx = pl[0]; ny = pl[1]; }
+                        wallHit = true;
+                        static uint32_t lastLiftLog = 0;
+                        if (netMs - lastLiftLog > 3000) {
+                            lastLiftLog = netMs;
+                            perf::event("step refused: nothing to stand on at the feet's height there (ground %.1f yd above the feet, 0 = height only held), z %.1f at %.1f %.1f",
+                                        ground - pl[2], pl[2], pl[0], pl[1]);
+                        }
+                    }
                     if (floorW(nx, ny, pl[2], &ground)) { pl[0] = nx; pl[1] = ny; }
                     else if (!airborne) dir = 0;   // never walk onto an unloaded tile
                 }
@@ -2067,14 +2097,20 @@ int main() {
                     // 6.16: the terrain is the ground only where it is not far above the character's head (10 yd). Inside a city under a
                     // mountain (Ironforge: the tram exit, Tinker Town), a cave, a cellar, the terrain is the mountain's surface
                     // high above: the camera was put up there. Then the floor under the camera is what it must stay above.
+                    // 7.12: and not at all while the character itself is under the terrain (a cave, a crypt, a cellar: the terrain over
+                    // the character more than 2 yd above the feet, or a hole in it): a shallow cave is less than 10 yd under the surface,
+                    // the old rule put the camera up on the hill over it, looking down through the rock.
+                    float tc;
+                    bool tcHole = false;
+                    const bool charUnder = !streamerGroundHeightEx(pl[0], pl[1], &tc, &tcHole) || tcHole || tc > pl[2] + 2.0f;
                     float g;
                     bool gHole = false;   // (6.17: the membrane over a terrain hole - Ironforge's gate - is not ground either)
-                    if (streamerGroundHeightEx(cp3[0], cp3[1], &g, &gHole) && !gHole && g < eye[2] + 10.0f) {   // (a hill behind us still holds it up)
+                    if (!charUnder && streamerGroundHeightEx(cp3[0], cp3[1], &g, &gHole) && !gHole && g < eye[2] + 10.0f) {   // (a hill behind us still holds it up)
                         if (cp3[2] < g + 0.5f) cp3[2] = g + 0.5f;
                     } else {
                         float fz;
                         bool fOn = false, fHeld = false;
-                        if (streamerFloorHeight(cp3[0], cp3[1], std::min(cp3[2], eye[2]), &fz, &fOn, &fHeld) && fOn && !fHeld &&
+                        if (streamerFloorHeight(cp3[0], cp3[1], std::min(cp3[2], eye[2]), &fz, &fOn, &fHeld) && (fOn || charUnder) && !fHeld &&
                             fz <= eye[2] + 0.5f && cp3[2] < fz + 0.5f)
                             cp3[2] = fz + 0.5f;
                     }
@@ -2961,7 +2997,7 @@ int main() {
             pc.yaw = cam.yaw;
             pc.pitch = cam.pitch;
             const bool swimming = online && game->mover.swimming();
-            pc.move = !walk ? "fly" : wasFlight ? "taxi" : ride.guid ? "ship" : swimming ? "swim" : onFloor ? "floor" : "walk";
+            pc.move = !walk ? "fly" : wasServerMove ? "spline" : ride.guid ? "ship" : swimming ? "swim" : onFloor ? "floor" : "walk";
             pc.drawDist = cam.drawDist;
             pc.doodadRange = rs.doodadRange;
             pc.doodads = rs.doodads;

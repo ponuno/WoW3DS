@@ -123,6 +123,11 @@ struct WorldObject {
     bool dead() const { return isUnitLike() && fields.size() > UF::UNIT_HEALTH && health() == 0; }
     // Interpolated position at local time nowMs (splines, or players extrapolated from their key state).
     void positionAt(uint32_t nowMs, float out[3], float* orient = nullptr) const;
+    // 7.13: the spline has not reached its end yet (pathActive stays set after it has: a self path is cleared by
+    // GameSession::endSelfServerMove).
+    bool pathRunning(uint32_t nowMs) const {
+        return pathActive && pathDurMs && (int32_t)(nowMs - pathStartMs) < (int32_t)pathDurMs;
+    }
     // Ground speed (yd/s) at local time nowMs: spline speed while a server path runs,
     // key-state speed for players, else 0. Drives walk/run animation choice.
     float groundSpeedAt(uint32_t nowMs) const;

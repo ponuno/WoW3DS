@@ -11,8 +11,22 @@ const W3dUiGlyph* glyphOf(const ui::FontView& f, uint32_t cp) {
     // 7.03: arrows the game's fonts lack (FRIZQT and its fallbacks have ▲ ▼ but no ◀ ▶: the pager showed '?'): the nearest one
     // the font has, an ASCII bracket at worst
     struct Alt { uint32_t cp, a, b; };
-    static const Alt kAlt[] = {{0x25C0, 0x2190, '<'}, {0x25B6, 0x2192, '>'}, {0x25B2, 0x2191, '^'}, {0x25BC, 0x2193, 'v'},
-                               {0x2190, 0x25C0, '<'}, {0x2192, 0x25B6, '>'}, {0x2191, 0x25B2, '^'}, {0x2193, 0x25BC, 'v'}};
+    static const Alt kAlt[] = {
+        // 7.15: accented letters when the font (the stub one / an old ui.w3dp) has no Latin-1 glyphs: the base letter.
+        {0xE1, 'a', 'a'}, {0xE0, 'a', 'a'}, {0xE2, 'a', 'a'}, {0xE4, 'a', 'a'}, {0xE3, 'a', 'a'}, {0xE5, 'a', 'a'},
+        {0xC1, 'A', 'A'}, {0xC0, 'A', 'A'}, {0xC2, 'A', 'A'}, {0xC4, 'A', 'A'}, {0xC3, 'A', 'A'}, {0xC5, 'A', 'A'},
+        {0xE9, 'e', 'e'}, {0xE8, 'e', 'e'}, {0xEA, 'e', 'e'}, {0xEB, 'e', 'e'},
+        {0xC9, 'E', 'E'}, {0xC8, 'E', 'E'}, {0xCA, 'E', 'E'}, {0xCB, 'E', 'E'},
+        {0xED, 'i', 'i'}, {0xEC, 'i', 'i'}, {0xEE, 'i', 'i'}, {0xEF, 'i', 'i'},
+        {0xCD, 'I', 'I'}, {0xCC, 'I', 'I'}, {0xCE, 'I', 'I'}, {0xCF, 'I', 'I'},
+        {0xF3, 'o', 'o'}, {0xF2, 'o', 'o'}, {0xF4, 'o', 'o'}, {0xF6, 'o', 'o'}, {0xF5, 'o', 'o'}, {0xF8, 'o', 'o'},
+        {0xD3, 'O', 'O'}, {0xD2, 'O', 'O'}, {0xD4, 'O', 'O'}, {0xD6, 'O', 'O'}, {0xD5, 'O', 'O'}, {0xD8, 'O', 'O'},
+        {0xFA, 'u', 'u'}, {0xF9, 'u', 'u'}, {0xFB, 'u', 'u'}, {0xFC, 'u', 'u'},
+        {0xDA, 'U', 'U'}, {0xD9, 'U', 'U'}, {0xDB, 'U', 'U'}, {0xDC, 'U', 'U'},
+        {0xF1, 'n', 'n'}, {0xD1, 'N', 'N'}, {0xE7, 'c', 'c'}, {0xC7, 'C', 'C'}, {0xDF, 's', 's'},
+        {0xE6, 'a', 'a'}, {0xC6, 'A', 'A'}, {0x153, 'o', 'o'}, {0x152, 'O', 'O'}, {0xBF, '?', '?'}, {0xA1, '!', '!'},
+        {0x25C0, 0x2190, '<'}, {0x25B6, 0x2192, '>'}, {0x25B2, 0x2191, '^'}, {0x25BC, 0x2193, 'v'},
+        {0x2190, 0x25C0, '<'}, {0x2192, 0x25B6, '>'}, {0x2191, 0x25B2, '^'}, {0x2193, 0x25BC, 'v'}};
     for (const Alt& a : kAlt)
         if (a.cp == cp) {
             if (const W3dUiGlyph* g = f.find(a.a)) return g;

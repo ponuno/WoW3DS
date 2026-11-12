@@ -37,6 +37,7 @@ void trace(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 // ------------------------------------------------------------ settings
 struct Options {
     std::string dataDir;        // loose files extracted from MPQ (WoWee extract_assets)
+    std::string locale = "enUS";   // game language of the DBC texts and the Data/<locale>/ archives (--locale)
     std::string map = "Azeroth";
     int tileX = 32, tileY = 48;                 // current tile (set per tile by the region loop)
     int tileX0 = 32, tileY0 = 48, tileX1 = 32, tileY1 = 48;  // inclusive region
@@ -110,6 +111,13 @@ struct Options {
     bool synthetic = false;
     bool verbose = false;
 };
+
+// ------------------------------------------------------------ game language (7.14)
+// The 1.12 DBC text blocks have eight columns in this order (enUS first); ruRU fan clients replace the English column,
+// enGB is English. --locale picks the column and the Data/<locale>/ MPQ archives.
+int gameLocaleIndex();                 // 0..7 DBC column offset, 0 = English
+const std::string& gameLocaleDir();    // "enUS", "esES", ... ("" / "auto": load every locale archive)
+void setGameLocale(const std::string& code);   // "esES", "deDE", "ruRU", ...; unknown -> English with a warning
 
 // ------------------------------------------------------------ pack writer
 class PackWriter {
@@ -391,6 +399,8 @@ struct DbcTable {
     uint32_t u32(uint32_t r, uint32_t f) const;
     float f32(uint32_t r, uint32_t f) const;
     std::string str(uint32_t r, uint32_t f) const;
+    // 7.14: a localized string group: the selected language's column, else the first non-empty one (English is base 0).
+    std::string loc(uint32_t r, uint32_t base, uint32_t count = 8) const;
 };
 
 // Spell names for the action bar of the 3DS client: spells.txt ("id<TAB>name<TAB>rank" lines, stage 5.8).

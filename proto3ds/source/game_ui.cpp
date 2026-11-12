@@ -37,7 +37,7 @@ const char* kPhrasesRu[] = {"Привет!", "Спасибо!", "Нужна по
 
 }  // namespace
 
-const char* gameUiPhrase(int i) { return ui::g_lang ? kPhrasesRu[i & 7] : kPhrasesEn[i & 7]; }
+const char* gameUiPhrase(int i) { return ui::tr(kPhrasesEn[i & 7], kPhrasesRu[i & 7]); }
 
 void GameUi::reset() {
     rows_.clear();
@@ -52,6 +52,7 @@ void GameUi::reset() {
     selected_ = page_ = 0;
     selTapped_ = false;
     bindArmed_ = false;
+    useOnPick_ = false;
     aim_ = lastHostile_ = 0;
     vendorMode_ = 0; vendorSel_ = -1; vendorPage_ = 0; vendorNpc_ = 0;
     trainerSel_ = -1;
@@ -109,6 +110,7 @@ void GameUi::setTab(Tab t) {
         phrases_ = false;
         socialSel_ = -1;
         bindArmed_ = false;   // 6.57g: a "Bind" begun in the bags must not stay over the next tab (its item's name on the crafting window)
+        useOnPick_ = false;
         drag_ = Drag();
     }
     if (t == Tab::Gear) { tab_ = Tab::Bags; subBags_ = 1; }
@@ -209,7 +211,9 @@ std::vector<uint32_t> GameUi::bookSpells(const w3n::GameSession& g) const {
     // with the weapon in hand; only judged when the pack has the icons at all
     const bool judge = ui::assets().iconCount() > 0;
     for (uint32_t s : g.spells)
-        if (g.spellNames.known(s) && s != w3n::kSpellAttack && !g.spellNames.hidden(s) && (!judge || ui::assets().spellIcon(s).ok() || weaponSpell(g, s, nullptr)))
+        if (g.spellNames.known(s) && s != w3n::kSpellAttack && !g.spellNames.hidden(s) &&
+            (!judge || ui::assets().spellIcon(s).ok() || w3n::weaponSwingSpell(g.spellNames, s) ||
+             (g.spellNames.combat(s) & w3n::SpellNames::kCombatRanged)))
             out.push_back(s);
     std::sort(out.begin() + 1, out.end(), [&](uint32_t a, uint32_t b) {
         std::string na = g.spellNames.name(a), nb = g.spellNames.name(b);
@@ -275,11 +279,13 @@ void GameUi::pressSpell(w3n::GameSession& g, uint32_t spell, const Input& in, Ou
     bool toggleOff = spell == w3n::kSpellAttack && g.attackWanted();
     // soft target: without a living target, the enemy in front (melee range for Attack, 30 yd for spells)
     const bool onSelf = g.castsOnSelf(spell);   // 7.11: a helpful spell with an enemy / nothing selected goes at us
-    if (!toggleOff && !g.spellNames.selfCast(spell) && !onSelf && (!t || t->dead() || t->self)) {
+    const bool corpse = g.corpseSpell(spell);   // 7.13: Cannibalize works on the corpse, do not replace it with an enemy
+    if (!toggleOff && !g.spellNames.selfCast(spell) && !onSelf && !corpse && (!t || t->dead() || t->self)) {
         uint64_t s = g.softEnemy(in.pos, in.yaw, spell == w3n::kSpellAttack ? 8.0f : 30.0f, 1.05f, in.nowMs);
         if (s) { g.setTarget(s, in.nowMs); t = g.objects.find(s); }
     }
-    if (!toggleOff && !g.spellNames.selfCast(spell) && !onSelf && t && t->hasPos && !t->dead() && !t->self) faceTarget(g, in, out);
+    if (!toggleOff && !g.spellNames.selfCast(spell) && !onSelf && t && t->hasPos && !t->self && (!t->dead() || corpse))
+        faceTarget(g, in, out);
     g.castSpell(spell, in.nowMs);
 }
 
@@ -356,6 +362,11 @@ void GameUi::confirmPlace(w3n::GameSession& g, const Input& in, Output& out) {
 // An item that works on a target (quest items): turn to the selected unit first, as for a spell. Without a target it is
 // sent as before (the server answers with its own error); never blocked here: a self spell we do not recognise must work.
 void GameUi::useItemFaced(w3n::GameSession& g, const w3n::InvItem& it, const Input& in, Output& out) {
+    // 7.16: nothing the item could be applied to (a lure without a fishing pole): say so instead of an empty cast
+    if (g.itemOnItemSpell(it.entry) && g.itemOnItemTargets(it).empty()) {
+        refuse(g, tr("No item to use this on.", "Не на что применить."), in.nowMs);
+        return;
+    }
     if (g.itemTargetSpell(it.entry)) {
         const w3n::WorldObject* t = g.objects.find(g.target());
         if (t && !t->self && t->hasPos && (t->type == w3n::ObjType::Unit || t->type == w3n::ObjType::Player)) faceTarget(g, in, out);
@@ -782,7 +793,7 @@ GameUi::Output GameUi::updateInner(w3n::GameSession& g, const Input& in, bool wa
     Output out;
     const w3n::Life life = g.life();
     out.blockMove = life == w3n::Life::Dead;
-    if (in.cfg) { ui::g_lang = in.cfg->lang; bigText_ = in.cfg->bigText; }
+    if (in.cfg) { ui::setLanguage(in.cfg->lang); bigText_ = in.cfg->bigText; }
     barsView_ = in.bars;
     craftTick(g, in);   // 6.38: Create All
     if (!gamePage_) {   // the debug page (console): the top-right corner comes back
@@ -943,6 +954,7 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
                                                      : tr("Tabs switch with combat again", "Вкладки снова переключаются по бою"), now); break;
         case Act::SubView:
             bindArmed_ = false;
+            useOnPick_ = false;
             if (tab_ == Tab::Bags && arg == 10) cycleBagFilter(g);   // 6.95: the bag chip
             else if (tab_ == Tab::Bags) { subBags_ = arg; selected_ = page_ = 0; }
             else if (tab_ == Tab::Spells) { subSpells_ = arg; page_ = 0; talentSel_ = -1; skillSel_ = 0; craftPick_ = false; }
@@ -1299,7 +1311,8 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
                 case 95: case 96: case 97: in.cfg->topMode = arg - 95; out.graphicsChanged = true; break;
                 case 90: in.cfg->doodads = !in.cfg->doodads; out.graphicsChanged = true; break;
                 case 170: case 171: case 172: in.cfg->effects = arg - 170; out.graphicsChanged = true; break;
-                case 100: case 101: in.cfg->lang = arg - 100; ui::g_lang = in.cfg->lang; break;
+                case 100: in.cfg->lang = (in.cfg->lang + 1) % ui::kLangCount; ui::setLanguage(in.cfg->lang); break;
+            case 101: case 102: case 103: case 104: in.cfg->lang = arg - 100; ui::setLanguage(in.cfg->lang); break;
                 case 110: in.cfg->bigText = !in.cfg->bigText; break;
                 case 120: in.cfg->dimHud = !in.cfg->dimHud; break;
                 case 121: in.cfg->chatBubbles = !in.cfg->chatBubbles; break;
@@ -1327,14 +1340,28 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
                 bindArmed_ = true;
                 bindWhat_ = {ActionSlot::Item, it.entry};
                 hint("Press a button (or tap a bar cell) for " + g.itemName(it.entry), now);
-            } else if (act == Act::Use) useItemFaced(g, it, in, out);
-            else if (act == Act::Equip) g.equipItem(it, now);
+            } else if (act == Act::Use) {
+                // 7.16: an item applied to another item: one fitting target is used at once, several open the picker
+                if (g.itemOnItemSpell(it.entry) && g.itemOnItemTargets(it).size() > 1) {
+                    useOnFrom_ = it;
+                    useOnPick_ = true;
+                    page_ = 0;
+                } else useItemFaced(g, it, in, out);
+            } else if (act == Act::Equip) g.equipItem(it, now);
             else if (act == Act::Unequip) g.unequipItem(it, now);
             else if (!confirmed_) confirm(std::string(tr("Destroy ", "Уничтожить ")) + g.itemName(it.entry) +
                                           (it.count > 1 ? " x" + std::to_string(it.count) : std::string()) + "?", Act::Destroy, 0);
             else g.destroyItem(it, now);
             break;
         }
+        // 7.16: the item chosen for a use-on-item spell (a lure on the fishing pole, a weapon oil on a weapon)
+        case Act::UseOnItem: {
+            std::vector<w3n::InvItem> targets = g.itemOnItemTargets(useOnFrom_);
+            if (arg >= 0 && arg < (int)targets.size()) g.useItemOnItem(useOnFrom_, targets[arg].guid, now);
+            useOnPick_ = false;
+            break;
+        }
+        case Act::UseOnBack: useOnPick_ = false; break;
         // ---- chat (UI stage 3)
         case Act::ChatChannel: {
             chatChannel_ = arg;

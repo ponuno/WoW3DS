@@ -44,27 +44,20 @@ uint32_t nameTint(const std::string& s) {
 
 ui::Font GameUi::listFont() const { return bigText_ ? Font::Normal : Font::Small; }
 
-bool GameUi::weaponSpell(const w3n::GameSession& g, uint32_t spell, int* which) {
-    int w = -1;
-    switch (spell) {
-        case w3n::kSpellAttack: w = 0; break;
-        case 75: case 3018: case 2480: case 7918: case 7919: case 2764: case 3137: case 10277: case 5019: w = 1; break;
-        default:
-            if (spell && (g.spellNames.combat(spell) & w3n::SpellNames::kCombatRanged)) w = 1;
-    }
-    if (which) *which = w;
-    return w >= 0;
-}
-
 ui::Image GameUi::spellIcon(uint32_t spell) const {
     // 6.99: the weapon in hand first, as the game does - Attack and Shoot have icons of their own in SpellIcon.dbc (a generic
-    // fist / placeholder), which the game never shows while a weapon is held; the spell's own icon only without one
-    if (gameSess_ && (spell == w3n::kSpellAttack || weaponSpell(*gameSess_, spell, nullptr))) {
-        const int w = spell == w3n::kSpellAttack ? 0 : 1;
-        if (weaponIcon_[w].ok()) return weaponIcon_[w];
-    }
+    // fist / placeholder), which the game never shows while a weapon is held; the spell's own icon only without one.
+    // 7.13: only the actual weapon swings take the weapon icon - Arcane Shot, Serpent Sting and the other ranged abilities
+    // keep theirs (the server marks every ranged ability for the shooting animation, not only Auto Shot / Shoot).
+    int w = -1;
+    const bool weaponSwing = gameSess_ && w3n::weaponSwingSpell(gameSess_->spellNames, spell, &w);
+    if (weaponSwing && weaponIcon_[w].ok()) return weaponIcon_[w];
     ui::Image im = assets().spellIcon(spell);
     if (im.ok()) return im;
+    // an old / partial pack without this spell's picture: a ranged ability still shows the ranged weapon rather than nothing
+    if (gameSess_ && spell != w3n::kSpellAttack && weaponIcon_[1].ok() &&
+        (gameSess_->spellNames.combat(spell) & w3n::SpellNames::kCombatRanged))
+        return weaponIcon_[1];
     if (spell == w3n::kSpellAttack) im = assets().namedIcon("attack");
     return im;
 }
@@ -441,7 +434,7 @@ bool GameUi::draw(w3n::GameSession& g, const Input& in, float fps, uint32_t late
     dirty_ = false;
     lastChat_ = g.chatCount;
     lastDrawMs_ = in.nowMs;
-    if (in.cfg) { ui::g_lang = in.cfg->lang; bigText_ = in.cfg->bigText; }
+    if (in.cfg) { ui::setLanguage(in.cfg->lang); bigText_ = in.cfg->bigText; }
     barsView_ = in.bars;
     list_.clear();
     buttons_.clear();

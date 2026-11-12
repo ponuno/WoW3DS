@@ -1,6 +1,7 @@
 #!/bin/bash
 # w3dconv --texts-only on synthetic DBCs (stages 5.12 / 5.13b): factions.txt must round-trip the hand-made
 # net/tests/data/factions_test.txt, spells.txt must name the trainer's teaching spell after the spell it teaches.
+# 7.14: --locale esES takes the Spanish columns of the same DBCs; --locale enUS keeps English.
 #   run_text_tests.sh <build dir with w3dconv>
 set -e
 T=$(cd "$(dirname "$0")" && pwd)
@@ -29,6 +30,9 @@ diff <(grep "^S" "$OUT/sd/skills.txt") "$OUT/skills.expect" && echo "SKILLS: PAS
 # UI stage 10: ground spells (Blizzard by its Targets mask, the bomb by its implicit target; not the nova, not the bolt)
 printf '@ground\t10\t30.0\t10.0\n@ground\t4064\t15.0\t5.0\n' > "$OUT/ground.expect"
 diff <(grep "^@ground" "$OUT/sd/spells.txt") "$OUT/ground.expect" && echo "GROUND SPELLS: PASS"
+# 7.16: an item used on another item (Shiny Bauble on a fishing pole): class, subclass mask, inventory mask, main hand
+printf '@item\t8087\t2\t1048576\t0\t1\n@item\t2803\t2\t128\t0\t1\n' > "$OUT/item.expect"
+diff <(grep "^@item" "$OUT/sd/spells.txt") "$OUT/item.expect" && echo "ITEM-TARGET SPELLS: PASS"
 # 5.48: spells cast without a unit target
 printf '@self\t6343\n' > "$OUT/self.expect"
 diff <(grep "^@self" "$OUT/sd/spells.txt") "$OUT/self.expect" && echo "SELF-CAST SPELLS: PASS"
@@ -47,4 +51,24 @@ want = {78: "A strike that increases melee damage by 11.", 1127: "Well Fed for 1
 assert got == want, (got, want)
 assert list(got) == sorted(got), "not sorted"
 print("SPELL DESCRIPTIONS: PASS")
+PY
+# 7.14: --locale picks the Spanish text column (the DBCs also keep the English one)
+mkdir -p "$OUT/data_es" "$OUT/sd_es" "$OUT/sd_en"
+python3 "$T/gen_text_dbc.py" "$T/../../net/tests/data/factions_test.txt" "$OUT/data_es" esES > /dev/null
+"$B/w3dconv" --data "$OUT/data_es" --locale esES --texts-only -o "$OUT/sd_es/test.w3dp" > /dev/null
+"$B/w3dconv" --data "$OUT/data_es" --locale enUS --texts-only -o "$OUT/sd_en/test.w3dp" > /dev/null
+grep -q "$(printf '78\tES: Heroic Strike\tES: Rank 1')" "$OUT/sd_es/spells.txt" && echo "LOCALE SPELL NAMES: PASS"
+grep -q "$(printf 'S\t43\t6\tES: Swords\t')" "$OUT/sd_es/skills.txt" && echo "LOCALE SKILLS: PASS"
+grep -q "ES:" "$OUT/sd_es/factions.txt" && echo "LOCALE FACTIONS: PASS"
+grep -q "$(printf '78\tHeroic Strike\tRank 1')" "$OUT/sd_en/spells.txt" && ! grep -q "ES:" "$OUT/sd_en/spells.txt" && echo "LOCALE ENGLISH FALLBACK: PASS"
+python3 - "$OUT/sd_es/spelldesc.bin" <<'PY'
+import struct, sys
+b = open(sys.argv[1], "rb").read()
+n = struct.unpack_from("<I", b, 8)[0]
+got = {}
+for k in range(n):
+    i, off, ln = struct.unpack_from("<III", b, 12 + k * 12)
+    got[i] = b[off:off + ln].decode()
+assert got.get(78, "").startswith("ES: A strike that increases melee damage by 11."), got
+print("LOCALE SPELL DESCRIPTIONS: PASS")
 PY
