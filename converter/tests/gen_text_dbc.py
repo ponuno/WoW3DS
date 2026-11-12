@@ -104,6 +104,15 @@ if locale == "esES":   # 7.14: name 120+6, rank 129+6, description 138+6, toolti
         if tip: r[153] = sref("ES: " + tip)
 open(os.path.join(out, "DBFilesClient", "SpellCastTimes.dbc"), "wb").write(dbc(4, [[1, 0, 0, 0], [4, 3500, 0, 0]], b"\0"))
 open(os.path.join(out, "DBFilesClient", "Spell.dbc"), "wb").write(dbc(173, spells, strings))
+# 7.16: item enchantment names for the item cards (SpellItemEnchantment.dbc, 24 fields, name column 13).
+# Shiny Bauble applies enchant 263, whose display name is "Fishing Lure +25".
+_se = b"\0"
+def _se_s(t):
+    global _se
+    off = len(_se); _se += t.encode() + b"\0"; return off
+_se_row = [0] * 24
+_se_row[0] = 263; _se_row[1] = 3; _se_row[10] = 8082; _se_row[13] = _se_s("Fishing Lure +25")
+open(os.path.join(out, "DBFilesClient", "SpellItemEnchantment.dbc"), "wb").write(dbc(24, [_se_row], _se))
 open(os.path.join(out, "DBFilesClient", "SpellDuration.dbc"), "wb").write(dbc(4, [[21, 120000, 0, 120000], [5, 15000, 0, 15000]], b"\0"))
 open(os.path.join(out, "DBFilesClient", "SpellRange.dbc"), "wb").write(
     dbc(3, [[1, 0.0, 0.0], [4, 0.0, 30.0], [5, 0.0, 15.0], [35, 8.0, 35.0]], b"\0"))

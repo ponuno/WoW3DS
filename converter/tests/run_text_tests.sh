@@ -11,7 +11,7 @@ rm -rf "$OUT" && mkdir -p "$OUT/data" "$OUT/sd"
 python3 "$T/gen_text_dbc.py" "$T/../../net/tests/data/factions_test.txt" "$OUT/data"
 "$B/w3dconv" --data "$OUT/data" --texts-only -o "$OUT/sd/test.w3dp"
 diff <(grep -v '^#' "$OUT/sd/factions.txt") <(grep -v '^#' "$T/../../net/tests/data/factions_test.txt") && echo "FACTIONS ROUND TRIP: PASS"
-printf '78\tHeroic Strike\tRank 1\n284\tHeroic Strike\tRank 2\n6673\tBattle Shout\tRank 1\n1752\tSinister Strike\tRank 1\n1776\tGouge\tRank 1\n3044\tArcane Shot\tRank 1\n75\tAuto Shot\t\n7863\tEnchant Boots - Minor Stamina\t\n2657\tSmelt Copper\t\n7380\tHeroic Strike\tRank 2\n1127\tWell Fed\t\n' > "$OUT/spells.expect"
+printf '78\tHeroic Strike\tRank 1\n284\tHeroic Strike\tRank 2\n6673\tBattle Shout\tRank 1\n1752\tSinister Strike\tRank 1\n1776\tGouge\tRank 1\n3044\tArcane Shot\tRank 1\n75\tAuto Shot\t\n7863\tEnchant Boots - Minor Stamina\t\n2657\tSmelt Copper\t\n7380\tHeroic Strike\tRank 2\n1127\tWell Fed\t\n8087\tShiny Bauble\t\n' > "$OUT/spells.expect"
 diff <(grep -v "^@" "$OUT/sd/spells.txt") "$OUT/spells.expect" && echo "SPELL NAMES + TRAINER SPELLS: PASS"
 printf '@cd\t100\t15000\t0\t0\t0\n@cd\t439\t0\t4\t120000\t0\n@cd\t1784\t10000\t0\t0\t1\n' > "$OUT/cd.expect"
 diff <(grep "^@cd" "$OUT/sd/spells.txt") "$OUT/cd.expect" && echo "SPELL COOLDOWNS: PASS"
@@ -30,6 +30,8 @@ diff <(grep "^S" "$OUT/sd/skills.txt") "$OUT/skills.expect" && echo "SKILLS: PAS
 # UI stage 10: ground spells (Blizzard by its Targets mask, the bomb by its implicit target; not the nova, not the bolt)
 printf '@ground\t10\t30.0\t10.0\n@ground\t4064\t15.0\t5.0\n' > "$OUT/ground.expect"
 diff <(grep "^@ground" "$OUT/sd/spells.txt") "$OUT/ground.expect" && echo "GROUND SPELLS: PASS"
+# 7.16: item enchantment names for the item cards (Shiny Bauble -> the pole shows "Fishing Lure +25")
+grep -q "$(printf '@enchant\t263\tFishing Lure +25')" "$OUT/sd/spells.txt" && echo "ITEM ENCHANTS: PASS"
 # 7.16: an item used on another item (Shiny Bauble on a fishing pole): class, subclass mask, inventory mask, main hand
 printf '@item\t8087\t2\t1048576\t0\t1\n@item\t2803\t2\t128\t0\t1\n' > "$OUT/item.expect"
 diff <(grep "^@item" "$OUT/sd/spells.txt") "$OUT/item.expect" && echo "ITEM-TARGET SPELLS: PASS"
@@ -55,6 +57,13 @@ PY
 # 7.14: --locale picks the Spanish text column (the DBCs also keep the English one)
 mkdir -p "$OUT/data_es" "$OUT/sd_es" "$OUT/sd_en"
 python3 "$T/gen_text_dbc.py" "$T/../../net/tests/data/factions_test.txt" "$OUT/data_es" esES > /dev/null
+# 7.16: the GUI's Check available languages (DBC text columns)
+"$B/w3dconv" --data "$OUT/data" --list-locales 2>/dev/null | grep -E '^[a-z]{2}[A-Z]{2}$' > "$OUT/locales_en.txt"
+printf 'enUS\n' > "$OUT/locales_en.expect"
+diff "$OUT/locales_en.txt" "$OUT/locales_en.expect" && echo "AVAILABLE LANGUAGES (en): PASS"
+"$B/w3dconv" --data "$OUT/data_es" --list-locales 2>/dev/null | grep -E '^[a-z]{2}[A-Z]{2}$' > "$OUT/locales_es.txt"
+printf 'enUS\nesES\n' > "$OUT/locales_es.expect"
+diff "$OUT/locales_es.txt" "$OUT/locales_es.expect" && echo "AVAILABLE LANGUAGES (es): PASS"
 "$B/w3dconv" --data "$OUT/data_es" --locale esES --texts-only -o "$OUT/sd_es/test.w3dp" > /dev/null
 "$B/w3dconv" --data "$OUT/data_es" --locale enUS --texts-only -o "$OUT/sd_en/test.w3dp" > /dev/null
 grep -q "$(printf '78\tES: Heroic Strike\tES: Rank 1')" "$OUT/sd_es/spells.txt" && echo "LOCALE SPELL NAMES: PASS"

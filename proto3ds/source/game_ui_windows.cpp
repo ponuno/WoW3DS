@@ -64,8 +64,8 @@ std::string timeLeft(uint32_t ms) {
 void GameUi::drawDeath(w3n::GameSession& g, const Input& in) {
     window(8, kTop + 4, kTouchW - 16, kContentH - 8, true);
     const w3n::Life life = g.life();
-    const bool forever = in.cfg && in.cfg->scheme == PadScheme::Forever;
-    const char* useKey = forever ? " (Y)" : " (A)";
+    const bool new3ds = in.cfg && in.cfg->scheme == PadScheme::New3DS;
+    const char* useKey = new3ds ? " (Y)" : " (A)";
     char b[96];
     int y = kTop + 10;
     int answerY = y + 100;   // where an offer / the healer's question stands
@@ -347,13 +347,14 @@ void GameUi::drawItemInfo(w3n::GameSession& g) {
     if (!info) {
         list_.text(14, kTop + 14, tr("(asking the server...)", "(запрос к серверу...)"), kGrey, true, Font::Normal);
     } else {
+        if (infoItem_.guid) g.refreshItem(infoItem_);   // 7.16: the enchant timers count down while the card is open
         iconBox(12, kTop + 10, 32, itemIcon(g, infoEntry_), info->name, qualityColor(info->quality));
         std::vector<std::string> lines = w3n::itemTooltip(*info, infoItem_.guid ? &infoItem_ : nullptr, g.spellNames, &g.spellDesc);
         int y = kTop + 10;
         for (size_t i = 0; i < lines.size(); ++i) {
             const std::string& l = lines[i];
             uint32_t c = i == 0 ? qualityColor(info->quality)
-                       : l.rfind("Use:", 0) == 0 || l.rfind("Equip:", 0) == 0 || l.rfind("Chance", 0) == 0 ? kGreen
+                       : l.rfind("Use:", 0) == 0 || l.rfind("Equip:", 0) == 0 || l.rfind("Chance", 0) == 0 || l.rfind("Enchant:", 0) == 0 ? kGreen
                        : l[0] == '"' ? kYellow : l.rfind("Sell", 0) == 0 || l.rfind("No sell", 0) == 0 ? kGrey
                        : l.rfind("Requires", 0) == 0 && g.selfObject() && info->requiredLevel > g.selfObject()->level() ? kRed : kText;
             Font f = i == 0 ? Font::Normal : Font::Small;
@@ -378,12 +379,13 @@ void GameUi::drawItemCard(w3n::GameSession& g) {
     if (!info) {
         rows.push_back({tr("(asking the server...)", "(запрос к серверу...)"), kGrey, Font::Normal});
     } else {
+        if (infoItem_.guid) g.refreshItem(infoItem_);   // 7.16: the enchant timers count down while the card is open
         std::vector<std::string> lines = w3n::itemTooltip(*info, infoItem_.guid ? &infoItem_ : nullptr, g.spellNames, &g.spellDesc);
         for (size_t i = 0; i < lines.size(); ++i) {
             const std::string& l = lines[i];
             if (l.empty()) continue;
             const uint32_t c = i == 0 ? qualityColor(info->quality)
-                             : l.rfind("Use:", 0) == 0 || l.rfind("Equip:", 0) == 0 || l.rfind("Chance", 0) == 0 ? kGreen
+                             : l.rfind("Use:", 0) == 0 || l.rfind("Equip:", 0) == 0 || l.rfind("Chance", 0) == 0 || l.rfind("Enchant:", 0) == 0 ? kGreen
                              : l[0] == '"' ? kYellow : l.rfind("Sell", 0) == 0 || l.rfind("No sell", 0) == 0 ? kGrey
                              : l.rfind("Requires", 0) == 0 && g.selfObject() && info->requiredLevel > g.selfObject()->level() ? kRed : kText;
             const Font f = i == 0 ? Font::Normal : Font::Small;

@@ -31,12 +31,13 @@ bool PadConfig::load(const char* path) {
     char key[32];
     float v;
     while (fscanf(f, "%31s %f", key, &v) == 2) {
-        if (!strcmp(key, "scheme")) scheme = v >= 0.5f ? PadScheme::Classic : PadScheme::Forever;
+        if (!strcmp(key, "scheme")) scheme = v >= 0.5f ? PadScheme::Old3DS : PadScheme::New3DS;
         else if (!strcmp(key, "dead") && v >= 0.02f && v <= 0.4f) stickDead = v;
         else if (!strcmp(key, "run") && v >= 0.1f && v <= 1.0f) runThreshold = v;
         else if (!strcmp(key, "back") && v >= 0.1f && v <= 1.0f) backThreshold = v;
         else if (!strcmp(key, "face")) faceMovement = v != 0;
         else if (!strcmp(key, "toggle")) toggleModifiers = v != 0;
+        else if (!strcmp(key, "dpadspells")) dpadSpells = v != 0;   // 7.17: the Old 3DS D-pad as the hotbar
         else if (!strcmp(key, "invert")) invertY = v != 0;
         else if (!strcmp(key, "camspeed") && v >= 0.3f && v <= 6.0f) camSpeed = v;
         else if (!strcmp(key, "tracker")) questTracker = v != 0;
@@ -79,9 +80,9 @@ bool PadConfig::load(const char* path) {
 
 std::string PadConfig::text() const {
     char b[1024];
-    int n = snprintf(b, sizeof b, "scheme %d\ndead %.2f\nrun %.2f\nback %.2f\nface %d\ntoggle %d\ninvert %d\ncamspeed %.2f\ntracker %d\n",
-            scheme == PadScheme::Classic ? 1 : 0, stickDead, runThreshold, backThreshold, faceMovement ? 1 : 0,
-            toggleModifiers ? 1 : 0, invertY ? 1 : 0, camSpeed, questTracker ? 1 : 0);
+    int n = snprintf(b, sizeof b, "scheme %d\ndead %.2f\nrun %.2f\nback %.2f\nface %d\ntoggle %d\ndpadspells %d\ninvert %d\ncamspeed %.2f\ntracker %d\n",
+            scheme == PadScheme::Old3DS ? 1 : 0, stickDead, runThreshold, backThreshold, faceMovement ? 1 : 0,
+            toggleModifiers ? 1 : 0, dpadSpells ? 1 : 0, invertY ? 1 : 0, camSpeed, questTracker ? 1 : 0);
     n += snprintf(b + n, sizeof b - (size_t)n, "language %d\ndist %d\ncrowd %d\ndoodads %d\nbigtext %d\ndimhud %d\nautotabs %d\nbubbles %d\n", lang, drawDist, crowd, doodads ? 1 : 0,
             bigText ? 1 : 0, dimHud ? 1 : 0, autoTabs ? 1 : 0, chatBubbles ? 1 : 0);
     n += snprintf(b + n, sizeof b - (size_t)n, "music %d\nsfx %d\nambience %d\ntopmode %d\neffects %d\nstats %d\nground %d\nperflog %d\ngpuearly %d\nvsync %d\nfadein %d\nhorizon %d\nstaticbatch %d\nlodpx %.2f\ndoodadrange %.1f\ndoodadwide %.2f\npvs %d\ninteriors %d\nhlod %d\n", musicVol, sfxVol,
@@ -121,13 +122,13 @@ PadOut Pad::update(const PadInput& in, const PadConfig& cfg, bool inCombat, floa
         i.down &= ~(u32)(KEY_DLEFT | KEY_DRIGHT | KEY_DUP | KEY_DDOWN);
         i.held &= ~(u32)(KEY_DLEFT | KEY_DRIGHT | KEY_DUP | KEY_DDOWN);
     }
-    PadOut o = cfg.scheme == PadScheme::Classic ? classic(i, cfg, dt) : forever(i, cfg, inCombat, camYaw, dt);
+    PadOut o = cfg.scheme == PadScheme::Old3DS ? old3ds(i, cfg, dt) : new3ds(i, cfg, inCombat, camYaw, dt);
     o.tabDelta = tabs.tabDelta;
     o.freeCamera = tabs.freeCamera;
     return o;
 }
 
-PadOut Pad::forever(const PadInput& in, const PadConfig& cfg, bool inCombat, float camYaw, float dt) {
+PadOut Pad::new3ds(const PadInput& in, const PadConfig& cfg, bool inCombat, float camYaw, float dt) {
     PadOut o;
     const u32 d = in.down, h = in.held;
     // modifiers: held (default) or press-to-toggle
@@ -211,29 +212,57 @@ PadOut Pad::forever(const PadInput& in, const PadConfig& cfg, bool inCombat, flo
     return o;
 }
 
-PadOut Pad::classic(const PadInput& in, const PadConfig& cfg, float dt) {
+PadOut Pad::old3ds(const PadInput& in, const PadConfig& cfg, float dt) {
     PadOut o;
     const u32 d = in.down, h = in.held;
     o.jump = d & KEY_B;
     o.ascend = (h & KEY_B) != 0;
-    o.nextTarget = d & KEY_L;
     o.toggleAttack = d & KEY_R;
-    o.chat = d & KEY_Y;
     o.interact = d & KEY_A;
-    o.nextSet = d & KEY_X;
     o.menu = d & KEY_START;
-    // camera = the character: C-Stick and D-pad left/right look, Circle Pad left/right turns
+    if (d & KEY_X) oldSet_ = (oldSet_ + 1) % kPadSets;
+    o.set = oldSet_;
+    // camera = the character: the C-Stick and (unless the D-pad is the hotbar) D-pad left/right look, D-pad up/down zoom
     float look = 0, lookY = 0;
     if (fabsf(in.rx) > cfg.stickDead) look = in.rx;
     if (fabsf(in.ry) > cfg.stickDead) lookY = in.ry;
-    if (h & KEY_DLEFT) look = -1;
-    if (h & KEY_DRIGHT) look = 1;
-    if (h & KEY_DUP) o.zoom = -1;
-    if (h & KEY_DDOWN) o.zoom = 1;
+    bool holdLook = false;
+    if (!cfg.dpadSpells) {
+        if (h & KEY_DLEFT) look = -1;
+        if (h & KEY_DRIGHT) look = 1;
+        if (h & KEY_DUP) o.zoom = -1;
+        if (h & KEY_DDOWN) o.zoom = 1;
+        o.nextTarget = d & KEY_L;
+        o.chat = d & KEY_Y;
+    } else {
+        // D-pad = hotbar: hold Y to look around with the Circle Pad (the D-pad then looks / zooms as before), a tap of
+        // Y is chat
+        holdLook = (h & KEY_Y) != 0;
+        if (holdLook) {
+            if (fabsf(in.lx) > cfg.stickDead) { look = in.lx; yLook_ = true; }
+            if (fabsf(in.ly) > cfg.stickDead) { lookY = in.ly; yLook_ = true; }
+            if (h & KEY_DLEFT) { look = -1; yLook_ = true; }
+            if (h & KEY_DRIGHT) { look = 1; yLook_ = true; }
+            if (h & KEY_DUP) { o.zoom = -1; yLook_ = true; }
+            if (h & KEY_DDOWN) { o.zoom = 1; yLook_ = true; }
+        } else if (d & KEY_Y) {
+            yLook_ = false;
+        }
+        o.nextTarget = d & KEY_L;
+        if ((in.up & KEY_Y) && yDown_) {
+            if (!yLook_) o.chat = true;
+            yLook_ = false;
+        }
+        yDown_ = holdLook;
+    }
     float turn = fabsf(in.lx) > cfg.stickDead ? in.lx : 0.0f;
+    if (holdLook) turn = 0;   // the stick is the camera now, not the character
     o.camYaw = -look * cfg.camSpeed * dt - turn * 2.2f * dt;
     o.camPitch = (cfg.invertY ? -lookY : lookY) * 1.2f * dt;
     o.turn = -turn;
+    if (holdLook) return o;
+    for (int b = 0; b < 4 && o.slot < 0; ++b)   // D-pad = spells: 4 slots of the set X picked
+        if (cfg.dpadSpells && (d & kDpad[b])) o.slot = o.set * kPadButtons + b;
     if (in.ly > kDirCut) o.dir = w3n::MoveFlag::Forward;
     else if (in.ly < -kDirCut) o.dir = w3n::MoveFlag::Backward;
     return o;

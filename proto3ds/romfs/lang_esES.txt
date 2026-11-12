@@ -728,3 +728,5 @@ Bound to 	Atado a
 Cleared 	Borrado 
 Press a button (or tap a bar cell) for 	Presione un botón (o toque una celda de barra) para 
 You need 	necesitas 
+D-pad	Cruceta
+Spells: hold Y to look, tap Y to chat	Hechizos: mantén Y para mirar, pulsa Y: chat

@@ -11,6 +11,9 @@
 
 using namespace w3d;
 
+// 7.16: --list-locales order (the same labels the GUI shows).
+static const char* const kLocaleOrder[] = {"enUS", "enGB", "koKR", "frFR", "deDE", "zhCN", "zhTW", "esES", "esMX", "ruRU"};
+
 static void usage() {
     std::puts(
         "usage:\n"
@@ -82,6 +85,7 @@ static void usage() {
         "  --water-tint F        0..1 how much the Light.dbc water colour tints the texture (default: by the texture)\n"
         "  --no-wmo-water        leave out the liquids of buildings (canals, fountains, dungeon pools)\n"
         "  --texts-only          only write spells.txt and factions.txt next to -o (seconds, no tiles)\n"
+        "  --list-locales        print the game languages this client really has (for the GUI), one code per line\n"
         "  --all                 EVERYTHING in one run into the folder of -o: ui.w3dp + texts, sound/, every map of Map.dbc\n"
         "                        (map<ID>.w3dp with the tiles only) and ONE shared asset pool common.w3dp (+ common1.w3dp ...)\n"
         "                        with all textures, models, buildings, creatures, players, items, ships (each stored once)\n"
@@ -106,7 +110,7 @@ int main(int argc, char** argv) {
     w3d::installCrashGuard();
     Options o;
     std::string info;
-    bool textsOnly = false, uiMode = false, soundMode = false, spellFxMode = false, skyboxMode = false;
+    bool textsOnly = false, uiMode = false, soundMode = false, spellFxMode = false, skyboxMode = false, listLocales = false;
     std::vector<uint32_t> explainIds;
     SoundOptions so;
     UiOptions uo;
@@ -226,6 +230,7 @@ int main(int argc, char** argv) {
         else if (a == "--no-wmo-water") o.noWmoWater = true;
         else if (a == "--info") info = next();
         else if (a == "--texts-only") textsOnly = true;
+        else if (a == "--list-locales") listLocales = true;
         else if (a == "--ui") uiMode = true;
         else if (a == "--sound") soundMode = true;
         else if (a == "--spell-fx") spellFxMode = true;
@@ -281,6 +286,18 @@ int main(int argc, char** argv) {
         progress(true, "opening the game data in %s ...", o.dataDir.c_str());
         if (cascDir.empty() && !data.open(o.dataDir)) { std::fprintf(stderr, "no files under %s\n", o.dataDir.c_str()); return 1; }
     }
+    if (listLocales) {   // 7.16: the GUI's "Check available languages"
+        std::vector<std::string> found;
+        if (cascDir.empty()) found = availableLocales(data);
+        std::error_code ec;
+        for (const char* code : kLocaleOrder)
+            if (!o.dataDir.empty() && std::filesystem::is_directory(std::filesystem::path(o.dataDir) / code, ec))
+                found.push_back(code);
+        for (const char* code : kLocaleOrder)
+            if (std::find(found.begin(), found.end(), code) != found.end()) std::puts(code);
+        if (found.empty() && !o.dataDir.empty()) std::puts("enUS");
+        return 0;
+    }
     auto textDir = [&]() {
         size_t cut = o.out.find_last_of("\\/");
         return cut == std::string::npos ? std::string() : o.out.substr(0, cut + 1);
@@ -329,6 +346,7 @@ int main(int argc, char** argv) {
         o.out = uo.out;
         bool ok = convertUi(uo, data, o.verbose);
         exportSpellNames(data, textDir() + "spells.txt", o.verbose);
+        exportEnchants(data, textDir() + "spells.txt", o.verbose);
         exportSpellDescriptions(data, textDir() + "spelldesc.bin", o.verbose);
         exportFactions(data, textDir() + "factions.txt", o.verbose);
         exportTalents(data, textDir() + "talents.txt", o.verbose);
@@ -348,6 +366,7 @@ int main(int argc, char** argv) {
     if (textsOnly) {   // stage 5.12: the text files of the 3DS client without converting anything else
         if (o.synthetic) { std::fputs("--texts-only needs --data\n", stderr); return 1; }
         bool spells = exportSpellNames(data, textDir() + "spells.txt", o.verbose);
+        exportEnchants(data, textDir() + "spells.txt", o.verbose);
         exportSpellDescriptions(data, textDir() + "spelldesc.bin", o.verbose);
         bool facts = exportFactions(data, textDir() + "factions.txt", o.verbose);
         exportTalents(data, textDir() + "talents.txt", o.verbose);
@@ -431,6 +450,7 @@ int main(int argc, char** argv) {
     }
     if (o.creatures && !o.synthetic) {   // the 3DS action bar reads spells.txt next to the pack, the reactions factions.txt
         exportSpellNames(data, textDir() + "spells.txt", o.verbose);
+        exportEnchants(data, textDir() + "spells.txt", o.verbose);
         exportSpellDescriptions(data, textDir() + "spelldesc.bin", o.verbose);
         exportFactions(data, textDir() + "factions.txt", o.verbose);
         exportTalents(data, textDir() + "talents.txt", o.verbose);

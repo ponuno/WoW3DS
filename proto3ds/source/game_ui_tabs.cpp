@@ -1615,22 +1615,33 @@ void GameUi::drawSettings(const Input& in) {
     char b[16];
     if (subSettings_ == 0) {
         label(tr("Scheme", "Схема"));
-        opt(120, 96, "Forever", c.scheme == PadScheme::Forever, 0);
-        opt(220, 96, "Classic", c.scheme == PadScheme::Classic, 1);
+        opt(120, 96, "New 3DS", c.scheme == PadScheme::New3DS, 0);
+        opt(220, 96, "Old 3DS", c.scheme == PadScheme::Old3DS, 1);
         y += 21;
-        label(tr("Run from", "Бег от"));
-        opt(120, 62, "0.3", fabsf(c.runThreshold - 0.3f) < 0.05f, 10);
-        opt(186, 62, "0.5", fabsf(c.runThreshold - 0.5f) < 0.05f, 11);
-        opt(252, 62, "0.7", fabsf(c.runThreshold - 0.7f) < 0.05f, 12);
-        y += 21;
-        label(tr("Face movement", "Лицом к ходу"));
-        opt(120, 96, tr("On", "Вкл"), c.faceMovement, 20);
-        opt(220, 96, tr("Off", "Выкл"), !c.faceMovement, 21);
-        y += 21;
-        label("ZL / ZR");
-        opt(120, 96, tr("Hold", "Удерживать"), !c.toggleModifiers, 30);
-        opt(220, 96, tr("Toggle", "Переключать"), c.toggleModifiers, 31);
-        y += 21;
+        if (c.scheme == PadScheme::Old3DS) {   // 7.17: the Old 3DS D-pad can be the hotbar instead of the camera
+            label(tr("D-pad", "Крестовина"));
+            opt(120, 96, tr("Camera", "Камера"), !c.dpadSpells, 41);
+            opt(220, 96, tr("Spells", "Заклинания"), c.dpadSpells, 42);
+            y += 21;
+            list_.textFit(6, y + 2, tr("Spells: hold Y to look, tap Y to chat",
+                                       "Заклинания: Y — смотреть, короткое Y — чат"),
+                          310, kGrey, false, Font::Small);
+            y += 21;
+        } else {
+            label(tr("Run from", "Бег от"));
+            opt(120, 62, "0.3", fabsf(c.runThreshold - 0.3f) < 0.05f, 10);
+            opt(186, 62, "0.5", fabsf(c.runThreshold - 0.5f) < 0.05f, 11);
+            opt(252, 62, "0.7", fabsf(c.runThreshold - 0.7f) < 0.05f, 12);
+            y += 21;
+            label(tr("Face movement", "Лицом к ходу"));
+            opt(120, 96, tr("On", "Вкл"), c.faceMovement, 20);
+            opt(220, 96, tr("Off", "Выкл"), !c.faceMovement, 21);
+            y += 21;
+            label("ZL / ZR");
+            opt(120, 96, tr("Hold", "Удерживать"), !c.toggleModifiers, 30);
+            opt(220, 96, tr("Toggle", "Переключать"), c.toggleModifiers, 31);
+            y += 21;
+        }
         label(tr("Camera", "Камера"));
         opt(120, 96, tr("Invert Y", "Инверсия Y"), c.invertY, 40);
         btn(220, y, 30, 19, "-", Act::Setting, 50, Style::Normal);

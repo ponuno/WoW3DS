@@ -482,6 +482,48 @@ bool exportSpellNames(const DataDir& data, const std::string& path, bool verbose
 // factions.txt: "T" = FactionTemplate.dbc (14 fields: id, faction, flags, our/friendly/hostile masks, 4 enemies,
 // 4 friends), "F" = Faction.dbc (1.12: 37 fields: id, reputation index, race masks 2-5, class masks 6-9, base
 // standings 10-13, flags 14-17, parent 18, names 19-26 (8 locales), name flags 27, descriptions 28-36).
+// 7.16: language detection for the GUI. Spell.dbc's eight text columns are (enUS, koKR, frFR, deDE, zhCN, zhTW,
+// esES, esMX). A column counts when it has real translated names; the base column is ruRU when it is mostly Cyrillic
+// (a Russian fan client replaced English). Data\<code>\ folders are added by the caller (main.cpp).
+static bool hasCyrillic(const std::string& s) {
+    for (size_t i = 0; i + 1 < s.size(); ++i) {
+        const unsigned char a = (unsigned char)s[i], b = (unsigned char)s[i + 1];
+        if ((a == 0xD0 || a == 0xD1) && b >= 0x80 && b <= 0xBF) return true;
+    }
+    return false;
+}
+
+std::vector<std::string> availableLocales(const DataDir& data) {
+    std::vector<std::string> out;
+    DbcTable spell;
+    if (!spell.load(data, "Spell.dbc")) return out;
+    const int nameCol = spellNameColumn(spell);
+    if (nameCol < 0 || (uint32_t)nameCol >= spell.fields) return out;
+    const int cols = std::min(8, (int)(spell.fields - (uint32_t)nameCol));
+    if (cols <= 0) return out;
+    uint32_t baseRows = 0, cyrRows = 0;
+    std::vector<uint32_t> diff((size_t)cols, 0);
+    for (uint32_t r = 0; r < spell.records; ++r) {
+        const std::string base = spell.str(r, (uint32_t)nameCol);
+        if (!base.empty()) {
+            ++baseRows;
+            if (hasCyrillic(base)) ++cyrRows;
+        }
+        for (int c = 1; c < cols; ++c) {
+            const std::string s = spell.str(r, (uint32_t)(nameCol + c));
+            if (!s.empty() && s != base) ++diff[(size_t)c];
+        }
+    }
+    if (baseRows) out.push_back(cyrRows * 10 > baseRows ? "ruRU" : "enUS");
+    static const char* const kOther[7] = {"koKR", "frFR", "deDE", "zhCN", "zhTW", "esES", "esMX"};
+    // A handful of translated names is enough (custom clients may only translate part of the data); avoid counting
+    // rows where a locale column merely repeats the English fallback.
+    const uint32_t need = std::max<uint32_t>(5, baseRows / 100);
+    for (int c = 1; c < cols && c <= 7; ++c)
+        if (diff[(size_t)c] >= need) out.push_back(kOther[c - 1]);
+    return out;
+}
+
 bool exportFactions(const DataDir& data, const std::string& path, bool verbose) {
     Table ft, fa;
     if (!ft.load(data, "FactionTemplate.dbc") || ft.fields < 14) {

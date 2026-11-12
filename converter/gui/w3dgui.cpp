@@ -18,6 +18,8 @@
 #include <shellapi.h>
 #include <shlobj.h>
 
+#include <algorithm>
+#include <cctype>
 #include <cwchar>
 #include <deque>
 #include <string>
@@ -30,6 +32,7 @@ namespace {
 enum {
     ID_DATA = 100, ID_DATA_BROWSE, ID_OUT, ID_OUT_BROWSE, ID_MAP, ID_RADIO_WORLD, ID_RADIO_REGION, ID_TX0, ID_TY0, ID_TX1, ID_TY1,
     ID_PACKWORLD, ID_CREATURES, ID_PLAYERS, ID_ITEMS, ID_TRANSPORTS, ID_GAMEOBJECTS, ID_DUNGEONS, ID_UI, ID_SOUND, ID_QUALITY, ID_LOCALE,
+    ID_LOCALE_INFO, ID_LOCALE_CLIENT,
     ID_EXTRA, ID_MODE_ALL, ID_MODE_SEL, ID_START, ID_CANCEL, ID_OPEN, ID_LOG, ID_STATUS, ID_STAGE, ID_PROGRESS, ID_LAB_TILES, ID_PVS, ID_HLOD
 };
 // 7.14: the game languages of the DBC text columns (the GUI writes --locale).
@@ -41,9 +44,56 @@ int localeIndex(const std::string& code) {
     for (int i = 0; i < kLocaleCount; ++i) if (code == kLocaleCodes[i]) return i;
     return 0;
 }
-const char* localeCode(int index) { return index >= 0 && index < kLocaleCount ? kLocaleCodes[index] : "enUS"; }
-
-constexpr UINT_PTR kTimer = 1;
+// 7.16: the client's own language, so the user does not have to know the four-letter code. WTF\Config.wtf has
+// `SET locale "enUS"` (deDE, frFR, ruRU ...); Data\<code>\ folders show the other languages the client carries.
+std::wstring widen(const std::string& s);
+bool dirExists(const std::wstring& p);
+std::string canonicalLocale(const std::string& code) {
+    if (code.size() != 4) return "";
+    for (int i = 0; i < kLocaleCount; ++i) {
+        bool same = true;
+        for (int k = 0; k < 4 && same; ++k) same = tolower((unsigned char)code[(size_t)k]) == tolower((unsigned char)kLocaleCodes[i][k]);
+        if (same) return kLocaleCodes[i];
+    }
+    return "";
+}
+std::wstring dirOfData(const std::string& dataDir) {
+    std::wstring d = widen(dataDir);
+    while (!d.empty() && (d.back() == L'\\' || d.back() == L'/')) d.pop_back();
+    const size_t cut = d.find_last_of(L"\\/");
+    return cut == std::wstring::npos ? L"" : d.substr(0, cut);
+}
+std::string readSmallFile(const std::wstring& path) {
+    HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return "";
+    const DWORD size = GetFileSize(f, nullptr);
+    if (size == INVALID_FILE_SIZE || size > (1u << 20)) { CloseHandle(f); return ""; }
+    std::string text(size, '\0');
+    DWORD got = 0;
+    const bool ok = size == 0 || (ReadFile(f, &text[0], size, &got, nullptr) && got == size);
+    CloseHandle(f);
+    if (!ok) return "";
+    text.resize(got);
+    return text;
+}
+std::string clientLocaleFromConfig(const std::string& dataDir) {
+    const std::wstring root = dirOfData(dataDir);
+    if (root.empty()) return "";
+    std::string text = readSmallFile(root + L"\\WTF\\Config.wtf");
+    if (text.empty()) text = readSmallFile(root + L"\\Data\\WTF\\Config.wtf");   // if the client root was picked by mistake
+    std::string low = text;
+    for (char& c : low) c = (char)tolower((unsigned char)c);
+    for (size_t p = low.find("set locale"); p != std::string::npos; p = low.find("set locale", p + 10)) {
+        const size_t q = text.find('"', p);
+        if (q == std::string::npos) continue;
+        const size_t e = text.find('"', q + 1);
+        if (e == std::string::npos) break;
+        const std::string code = canonicalLocale(text.substr(q + 1, e - q - 1));
+        if (!code.empty()) return code;
+    }
+    return "";
+}
+constexpr UINT_PTR kTimer = 1, kLangTimer = 2;
 constexpr size_t kLogLines = 600;   // lines kept in the window (the whole log is in log_*.txt)
 
 HWND g_wnd = nullptr;
@@ -53,6 +103,17 @@ volatile LONG g_cancel = 0;
 CRITICAL_SECTION g_cs;
 HANDLE g_child = nullptr;   // the running w3dconv, for Cancel
 std::wstring g_exeDir;
+// 7.16: the combo holds only the languages the client really has, in this order (normally all ten before the scan).
+std::vector<std::string> g_localeItems;
+std::string g_scannedData;
+bool g_scanSelectClient = true;   // the startup scan: first run / old settings take the client's language
+int comboIndex(const std::string& code) {
+    for (size_t i = 0; i < g_localeItems.size(); ++i) if (g_localeItems[i] == code) return (int)i;
+    return -1;
+}
+std::string comboCode(int index) {
+    return index >= 0 && (size_t)index < g_localeItems.size() ? g_localeItems[(size_t)index] : std::string("enUS");
+}
 
 // shared with the worker thread (under g_cs)
 std::deque<std::wstring> g_lines;
@@ -111,7 +172,7 @@ w3gui::Settings readUi() {
     s.quality = (int)SendDlgItemMessageW(g_wnd, ID_QUALITY, CB_GETCURSEL, 0, 0);
     if (s.quality < 0) s.quality = 0;
     int loc = (int)SendDlgItemMessageW(g_wnd, ID_LOCALE, CB_GETCURSEL, 0, 0);
-    s.locale = localeCode(loc);
+    s.locale = comboCode(loc);
     s.extra = narrow(getText(ID_EXTRA));
     return s;
 }
@@ -131,8 +192,114 @@ void writeUi(const w3gui::Settings& s) {
     setChecked(ID_MODE_SEL, !s.everything);
     setChecked(ID_HLOD, s.hlod);
     SendDlgItemMessageW(g_wnd, ID_QUALITY, CB_SETCURSEL, (WPARAM)s.quality, 0);
-    SendDlgItemMessageW(g_wnd, ID_LOCALE, CB_SETCURSEL, (WPARAM)localeIndex(s.locale), 0);
+    int li = comboIndex(s.locale);
+    if (li < 0) li = comboIndex("enUS");
+    SendDlgItemMessageW(g_wnd, ID_LOCALE, CB_SETCURSEL, (WPARAM)(li < 0 ? 0 : li), 0);
     setText(ID_EXTRA, widen(s.extra));
+}
+
+// 7.16: the "Check available languages" button. It runs `w3dconv --list-locales`, which reads the client's DBC text
+// columns and Data\<code>\ folders, then rebuilds the combo with ONLY those languages. The client's own
+// WTF\Config.wtf language is selected when it is in the list.
+bool runCapture(const std::wstring& exe, const std::wstring& args, std::string& out) {
+    SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
+    HANDLE rd = nullptr, wr = nullptr;
+    if (!CreatePipe(&rd, &wr, &sa, 1 << 16)) return false;
+    SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
+    HANDLE nul = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, nullptr);
+    STARTUPINFOW si{};
+    si.cb = sizeof si;
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdOutput = si.hStdError = wr;
+    si.hStdInput = nul;
+    PROCESS_INFORMATION pi{};
+    std::wstring cmd = L"\"" + exe + L"\" " + args;
+    const BOOL ok = CreateProcessW(exe.c_str(), &cmd[0], nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, g_exeDir.c_str(), &si, &pi);
+    CloseHandle(wr);
+    if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
+    if (!ok) { CloseHandle(rd); return false; }
+    const ULONGLONG start = GetTickCount64();
+    for (;;) {
+        DWORD avail = 0;
+        if (!PeekNamedPipe(rd, nullptr, 0, nullptr, &avail, nullptr)) break;
+        if (avail) {
+            char b[4096];
+            DWORD n = 0;
+            if (!ReadFile(rd, b, sizeof b, &n, nullptr) || !n) break;
+            out.append(b, n);
+            continue;
+        }
+        if (WaitForSingleObject(pi.hProcess, 20) == WAIT_OBJECT_0) break;
+        if (GetTickCount64() - start > 15000) { TerminateProcess(pi.hProcess, 1); break; }
+    }
+    for (;;) {   // what the child wrote just before it ended
+        DWORD avail = 0;
+        if (!PeekNamedPipe(rd, nullptr, 0, nullptr, &avail, nullptr) || !avail) break;
+        char b[4096];
+        DWORD n = 0;
+        if (!ReadFile(rd, b, sizeof b, &n, nullptr) || !n) break;
+        out.append(b, n);
+    }
+    CloseHandle(rd);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    return true;
+}
+
+void fillLocaleCombo(const std::vector<std::string>& codes, const std::string& want) {
+    SendDlgItemMessageW(g_wnd, ID_LOCALE, CB_RESETCONTENT, 0, 0);
+    g_localeItems = codes;
+    for (const std::string& code : codes) {
+        const int i = localeIndex(code);
+        SendDlgItemMessageW(g_wnd, ID_LOCALE, CB_ADDSTRING, 0, (LPARAM)kLocaleLabels[i]);
+    }
+    int sel = comboIndex(want);
+    if (sel < 0) sel = comboIndex("enUS");
+    if (sel < 0 && !codes.empty()) sel = 0;
+    SendDlgItemMessageW(g_wnd, ID_LOCALE, CB_SETCURSEL, (WPARAM)sel, 0);
+}
+
+void scanAvailableLanguages(bool selectClient, bool force = false) {
+    std::string data = narrow(getText(ID_DATA));
+    while (data.size() > 1 && (data.back() == '\\' || data.back() == '/')) data.pop_back();
+    if (!force && data == g_scannedData) return;
+    g_scannedData = data;
+    if (data.empty()) {
+        setText(ID_LOCALE_INFO, L"Available languages: -");
+        return;
+    }
+    HCURSOR old = SetCursor(LoadCursorW(nullptr, IDC_WAIT));
+    std::string raw;
+    runCapture(g_exeDir + L"w3dconv.exe", L"--data \"" + widen(data) + L"\" --list-locales", raw);
+    SetCursor(old);
+    std::vector<std::string> found;
+    size_t at = 0;
+    while (at < raw.size()) {
+        size_t e = raw.find_first_of("\r\n", at);
+        if (e == std::string::npos) e = raw.size();
+        std::string line = raw.substr(at, e - at);
+        at = e + 1;
+        while (!line.empty() && (line.front() == ' ' || line.front() == '\t')) line.erase(line.begin());
+        while (!line.empty() && (line.back() == ' ' || line.back() == '\t')) line.pop_back();
+        const std::string code = canonicalLocale(line);
+        if (!code.empty() && std::find(found.begin(), found.end(), code) == found.end()) found.push_back(code);
+    }
+    if (found.empty()) {
+        setText(ID_LOCALE_INFO, L"Available languages: could not read the client");
+        return;   // keep the full list, the user can still try a language
+    }
+    std::vector<std::string> ordered;
+    for (int i = 0; i < kLocaleCount; ++i)
+        if (std::find(found.begin(), found.end(), kLocaleCodes[i]) != found.end()) ordered.push_back(kLocaleCodes[i]);
+    const std::string current = comboCode((int)SendDlgItemMessageW(g_wnd, ID_LOCALE, CB_GETCURSEL, 0, 0));
+    const std::string client = clientLocaleFromConfig(data);
+    fillLocaleCombo(ordered, selectClient && !client.empty() ? client : current);
+    std::wstring info = L"Available languages: ";
+    for (size_t i = 0; i < ordered.size(); ++i) {
+        if (i) info += L", ";
+        info += widen(ordered[i]);
+    }
+    setText(ID_LOCALE_INFO, info);
 }
 
 void saveSettings() {
@@ -144,18 +311,24 @@ void saveSettings() {
     CloseHandle(f);
 }
 
-w3gui::Settings loadSettings() {
+w3gui::Settings loadSettings(bool* found = nullptr, bool* localeSaved = nullptr) {
+    if (found) *found = false;
+    if (localeSaved) *localeSaved = false;
     HANDLE f = CreateFileW(settingsPath().c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (f == INVALID_HANDLE_VALUE) {   // first start: "Everything" is what most people want
         w3gui::Settings s;
         s.everything = true;
         return s;
     }
+    if (found) *found = true;
     std::string text(1 << 16, '\0');
     DWORD n = 0;
     ReadFile(f, &text[0], (DWORD)text.size(), &n, nullptr);
     CloseHandle(f);
     text.resize(n);
+    // 7.16: a settings file from before the language picker has no "locale=" line - take the client's language once,
+    // then keep whatever the user chooses.
+    if (localeSaved) *localeSaved = text.find("locale=") != std::string::npos;
     return w3gui::parse(text);
 }
 
@@ -502,11 +675,14 @@ void createControls() {
     label(L"Texture quality:", kM + 12, y + 26, 100);
     HWND q = mk(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, kM + 112, y + 22, 100, 100, ID_QUALITY);
     for (const wchar_t* m : {L"fast", L"better", L"best"}) SendMessageW(q, CB_ADDSTRING, 0, (LPARAM)m);
-    label(L"Game language:", kM + 224, y + 26, 100);
-    HWND lc = mk(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, kM + 326, y + 22, 170, 160, ID_LOCALE);
+    label(L"Game language:", kM + 224, y + 26, 76);
+    g_localeItems.assign(kLocaleCodes, kLocaleCodes + kLocaleCount);
+    HWND lc = mk(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, kM + 304, y + 22, 160, 180, ID_LOCALE);
     for (const wchar_t* l : kLocaleLabels) SendMessageW(lc, CB_ADDSTRING, 0, (LPARAM)l);
-    label(L"Extra options:", kM + 12, y + 60, 100);
-    mk(L"EDIT", L"", edit, kM + 112, y + 56, gw - 124, 24, ID_EXTRA, WS_EX_CLIENTEDGE);
+    mk(L"BUTTON", L"Check available languages", WS_TABSTOP, kM + 468, y + 22, 164, 24, ID_LOCALE_CLIENT);
+    mk(L"STATIC", L"Available languages: -", SS_ENDELLIPSIS, kM + 304, y + 46, 328, 14, ID_LOCALE_INFO);
+    label(L"Extra options:", kM + 12, y + 64, 100);
+    mk(L"EDIT", L"", edit, kM + 112, y + 60, gw - 124, 24, ID_EXTRA, WS_EX_CLIENTEDGE);
     y += 104;
     // ---- run
     mk(L"BUTTON", L"Start", BS_DEFPUSHBUTTON | WS_TABSTOP, kM, y, 130, 32, ID_START, 0, g_bold);
@@ -527,23 +703,34 @@ constexpr int kH = 10 + 128 + 186 + 134 + 104 + 40 + 18 + 20 + 22 + 126 + 14;   
 
 LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
-        case WM_CREATE:
+        case WM_CREATE: {
             g_wnd = h;
             createControls();
-            writeUi(loadSettings());
+            bool found = false, localeSaved = true;
+            writeUi(loadSettings(&found, &localeSaved));
             applyMode();
+            g_scanSelectClient = !found || !localeSaved;
             SetTimer(h, kTimer, 250, nullptr);
+            SetTimer(h, kLangTimer, 200, nullptr);   // 7.16: filter the language list after the window is up
             return 0;
+        }
         case WM_TIMER:
-            if (w == kTimer) tick();
+            if (w == kLangTimer) {
+                KillTimer(h, kLangTimer);
+                scanAvailableLanguages(g_scanSelectClient, true);
+                g_scanSelectClient = false;
+            } else if (w == kTimer) {
+                tick();
+            }
             return 0;
         case WM_COMMAND:
             switch (LOWORD(w)) {
                 case ID_DATA_BROWSE: {
                     std::wstring p = browse(h, L"Data folder of the WoW 1.12 client");
-                    if (!p.empty()) setText(ID_DATA, p);
+                    if (!p.empty()) { setText(ID_DATA, p); scanAvailableLanguages(true, true); }
                     return 0;
                 }
+                case ID_LOCALE_CLIENT: scanAvailableLanguages(false, true); return 0;
                 case ID_OUT_BROWSE: {
                     std::wstring p = browse(h, L"Output folder");
                     if (!p.empty()) setText(ID_OUT, p);
@@ -564,6 +751,10 @@ LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
                     if (!o.empty() && dirExists(o)) ShellExecuteW(h, L"open", o.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
                     return 0;
                 }
+            }
+            if (LOWORD(w) == ID_DATA && HIWORD(w) == EN_KILLFOCUS) {   // typed path: check its languages too
+                scanAvailableLanguages(true);
+                return 0;
             }
             break;
         case WM_CLOSE:

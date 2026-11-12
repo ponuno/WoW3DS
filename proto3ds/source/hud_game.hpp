@@ -8,7 +8,7 @@
 #include "game.hpp"
 #include "hud.hpp"
 
-// The controller bars and prompts of the Forever scheme (stage 5.11), filled by main.cpp from the pad state.
+// The controller bars and prompts of the New 3DS scheme (stage 5.11), filled by main.cpp from the pad state.
 struct HudBarCell {
     std::string name;                 // "" = empty slot
     uint32_t cdMs = 0;                // cooldown left (its own, without the global cooldown)
@@ -43,7 +43,7 @@ struct HudInput {
     const char* selfName = "";
     bool showSelfPlate = false;           // third person: the character's own name over its head
     bool selfVisible = false;             // 6.89: the character is on screen (third person / free camera); else first person
-    const HudPadView* pad = nullptr;      // Forever scheme: bars at the bottom right, aim ring, interact prompt
+    const HudPadView* pad = nullptr;      // controller bars (both schemes): crossbars, aim ring, interact prompt
     const std::vector<uint32_t>* followed = nullptr;   // 6.63: the followed quests (up to five), in the order they were followed
     bool questTracker = false;            // stage 5.14: objectives of the quest log (UI stage 2: right, under the buffs)
     bool chatBubbles = true;              // 6.67: say / yell / party lines in a bubble over the speaker

@@ -138,6 +138,8 @@ endif()
 # The converter window (stage 5.22): Windows only; it starts w3dconv.exe (next to it) step by step.
 if(WIN32 OR MINGW)
   add_executable(w3dgui WIN32 gui/w3dgui.cpp)
-  target_link_options(w3dgui PRIVATE -static -municode)
+  if(MINGW)
+    target_link_options(w3dgui PRIVATE -static -municode)   # the release .exe: no DLLs, wWinMain
+  endif()
   target_link_libraries(w3dgui PRIVATE comctl32 shell32 ole32 user32 gdi32)
 endif()

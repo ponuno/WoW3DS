@@ -100,6 +100,19 @@ bool SpellNames::load(const char* path) {
                 addItemTarget(id, ItemTarget{(int32_t)cls, sub, inv, mh != 0});
             continue;
         }
+        if (!strncmp(line, "@enchant\t", 9)) {   // 7.16: "@enchant id name" - an applied item enchantment
+            char* p = line + 9;
+            char* tab = strchr(p, '\t');
+            if (!tab) continue;
+            *tab = 0;
+            char* name = tab + 1;
+            while (*name && (*name == ' ' || *name == '\t')) ++name;
+            std::string nm = name;
+            while (!nm.empty() && (nm.back() == '\n' || nm.back() == '\r')) nm.pop_back();
+            const uint32_t id = (uint32_t)strtoul(p, nullptr, 10);
+            if (id && !nm.empty()) addEnchant(id, nm);
+            continue;
+        }
         if (!strncmp(line, "@school\t", 8)) {   // 6.40: "@school id school"
             unsigned id = 0, sc = 0;
             if (sscanf(line + 8, "%u %u", &id, &sc) == 2 && id && sc <= 6) addSchool(id, (uint8_t)sc);

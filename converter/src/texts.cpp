@@ -83,6 +83,45 @@ bool exportSkills(const DataDir& data, const std::string& path, bool verbose) {
     return true;
 }
 
+// Item enchantments (7.16): what an applied enchant shows on an item card. "@enchant<TAB>id<TAB>name" from
+// SpellItemEnchantment.dbc (1.12: ID 0, effects 1-3, min 4-6, max 7-9, effect args 10-12, names 13-20; 24 fields).
+// Shiny Bauble applies 263 ("Fishing Lure +25"), a sharpening stone 13 ("Sharpened +3").
+bool exportEnchants(const DataDir& data, const std::string& path, bool verbose) {
+    DbcTable t;
+    if (!t.load(data, "SpellItemEnchantment.dbc") || t.fields < 14) {
+        std::fprintf(stderr, "enchants: SpellItemEnchantment.dbc not found (no @enchant lines)\n");
+        return false;
+    }
+    uint32_t nameCol = 13;
+    // calibration: the row of Fishing Lure +25 (263) has "Fishing" in the English name column (some custom clients
+    // insert an extra column); fall back to 13.
+    for (uint32_t r = 0; r < t.records; ++r) {
+        if (t.u32(r, 0) != 263) continue;
+        for (uint32_t c = 13; c < t.fields; ++c)
+            if (t.str(r, c).find("Fishing") != std::string::npos) { nameCol = c; break; }
+        break;
+    }
+    std::string out;
+    size_t n = 0;
+    for (uint32_t r = 0; r < t.records; ++r) {
+        const uint32_t id = t.u32(r, 0);
+        if (!id) continue;
+        std::string name = firstLocale(t, r, nameCol, nameCol + 8);
+        if (name.empty()) continue;
+        out += "@enchant\t" + std::to_string(id) + "\t" + name + "\n";
+        ++n;
+    }
+    // append to spells.txt (SpellNames::load reads both the names and the @enchant lines)
+    FILE* f = std::fopen(path.c_str(), "ab");
+    if (!f) { std::fprintf(stderr, "cannot append enchantments to %s\n", path.c_str()); return false; }
+    std::fwrite(out.data(), 1, out.size(), f);
+    std::fclose(f);
+    std::printf("  item enchantments: %zu names appended to %s (SpellItemEnchantment.dbc %u records, name column %u)\n", n,
+                path.c_str(), t.records, nameCol);
+    (void)verbose;
+    return true;
+}
+
 // recipes.txt (6.38, the profession window): "R skill spell minRank trivialLow trivialHigh kind item count tools reagents" per
 // SkillLineAbility.dbc row of a profession / secondary skill whose spell creates an item (effect 24) or enchants one (effect 53).
 // 1.12 SkillLineAbility: ID 0, SkillLine 1, Spell 2, RaceMask 3, ClassMask 4, ExcludeRace 5, ExcludeClass 6, MinSkillLineRank 7,

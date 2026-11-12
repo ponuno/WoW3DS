@@ -728,3 +728,5 @@ Bound to 	Lié à
 Cleared 	Effacé 
 Press a button (or tap a bar cell) for 	Appuyez sur un bouton (ou appuyez sur une cellule de barre) pour 
 You need 	Vous avez besoin 
+D-pad	Croix directionnelle
+Spells: hold Y to look, tap Y to chat	Sorts : Y pour regarder, Y pour le chat

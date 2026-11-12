@@ -284,7 +284,7 @@ std::string settingsLine(const Context& c) {
     char b[192];
     snprintf(b, sizeof b, "draw distance %.0f, doodads %s (range %.0f), fog %s, particles %d, crowd %d, top screen %s, scheme %s, GPU %s", c.drawDist,
              c.doodads ? "on" : "off", c.doodadRange, c.fog ? "on" : "off", c.effects, c.crowdCap,
-             c.topMode == 1 ? "800x240" : c.topMode == 2 ? "3D" : "400x240", c.scheme ? "Classic" : "Forever", c.gpuKick ? "early" : "at end");
+             c.topMode == 1 ? "800x240" : c.topMode == 2 ? "3D" : "400x240", c.scheme ? "Old 3DS" : "New 3DS", c.gpuKick ? "early" : "at end");
     if (strlen(b) + 12 < sizeof b) strcat(b, c.vsync ? ", vsync" : ", no vsync");
     return b;
 }

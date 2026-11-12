@@ -13,7 +13,7 @@
 // and back to the Map tab afterwards unless a tab is pinned (the pin in the header); SELECT + D-pad left/right turns
 // the tabs. Dangerous actions (destroy, selling rare items, abandoning a quest, deleting mail) ask first.
 //
-// Pad actions come from pad.hpp (scheme Forever or Classic); this class decides what they mean in the game:
+// Pad actions come from pad.hpp (scheme New 3DS or Old 3DS); this class decides what they mean in the game:
 // soft targeting (a spell or attack without a living target takes the enemy in front), interact (the target, else
 // the nearest lootable corpse / NPC in front), assist, last hostile target, aiming with the C-Stick while L/R is held.
 #pragma once
@@ -336,7 +336,7 @@ private:
     // 7.16: "Use" on an item that goes on another one (a lure, a weapon oil): the picker of the items it fits
     bool useOnPick_ = false;
     w3n::InvItem useOnFrom_;
-    int shownSet_ = 0, classicSet_ = 0;
+    int shownSet_ = 0;                // the hotbar set on the bars (PadOut::set of both schemes)
     uint64_t aim_ = 0, lastHostile_ = 0;
     // vendor (stage 5.13): mode 0 buy, 1 sell, 2 buyback; the selected row (absolute) and page
     int vendorMode_ = 0, vendorSel_ = -1, vendorPage_ = 0;

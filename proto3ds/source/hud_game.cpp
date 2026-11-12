@@ -908,7 +908,7 @@ void hudBuildGame(HudList& l, const HudInput& in) {
 
     // (stage 5.11: no chat frame here any more - chat, combat and loot lines live in the Chat tab of the touch screen)
 
-    // ---- controller bars (Forever): the set the modifiers select, D-pad diamond and face-button diamond
+    // ---- controller bars (both schemes): the set the modifiers select, D-pad diamond and face-button diamond
     if (in.pad && in.pad->show) {
         const HudPadView& pv = *in.pad;
         if (pv.mode) {   // targeting mode: what the face buttons do now instead of the bars

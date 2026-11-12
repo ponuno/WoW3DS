@@ -296,7 +296,7 @@ int main(int argc, char** argv) {
     }
 
     // ---- stage 5.11: controller intents
-    {   // Forever Y at the dead wolf (no target): soft interact selects it and loots
+    {   // New 3DS Y at the dead wolf (no target): soft interact selects it and loots
         Rig r;
         r.dir = dir;
         bool got = r.replay(life, bagsReady);
@@ -368,7 +368,7 @@ int main(int argc, char** argv) {
         bool first = r.sentOp(0x12F) && r.s.target() != 0;
         r.pad(c);
         result("cancel", first && r.s.target() == 0, "A: cancel cast, then clear target ->" + r.ops());
-        // menu, settings (switch to Classic), context
+        // menu, settings (switch to Old 3DS), context
         PadOut m;
         m.menu = true;
         r.pad(m);
@@ -377,8 +377,10 @@ int main(int argc, char** argv) {
         r.tap(GameUi::Act::MenuItem, 6);   // stage 5.14: Quests is item 4; 5.16: Buffs 5, Settings 6 (UI stage 3: the tab)
         r.draw("settings");
         bool setOk = r.ui.tab() == GameUi::Tab::Settings && r.ui.panel(r.s) == GameUi::Panel::Tabs && r.tap(GameUi::Act::Setting, 1) &&
-                     r.cfg.scheme == PadScheme::Classic;
-        r.cfg.scheme = PadScheme::Forever;
+                     r.cfg.scheme == PadScheme::Old3DS;
+        // 7.17: the Old 3DS D-pad setting appears on the page only in that scheme
+        setOk = setOk && r.tap(GameUi::Act::Setting, 42) && r.cfg.dpadSpells && r.tap(GameUi::Act::Setting, 41) && !r.cfg.dpadSpells;
+        r.cfg.scheme = PadScheme::New3DS;
         // Graphics/sound page: the music volume + and - (pad.txt "music")
         r.tap(GameUi::Act::SubView, 1);
         const int mv = r.cfg.musicVol;

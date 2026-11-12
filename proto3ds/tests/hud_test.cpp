@@ -175,7 +175,7 @@ int main(int argc, char** argv) {
         s.chat.push_back(own);
         in.selfVisible = getenv("W3D_THIRD") != nullptr;
     }
-    static HudPadView pv;   // "pad": the Forever bars (stage 5.11) with a sample layout, ZR held, the aim ring
+    static HudPadView pv;   // "pad": the controller bars (stage 5.11) with a sample layout, ZR held, the aim ring
     if (argc > 5 && std::string(argv[5]) == "pad") {
         pv.show = true;
         pv.set = 2;

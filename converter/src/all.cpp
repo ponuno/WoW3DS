@@ -76,6 +76,7 @@ int convertAll(const Options& oIn, const DataDir& data, const AllOptions& ao, Ui
     }
     {
         exportSpellNames(data, folder + "spells.txt", o.verbose);
+        exportEnchants(data, folder + "spells.txt", o.verbose);
         exportSpellDescriptions(data, folder + "spelldesc.bin", o.verbose);
         exportFactions(data, folder + "factions.txt", o.verbose);
         exportTalents(data, folder + "talents.txt", o.verbose);

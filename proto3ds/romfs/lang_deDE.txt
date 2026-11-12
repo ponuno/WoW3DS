@@ -728,3 +728,5 @@ Bound to 	Gebunden an
 Cleared 	Gelöscht 
 Press a button (or tap a bar cell) for 	Drücken Sie eine Taste (oder tippen Sie auf eine Balkenzelle) für 
 You need 	Du brauchst 
+D-pad	Steuerkreuz
+Spells: hold Y to look, tap Y to chat	Zauber: Y halten zum Schauen, Y tippen: Chat

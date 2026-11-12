@@ -11,7 +11,7 @@
 //
 // Controls offline / free camera: Circle Pad move, C-Stick/D-Pad look, L/R down/up (fly), hold B fast,
 //           SELECT walk/fly, X draw distance, A doodads, ZR fog, ZL doodad detail, Y 40 s streaming benchmark,
-//           START quit. Online walking: the controller scheme of pad.hpp (Forever or Classic, START menu).
+//           START quit. Online walking: the controller scheme of pad.hpp (New 3DS or Old 3DS, START menu).
 #include <unordered_map>
 #include "audio.hpp"
 #include "audio_core.hpp"
@@ -924,13 +924,13 @@ int main() {
     std::vector<SceneModel> spellModels;
     g_spellViewPtr = &spellView;
     std::vector<SoundReq> soundReqs;
-    // Controller (stage 5.11): scheme + settings from pad.txt (Old 3DS without ZL/ZR/C-Stick defaults to Classic),
-    // hotbars per character, the character's own facing (Forever: separate from the camera).
+    // Controller (stage 5.11): scheme + settings from pad.txt (an Old 3DS without ZL/ZR/C-Stick defaults to Old 3DS),
+    // hotbars per character, the character's own facing (New 3DS: separate from the camera).
     PadConfig padCfg;
     {
         bool isNew = true;
         APT_CheckNew3DS(&isNew);
-        if (!isNew) padCfg.scheme = PadScheme::Classic;
+        if (!isNew) padCfg.scheme = PadScheme::Old3DS;
     }
     char padPath[96];
     snprintf(padPath, sizeof padPath, "%s/pad.txt", kOutDir);
@@ -1525,7 +1525,7 @@ int main() {
                 }
                 if (po.zoom) camDist = std::clamp(camDist + po.zoom * 8.0f * dt, 0.0f, 15.0f);
                 if (po.centerCamera) { cam.yaw = charYaw; cam.pitch = -0.1f; }
-                if (padCfg.scheme == PadScheme::Classic) {
+                if (padCfg.scheme == PadScheme::Old3DS) {
                     charYaw = cam.yaw;                       // the camera is the character
                 } else if (po.faceYaw && !uiOut.blockMove) {   // turn towards the stick / camera, quickly but not in one frame
                     float d = remainderf(po.yaw - charYaw, 6.2831853f);
@@ -2268,7 +2268,12 @@ int main() {
                 for (int b = 0; b < kPadButtons; ++b) {
                     int slot = pv.set * kPadButtons + b;
                     HudBarCell& c = pv.cells[b];
-                    if (pv.set == 0 && b >= 4) { c.name = padFixedName(b); c.fixed = true; continue; }
+                    // set 0 of the New 3DS scheme, and every set of the Old 3DS scheme: the face buttons are the fixed actions
+                    if (b >= 4 && (padCfg.scheme == PadScheme::Old3DS || pv.set == 0)) {
+                        c.name = padFixedName(b, padCfg.scheme == PadScheme::Old3DS, padCfg.dpadSpells);
+                        c.fixed = true;
+                        continue;
+                    }
                     const ActionSlot& a = bars.at(slot);
                     if (a.type == ActionSlot::Empty) continue;
                     c.name = bars.label(*game, slot);
@@ -3009,7 +3014,7 @@ int main() {
                 pc.crowdCap = kCrowd[std::clamp(padCfg.crowd, 0, 3)];
             }
             pc.topMode = topModeNow;
-            pc.scheme = padCfg.scheme == PadScheme::Classic ? 1 : 0;
+            pc.scheme = padCfg.scheme == PadScheme::Old3DS ? 1 : 0;
             pc.slider = osGet3DSliderState();
             pc.stereo = topModeNow == 2 && topRight && pc.slider > 0.02f;
             pc.gpuKick = padCfg.gpuKick;

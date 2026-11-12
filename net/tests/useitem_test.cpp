@@ -200,7 +200,7 @@ int main() {
         const char* path = "useitem_spells_tmp.txt";
         FILE* f = fopen(path, "wb");
         if (f) {
-            fputs("@item\t8087\t2\t1048576\t0\t1\n8087\tShiny Bauble\t\n", f);
+            fputs("@item\t8087\t2\t1048576\t0\t1\n@enchant\t263\tFishing Lure +25\n8087\tShiny Bauble\t\n", f);
             fclose(f);
         }
         SpellNames names;
@@ -208,6 +208,7 @@ int main() {
         const SpellNames::ItemTarget* t = names.itemTarget(8087);
         CHECK(t && t->mainHand, "main-hand flag");
         CHECK(t && t->fits(2, 20, 17) && !t->fits(2, 7, 21) && !t->fits(4, 1, 5), "class / subclass masks");
+        CHECK(names.enchantName(263) == "Fishing Lure +25", "enchant name");
         if (f) remove(path);
     }
     {   // 7.16: an item used on another item - Shiny Bauble on the fishing pole in the main hand. The packet names the
@@ -239,12 +240,35 @@ int main() {
         sword.entry = 1000; sword.cls = 2; sword.subclass = 7; sword.inventoryType = 21;
         s.testSetItemInfo(sword);
         s.spellNames.addItemTarget(8087, SpellNames::ItemTarget{2, 1u << 20, 0, true});
+        s.spellNames.addEnchant(263, "Fishing Lure +25");
+        setF(s.objects.find(pole), UF::ITEM_FIELD_ENCHANTMENT, 263);
+        setF(s.objects.find(pole), UF::ITEM_FIELD_ENCHANTMENT + 1, 600000);   // 10 minutes at apply time
         CHECK(s.itemOnItemSpell(6529) == 8087, "Shiny Bauble is an item-on-item spell");
         CHECK(s.itemTargetSpell(6529) == 0, "it is not a unit / object target spell");
         InvItem bait;
         bait.bag = 255; bait.slot = 23; bait.entry = 6529; bait.guid = lureGuid;
         std::vector<InvItem> targets = s.itemOnItemTargets(bait);
         CHECK(targets.size() == 1 && targets[0].guid == pole, "only the fishing pole fits");
+        CHECK(targets.size() == 1 && targets[0].enchant[0].id == 263 && targets[0].enchant[0].leftMs == 600000,
+              "the pole carries enchant 263 for 10 min");
+        std::vector<std::string> tip = itemTooltip(poleInfo, targets.empty() ? nullptr : &targets[0], s.spellNames);
+        bool hasEnchant = false;
+        for (const std::string& l : tip) hasEnchant = hasEnchant || l == "Enchant: Fishing Lure +25 (10m 0s left)";
+        CHECK(hasEnchant, "the item card shows the enchant and its time");
+        {   // SMSG_ITEM_ENCHANT_TIME_UPDATE: 120 s left; the card counts down from there
+            Writer e;
+            e.u64(pole); e.u8(0); e.u32(120); e.u64(me);
+            s.handle(0x1EB, e.b, 1000);
+            s.update(31000);
+            InvItem fresh;
+            fresh.guid = pole;
+            CHECK(s.refreshItem(fresh), "refresh the carried item");
+            CHECK(fresh.enchant[0].leftMs == 90000, "90 s left after 30 s");
+            tip = itemTooltip(poleInfo, &fresh, s.spellNames);
+            hasEnchant = false;
+            for (const std::string& l : tip) hasEnchant = hasEnchant || l == "Enchant: Fishing Lure +25 (1m 30s left)";
+            CHECK(hasEnchant, "the card counts down");
+        }
         sent.clear();
         s.useItem(bait, 200);
         CHECK(sent.size() == 1 && sent[0].size() > 5 && sent[0][3] == 0x10 && sent[0][4] == 0x00, "use -> TARGET_FLAG_ITEM 0x10");

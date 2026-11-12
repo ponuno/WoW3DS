@@ -362,9 +362,18 @@ void GameUi::confirmPlace(w3n::GameSession& g, const Input& in, Output& out) {
 // An item that works on a target (quest items): turn to the selected unit first, as for a spell. Without a target it is
 // sent as before (the server answers with its own error); never blocked here: a self spell we do not recognise must work.
 void GameUi::useItemFaced(w3n::GameSession& g, const w3n::InvItem& it, const Input& in, Output& out) {
-    // 7.16: nothing the item could be applied to (a lure without a fishing pole): say so instead of an empty cast
-    if (g.itemOnItemSpell(it.entry) && g.itemOnItemTargets(it).empty()) {
-        refuse(g, tr("No item to use this on.", "Не на что применить."), in.nowMs);
+    // 7.16: an item applied to another item always asks which one (the Bags page lists the items its spell fits)
+    if (g.itemOnItemSpell(it.entry)) {
+        if (g.itemOnItemTargets(it).empty()) {
+            refuse(g, tr("No item to use this on.", "Не на что применить."), in.nowMs);
+            return;
+        }
+        setTab(Tab::Bags);
+        subBags_ = 0;
+        useOnFrom_ = it;
+        useOnPick_ = true;
+        page_ = 0;
+        dirty_ = true;
         return;
     }
     if (g.itemTargetSpell(it.entry)) {
@@ -421,7 +430,7 @@ void GameUi::dropOnSlot(const Input& in, int slot, Output& out) {
 
 void GameUi::interactAction(w3n::GameSession& g, const Input& in, Output& out) {
     const Panel p = panel(g);
-    const bool forever = in.cfg && in.cfg->scheme == PadScheme::Forever;
+    const bool new3ds = in.cfg && in.cfg->scheme == PadScheme::New3DS;
     if (place_.on) { confirmPlace(g, in, out); return; }   // UI stage 10: cast the ground spell at the ring
     if (p == Panel::Loot) { g.takeAllLoot(in.nowMs); return; }
     if (p == Panel::Quest) { questPrimary(g, in); return; }
@@ -448,8 +457,8 @@ void GameUi::interactAction(w3n::GameSession& g, const Input& in, Output& out) {
     if (p == Panel::Taxi) { if (taxiSel_ > 0) g.flyTo((uint32_t)taxiSel_, in.nowMs); return; }
     if (g.life() == w3n::Life::Dead && !g.resurrectOffer.active) { g.releaseSpirit(in.nowMs); return; }
     const w3n::WorldObject* t = g.objects.find(g.target());
-    // Forever: in combat (or at a living enemy) the interact button starts auto-attack
-    if (forever && g.life() == w3n::Life::Alive && !g.attackWanted() &&
+    // New 3DS: in combat (or at a living enemy) the interact button starts auto-attack
+    if (new3ds && g.life() == w3n::Life::Alive && !g.attackWanted() &&
         ((t && g.enemyLike(*t)) || (g.inCombat() && (!t || t->dead())))) {
         pressSpell(g, w3n::kSpellAttack, in, out);
         return;
@@ -818,7 +827,7 @@ GameUi::Output GameUi::updateInner(w3n::GameSession& g, const Input& in, bool wa
             dirty_ = true;
         }
     }
-    // the last enemy we had selected (Forever: R + B)
+    // the last enemy we had selected (New 3DS: R + B)
     if (const w3n::WorldObject* t = g.objects.find(g.target()))
         if (g.enemyLike(*t)) lastHostile_ = g.target();
     touch(g, in, out);
@@ -833,9 +842,9 @@ GameUi::Output GameUi::updateInner(w3n::GameSession& g, const Input& in, bool wa
     float yaw;
     if (g.takeFacingRequest(&yaw)) { out.faceYaw = true; out.yaw = yaw; }
     const PadOut* p = in.pad;
-    const bool forever = in.cfg && in.cfg->scheme == PadScheme::Forever;
+    const bool new3ds = in.cfg && in.cfg->scheme == PadScheme::New3DS;
     if (p) {
-        int set = forever ? p->set : classicSet_;
+        int set = p->set;   // New 3DS: the modifiers; Old 3DS: X cycled it
         if (set != shownSet_) { shownSet_ = set; dirty_ = true; }
     }
     if (p && p->menu) { open_ = open_ == Panel::Menu ? Panel::Tabs : Panel::Menu; dirty_ = true; }
@@ -853,13 +862,13 @@ GameUi::Output GameUi::updateInner(w3n::GameSession& g, const Input& in, bool wa
     if (!walking || !p) return out;
     const Panel pnl = panel(g);
     if (p->jump) {
-        // classic: B closes the window; nobody jumps while dead
-        if (!forever && pnl == Panel::Loot) { g.closeLoot(in.nowMs); out.blockJump = true; }
-        else if (!forever && pnl == Panel::Gossip) { g.closeGossip(); out.blockJump = true; }
-        else if (!forever && pnl == Panel::Quest) { g.closeQuestDialog(in.nowMs); out.blockJump = true; }
-        else if (!forever && pnl == Panel::Vendor) { g.closeVendor(); out.blockJump = true; }
-        else if (!forever && pnl == Panel::Trainer) { g.closeTrainer(); out.blockJump = true; }
-        else if (!forever && pnl == Panel::Invite) { g.answerGroupInvite(false, in.nowMs); out.blockJump = true; }
+        // Old 3DS: B closes the window; nobody jumps while dead
+        if (!new3ds && pnl == Panel::Loot) { g.closeLoot(in.nowMs); out.blockJump = true; }
+        else if (!new3ds && pnl == Panel::Gossip) { g.closeGossip(); out.blockJump = true; }
+        else if (!new3ds && pnl == Panel::Quest) { g.closeQuestDialog(in.nowMs); out.blockJump = true; }
+        else if (!new3ds && pnl == Panel::Vendor) { g.closeVendor(); out.blockJump = true; }
+        else if (!new3ds && pnl == Panel::Trainer) { g.closeTrainer(); out.blockJump = true; }
+        else if (!new3ds && pnl == Panel::Invite) { g.answerGroupInvite(false, in.nowMs); out.blockJump = true; }
         if (life == w3n::Life::Dead) out.blockJump = true;
         dirty_ = true;
     }
@@ -873,12 +882,11 @@ GameUi::Output GameUi::updateInner(w3n::GameSession& g, const Input& in, bool wa
         dirty_ = true;
     }
     if (p->toggleAttack || p->attack) { pressSpell(g, w3n::kSpellAttack, in, out); dirty_ = true; }
-    if (p->nextSet) { classicSet_ = (classicSet_ + 1) % kPadSets; shownSet_ = classicSet_; dirty_ = true; }
     if (p->pageDelta && in.bars) {
         in.bars->turnPage(p->pageDelta);
         hint("Hotbar page " + std::to_string(in.bars->page + 1) + "/" + std::to_string(ActionLayout::kPages), in.nowMs);
     }
-    // targeting modes (Forever L / R)
+    // targeting modes (New 3DS L / R)
     if (p->aiming) {
         uint64_t a = aimUnit(g, in, p->aimYaw, p->mode == PadOut::Enemy);
         if (a != aim_) { aim_ = a; dirty_ = true; }
@@ -1282,13 +1290,15 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
         case Act::Setting:
             if (!in.cfg) break;
             switch (arg) {
-                case 0: in.cfg->scheme = PadScheme::Forever; break;
-                case 1: in.cfg->scheme = PadScheme::Classic; break;
+                case 0: in.cfg->scheme = PadScheme::New3DS; break;
+                case 1: in.cfg->scheme = PadScheme::Old3DS; break;
                 case 10: case 11: case 12: in.cfg->runThreshold = 0.3f + 0.2f * (arg - 10); break;
                 case 20: in.cfg->faceMovement = true; break;
                 case 21: in.cfg->faceMovement = false; break;
                 case 30: in.cfg->toggleModifiers = false; break;
                 case 31: in.cfg->toggleModifiers = true; break;
+                case 41: in.cfg->dpadSpells = false; break;   // 7.17: the Old 3DS D-pad looks around / is the hotbar
+                case 42: in.cfg->dpadSpells = true; break;
                 case 40: in.cfg->invertY = !in.cfg->invertY; break;
                 case 50: in.cfg->camSpeed = std::max(0.6f, in.cfg->camSpeed - 0.3f); break;
                 case 51: in.cfg->camSpeed = std::min(4.5f, in.cfg->camSpeed + 0.3f); break;
@@ -1340,14 +1350,8 @@ void GameUi::doAction(w3n::GameSession& g, const Input& in, Act act, int arg, Ou
                 bindArmed_ = true;
                 bindWhat_ = {ActionSlot::Item, it.entry};
                 hint("Press a button (or tap a bar cell) for " + g.itemName(it.entry), now);
-            } else if (act == Act::Use) {
-                // 7.16: an item applied to another item: one fitting target is used at once, several open the picker
-                if (g.itemOnItemSpell(it.entry) && g.itemOnItemTargets(it).size() > 1) {
-                    useOnFrom_ = it;
-                    useOnPick_ = true;
-                    page_ = 0;
-                } else useItemFaced(g, it, in, out);
-            } else if (act == Act::Equip) g.equipItem(it, now);
+            } else if (act == Act::Use) useItemFaced(g, it, in, out);
+            else if (act == Act::Equip) g.equipItem(it, now);
             else if (act == Act::Unequip) g.unequipItem(it, now);
             else if (!confirmed_) confirm(std::string(tr("Destroy ", "Уничтожить ")) + g.itemName(it.entry) +
                                           (it.count > 1 ? " x" + std::to_string(it.count) : std::string()) + "?", Act::Destroy, 0);

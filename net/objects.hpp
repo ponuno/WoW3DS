@@ -47,6 +47,8 @@ enum : uint16_t {
     // items and bags
     ITEM_FIELD_OWNER = 6, ITEM_FIELD_CONTAINED = 8, ITEM_FIELD_STACK_COUNT = 14, ITEM_FIELD_DURABILITY = 46,
     ITEM_FIELD_MAXDURABILITY = 47, CONTAINER_FIELD_NUM_SLOTS = 48, CONTAINER_FIELD_SLOT_1 = 50,
+    // 7.16: seven enchantments, 3 fields each: id, time left (ms), charges (vMaNGOS UpdateFields_1_12_1.h: 6 + 0x10)
+    ITEM_FIELD_ENCHANTMENT = 22, ITEM_FIELD_ENCHANTMENT_STRIDE = 3, ITEM_FIELD_ENCHANTMENT_COUNT = 7,
     // corpses (vMaNGOS UpdateFields_1_12_1.h: OWNER 6-7, FACING 8, POS_X/Y/Z 9-11, DISPLAY_ID 12, ITEM 13..31 (display id | inventory type << 24),
     // BYTES_1 32 (race, gender, skin, face), BYTES_2 33 (hair style, hair colour, facial hair), GUILD 34, FLAGS 35, DYNAMIC_FLAGS 36)
     CORPSE_FIELD_OWNER = 6, CORPSE_FIELD_FACING = 8, CORPSE_FIELD_POS_X = 9, CORPSE_FIELD_DISPLAY_ID = 12, CORPSE_FIELD_ITEM = 13,

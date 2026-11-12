@@ -264,7 +264,6 @@ std::string GameUi::actionName(w3n::GameSession& g, const ActionSlot& a) const {
 
 // The hotbars of the current page over the content: 4 sets (rows) x 8 buttons; tap a cell (bind armed) or drop on it.
 void GameUi::crossbarPicker(w3n::GameSession& g, const Input& in) {
-    (void)in;
     const ActionLayout* bars = barsView_;
     window(2, kTop + 1, kTouchW - 4, kContentH - 2, true);
     std::string what;
@@ -287,7 +286,9 @@ void GameUi::crossbarPicker(w3n::GameSession& g, const Input& in) {
             if (!padSlotBindable(slot)) {
                 list_.rect(x, y, cell, cell, kRowAlt);
                 list_.textCentered(x + cell / 2, y + 2, kGlyph[b], kGrey);
-                list_.textCentered(x + cell / 2, y + 16, HudList::fit(padFixedName(b), cell - 2), hudRgba(110, 106, 98));
+                list_.textCentered(x + cell / 2, y + 16, HudList::fit(padFixedName(b, in.cfg && in.cfg->scheme == PadScheme::Old3DS,
+                                                                                       in.cfg && in.cfg->dpadSpells), cell - 2),
+                                   hudRgba(110, 106, 98));
                 continue;
             }
             const ActionSlot a = bars ? bars->at(slot) : ActionSlot();
@@ -372,17 +373,17 @@ void GameUi::drawPanel(w3n::GameSession& g, const Input& in) {
         case Panel::Trade: drawTrade(g, in); break;
         case Panel::Invite: {
             window(20, kTop + 30, kTouchW - 40, 110, true);
-            const bool fv0 = in.cfg && in.cfg->scheme == PadScheme::Forever;
+            const bool n3 = in.cfg && in.cfg->scheme == PadScheme::New3DS;
             if (g.duel.challenged || g.duel.asked) {   // UI stage 9: a duel - theirs (Accept / Decline) or ours (Cancel)
                 const std::string who = g.duel.opponentName.empty() ? std::string("?") : g.duel.opponentName;
                 list_.textCentered(kTouchW / 2, kTop + 48, who, kGold, true, Font::Large);
                 if (g.duel.challenged) {
                     list_.textCentered(kTouchW / 2, kTop + 72, tr("challenges you to a duel.", "вызывает вас на дуэль."), kText, true, Font::Normal);
-                    btn(36, kTop + 100, 116, 28, std::string(tr("Accept", "Принять")) + (fv0 ? " (Y)" : " (A)"), Act::InviteYes, 0, Style::Primary);
-                    btn(168, kTop + 100, 116, 28, std::string(tr("Decline", "Отказать")) + (fv0 ? " (A)" : " (B)"), Act::InviteNo, 0, Style::Normal);
+                    btn(36, kTop + 100, 116, 28, std::string(tr("Accept", "Принять")) + (n3 ? " (Y)" : " (A)"), Act::InviteYes, 0, Style::Primary);
+                    btn(168, kTop + 100, 116, 28, std::string(tr("Decline", "Отказать")) + (n3 ? " (A)" : " (B)"), Act::InviteNo, 0, Style::Normal);
                 } else {
                     list_.textCentered(kTouchW / 2, kTop + 72, tr("Duel requested. Waiting...", "Вызов на дуэль отправлен. Ждём..."), kText, true, Font::Normal);
-                    btn(102, kTop + 100, 116, 28, std::string(tr("Cancel", "Отменить")) + (fv0 ? " (A)" : " (B)"), Act::InviteNo, 0, Style::Normal);
+                    btn(102, kTop + 100, 116, 28, std::string(tr("Cancel", "Отменить")) + (n3 ? " (A)" : " (B)"), Act::InviteNo, 0, Style::Normal);
                 }
                 break;
             }
@@ -393,9 +394,8 @@ void GameUi::drawPanel(w3n::GameSession& g, const Input& in) {
                                group ? tr("invites you to a group.", "приглашает вас в группу.")
                                      : std::string(tr("invites you to the guild ", "приглашает вас в гильдию ")) + g.guildInviteName,
                                kText, true, Font::Normal);
-            const bool fv = in.cfg && in.cfg->scheme == PadScheme::Forever;
-            btn(36, kTop + 100, 116, 28, std::string(tr("Accept", "Принять")) + (fv ? " (Y)" : " (A)"), Act::InviteYes, 0, Style::Primary);
-            btn(168, kTop + 100, 116, 28, std::string(tr("Decline", "Отказать")) + (fv ? " (A)" : " (B)"), Act::InviteNo, 0, Style::Normal);
+            btn(36, kTop + 100, 116, 28, std::string(tr("Accept", "Принять")) + (n3 ? " (Y)" : " (A)"), Act::InviteYes, 0, Style::Primary);
+            btn(168, kTop + 100, 116, 28, std::string(tr("Decline", "Отказать")) + (n3 ? " (A)" : " (B)"), Act::InviteNo, 0, Style::Normal);
             break;
         }
         case Panel::Binder:

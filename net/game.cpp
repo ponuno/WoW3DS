@@ -74,6 +74,7 @@ void GameSession::attach(WorldClient& wc, uint32_t nowMs) {
     autoLfg_ = false;
     itemAsked_.clear();   // the item cache (items_) survives: static data
     itemWanted_.clear();
+    itemEnchantTimers_.clear();   // 7.16: enchant countdowns belong to the old session
     spells.clear();
     actionBar = {};
     actionBarSeen = false;

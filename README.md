@@ -35,7 +35,7 @@ server).
   can be switched on in the Settings tab. The translations live in `lang_<code>.txt` (bundled in the app, also read from
   `sdmc:/3ds/w3dproto/` when present). Re-run the converter's interface step (`ui.bat` / `--ui`) with this release for
   accented letters in `ui.w3dp`.
-- **Controls:** a controller scheme built for the 3DS ("Forever" layout, or "Classic" for the Old 3DS), touch-screen UI
+- **Controls:** a controller scheme built for the 3DS ("New 3DS" layout, or "Old 3DS" for the Old 3DS), touch-screen UI
   on the bottom screen; an optional ConsolePort skin (round crossbar buttons, the segmented experience bar) from your own
   copy of the addon. Top screen: normal 400x240, wide 800x240 or stereoscopic 3D.
 - **Sound:** interface sounds, footsteps, world sounds, voices, zone music and ambience (DSP firmware dump required).
@@ -46,7 +46,7 @@ Not done yet: Warden (servers that require it will drop the connection), see `PL
 
 ### What you need
 
-- A **New Nintendo 3DS / New 2DS XL** (an Old 3DS works with the Classic scheme, but slowly) with custom firmware
+- A **New Nintendo 3DS / New 2DS XL** (an Old 3DS works with the Old 3DS scheme, but slowly) with custom firmware
   (Luma3DS) and the **Homebrew Launcher**.
 - `sdmc:/3ds/dspfirm.cdc` for sound: run the **DSP1** homebrew once if you do not have it.
 - An SD card (FAT32) with room for the packs: a few hundred MB for a test region, several GB for the whole game.
@@ -126,7 +126,7 @@ world data (collision, ground).
 
 ## Controls
 
-### Forever scheme (default, New 3DS)
+### New 3DS scheme (default, New 3DS)
 
 | Input | Action |
 |---|---|
@@ -148,17 +148,22 @@ Ground spells (Blizzard, Flamestrike): a ring appears 10 yards ahead, the C-Stic
 to cast, A cancels (or cast straight at the target: Settings, *Ground spells*). ZL / ZR can be switched to *press to
 toggle* in the Settings.
 
-### Classic scheme (Old 3DS)
+### Old 3DS scheme (Old 3DS)
 
 Circle Pad up / down walk, left / right turn; C-Stick or D-pad left / right look, D-pad up / down zoom; B jump, L next
 target, R attack, Y chat, A interact, X next hotbar set (on the touch bar), START menu.
+
+**Settings → Controls → D-pad → Spells** frees the D-pad for the hotbar: its four cells are the slots of the set shown on
+the touch bar (X changes the set), and the camera looks around with the Circle Pad while **Y** is held (the D-pad looks
+and zooms as before meanwhile). A tap of Y without moving the Circle Pad still opens the chat. The default is **Camera**
+(the layout above), so nothing changes unless the option is turned on.
 
 ### Touch screen
 
 Tabs: **Chat, Bags, Gear, Spells** (spell book, talents, skills), **Quests, Combat, Map, Social, Settings**. Tap an item
 or spell for its tooltip / description; in the Spells tab tap a spell, then press a button (with ZL / ZR for the other
-sets) or tap a bar cell to put it on the hotbar. **Use** on a lure or a weapon oil applies it to the fitting worn item;
-when several items fit, the Bags page asks which one. The Settings tab has the control scheme, the **language (English /
+sets) or tap a bar cell to put it on the hotbar. **Use** on a lure or a weapon oil shows the items it fits (worn ones
+first); tap one to apply it. Item cards show applied enchantments such as `Enchant: Fishing Lure +25` and the time left. The Settings tab has the control scheme, the **language (English /
 Russian / Spanish / German / French)**, draw distance, number of creatures drawn, the top screen mode (wide / 3D), effects, volumes, FPS display and
 the performance log.
 
@@ -236,7 +241,11 @@ it starts `w3dconv.exe` once per step and shows its output. Use paths without no
    files (`spells.txt`, `factions.txt`, `talents.txt`, `taxi.txt`, ...). Without `ui.w3dp` the 3DS draws a plain stub skin.
    **Game language** picks the language of the game texts taken from your client's DBC files (spell, talent, skill, taxi,
    zone and glue names/descriptions): `enUS`, `enGB`, `koKR`, `frFR`, `deDE`, `zhCN`, `zhTW`, `esES`, `esMX` or `ruRU`
-   (a Russian fan client that replaced the English column). The 3DS application has its own interface translations for
+   (a Russian fan client that replaced the English column). **Check available languages** asks `w3dconv --list-locales`
+   which languages the client really carries (DBC text columns and `Data\<code>\` folders) and leaves only those in the
+   dropdown; the line below lists them (`Available languages: enUS, ruRU`). The language from the client's
+   `WTF\Config.wtf` is preselected when available, and only the selected language is written. The 3DS application
+   has its own interface translations for
    English, Russian, Spanish, German and French; changing the game language in the converter does not switch the app's
    UI language — use **Settings → Interface → Language** on the console (or `language` in `pad.txt`).
 5. **Sound and music:** makes the `sound` folder.
@@ -260,6 +269,8 @@ Point the converter at the client's `Data` folder (the MPQ archives are read dir
 runs all of the steps below with checkboxes; on the command line:
 
 ```
+# which game languages this client really has (one code per line)
+w3dconv --data <WoW>/Data --list-locales
 # interface, texts and in-game loading screens (add --locale esES for a Spanish client, deDE for German, ...)
 w3dconv --data <WoW>/Data --ui --locale esES -o out/ui.w3dp
 # sound and music

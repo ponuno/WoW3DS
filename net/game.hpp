@@ -100,6 +100,11 @@ public:
     const ItemTarget* itemTarget(uint32_t id) const { auto it = itemTarget_.find(id); return it == itemTarget_.end() ? nullptr : &it->second; }
     void addItemTarget(uint32_t id, const ItemTarget& t) { itemTarget_[id] = t; }
     size_t itemTargetCount() const { return itemTarget_.size(); }
+    // 7.16: the display name of an applied item enchantment (spells.txt "@enchant id name", SpellItemEnchantment.dbc:
+    // "Fishing Lure +25", "Sharpened +3" ...); empty when the converter did not know it.
+    std::string enchantName(uint32_t id) const { auto it = enchant_.find(id); return it == enchant_.end() ? std::string() : it->second; }
+    void addEnchant(uint32_t id, const std::string& name) { enchant_[id] = name; }
+    size_t enchantCount() const { return enchant_.size(); }
     // UI stage 12: the cooldowns of Spell.dbc (spells.txt "@cd id recovery category categoryRecovery onEvent", ms). The
     // 1.12 server does not send them for ordinary casts: the client starts them itself when its cast goes off.
     struct Cooldown { uint32_t rec = 0, category = 0, catRec = 0; bool onEvent = false; };
@@ -146,6 +151,7 @@ private:
     std::unordered_set<uint32_t> selfCast_;
     std::unordered_set<uint32_t> friend_;
     std::unordered_map<uint32_t, ItemTarget> itemTarget_;
+    std::unordered_map<uint32_t, std::string> enchant_;
     std::unordered_map<uint32_t, Cooldown> cd_;
 };
 
@@ -204,10 +210,17 @@ const char* inventoryTypeName(uint32_t t);   // "Head", "Main Hand", "Bag" ...
 // equipped, 19..22 bag slots, 23..38 backpack), bag 19..22 = the bag in that slot (slot = index in the bag).
 constexpr uint8_t kBagSelf = 255;
 constexpr uint8_t kSlotBagFirst = 19, kSlotBackpackFirst = 23, kSlotBackpackEnd = 39;
+// 7.16: an applied item enchantment (ITEM_FIELD_ENCHANTMENT, 7 slots of id / left duration / charges).
+struct ItemEnchantView {
+    uint32_t id = 0;
+    int32_t leftMs = 0;     // 0 = permanent or no timer known
+    uint32_t charges = 0;
+};
 struct InvItem {
     uint8_t bag = kBagSelf, slot = 0;
     uint64_t guid = 0;
     uint32_t entry = 0, count = 1, durability = 0, maxDurability = 0;
+    ItemEnchantView enchant[7];
     bool equipped() const { return bag == kBagSelf && slot < kSlotBagFirst; }
     bool isBagSlot() const { return bag == kBagSelf && slot >= kSlotBagFirst && slot < kSlotBackpackFirst; }
 };
@@ -712,6 +725,8 @@ public:
     std::vector<InvItem> itemOnItemTargets(const InvItem& source) const;
     bool itemOnItemTarget(const InvItem& source, InvItem* out) const;   // main hand for a held-item spell, else the first fit
     void useItemOnItem(const InvItem& it, uint64_t itemGuid, uint32_t nowMs);
+    // 7.16: re-read one carried item for its card (durability and the time left on its enchantments)
+    bool refreshItem(InvItem& it) const;
     const WorldObject* objectForItem() const;          // 6.59b: the nearest usable object within 10 yd (an item's target when none is selected)
     // UI stage 10: an item whose spell is placed on the ground (grenades, bombs, target dummies): its on-use spell, or 0
     uint32_t itemGroundSpell(uint32_t entry) const;
@@ -1139,6 +1154,10 @@ private:
     void ackFlagChange(uint16_t ackOp, uint32_t counter, uint32_t flag, bool on, uint32_t nowMs);
     std::unordered_map<uint32_t, ItemInfo> items_;
     std::unordered_set<uint32_t> itemAsked_, itemWanted_;
+    // 7.16: SMSG_ITEM_ENCHANT_TIME_UPDATE: when a temporary item enchant ends (the item field holds the value at apply time)
+    struct ItemEnchantTimer { uint64_t item = 0; uint8_t slot = 0; uint32_t id = 0, endMs = 0; };
+    std::vector<ItemEnchantTimer> itemEnchantTimers_;
+    int32_t enchantLeftMs(uint64_t item, uint8_t slot, uint32_t id, uint32_t fieldMs) const;
     uint32_t reclaimAt_ = 0, corpseAskedMs_ = 0;
     Life lastLife_ = Life::Alive;
     bool lifeSeen_ = false;
