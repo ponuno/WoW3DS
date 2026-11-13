@@ -150,13 +150,7 @@ toggle* in the Settings.
 
 ### Old 3DS scheme (Old 3DS)
 
-Circle Pad up / down walk, left / right turn; C-Stick or D-pad left / right look, D-pad up / down zoom; B jump, L next
-target, R attack, Y chat, A interact, X next hotbar set (on the touch bar), START menu.
-
-**Settings → Controls → D-pad → Spells** frees the D-pad for the hotbar: its four cells are the slots of the set shown on
-the touch bar (X changes the set), and the camera looks around with the Circle Pad while **Y** is held (the D-pad looks
-and zooms as before meanwhile). A tap of Y without moving the Circle Pad still opens the chat. The default is **Camera**
-(the layout above), so nothing changes unless the option is turned on.
+WIP
 
 ### Touch screen
 
