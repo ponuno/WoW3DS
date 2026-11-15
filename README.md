@@ -1,23 +1,12 @@
 # WoW3DS
 
-<<<<<<< HEAD
-A World of Warcraft **1.12.1 (Vanilla)** client for the **New Nintendo 3DS / New 2DS XL**, written from scratch in C++
-for devkitARM (libctru + citro3d), plus a PC converter that turns *your own* 1.12 game files into packs the console can
-=======
 A World of Warcraft **1.12.1 (Vanilla)** client for the **New Nintendo 3DS / New 2DS XL** Old3ds/2ds is not fully tested, written from scratch in C++
 for devkitARM (libctru + citro3d), plus a PC converter that turns *your own* 1.12/1.18 game files into packs the console can
->>>>>>> 4bfb5b35dc17c18488e5e6842832d68b3b776dba
 stream.
 
 > **Status: experimental hobby project.** Features are developed against PC tests (a stubbed libctru and an independent
 > Python server) and then tried on a real New 3DS against a real server. The [release notes](CHANGES_0.8.1.md) say what
 > changed in each version, including what has not been confirmed on hardware yet.
-<<<<<<< HEAD
-
-**Current release: 0.8.1** (13 November 2026). Converter packs made with 0.8.0 stay valid, and an 0.8.0 client reads an
-0.8.1 pack and the other way round. Older notes: [0.8.0](CHANGES_0.8.0.md).
-=======
->>>>>>> 4bfb5b35dc17c18488e5e6842832d68b3b776dba
 
 No game data, textures, models or sounds are in this repository. You need your own legally obtained WoW 1.12.1/1.18 client
 (`Data/*.MPQ`) and a private server that speaks the 1.12/turtle WoW protocol (the client was developed against a vMaNGOS-compatible
@@ -34,10 +23,6 @@ server).
 - [Windows GUI converter](#windows-gui-converter)
 - [Command-line converter](#command-line-converter)
 - [Quest areas data](#quest-areas-data)
-<<<<<<< HEAD
-- [Tests](#tests)
-=======
->>>>>>> 4bfb5b35dc17c18488e5e6842832d68b3b776dba
 - [Legal](#legal)
 
 ## What works
@@ -75,19 +60,11 @@ server).
 
 ### What you need
 
-<<<<<<< HEAD
-- A **New Nintendo 3DS / New 2DS XL** (an Old 3DS works with the Old 3DS scheme, but slowly) with custom firmware
-  (Luma3DS). The `.3dsx` needs the **Homebrew Launcher**; a CIA needs a title installer such as **FBI**.
-- `sdmc:/3ds/dspfirm.cdc` for sound: run the **DSP1** homebrew once if you do not have it.
-- An SD card (FAT32) with room for the packs: a few hundred MB for a test region, several GB for the whole game.
-- Your own **WoW 1.12.1 client** (the `Data` folder with the `.MPQ` files) and a Windows PC.
-=======
 - A **New Nintendo 3DS / New 2DS XL** (an Old 3DS works with the Old 3DS scheme) with custom firmware
   (Luma3DS). CIA needs a title installer such as **FBI**.
 - `sdmc:/3ds/dspfirm.cdc` for sound: run the **DSP1** homebrew once if you do not have it.
 - An SD card (FAT32) with room for the packs: a few hundred MB for a test region, several GB for the whole game.
 - Your own **WoW 1.12.1/ 1.18  client** (the `Data` folder with the `.MPQ` files) and a Windows PC.
->>>>>>> 4bfb5b35dc17c18488e5e6842832d68b3b776dba
 - **7-Zip** (https://www.7-zip.org) to unpack the converter pack (a ZIP; any unpacker works).
 - An account on a 1.12.1 private server (developed against vMaNGOS-compatible servers).
 
@@ -97,10 +74,6 @@ Download the build you want from the releases (or build it, see [Building](#buil
 
 | File | How it runs | Notes |
 |---|---|---|
-<<<<<<< HEAD
-| `w3dproto0.8.1.3dsx` | Homebrew Launcher | 124 MB memory; the only build for an Old 3DS |
-=======
->>>>>>> 4bfb5b35dc17c18488e5e6842832d68b3b776dba
 | `w3dproto0.8.1.cia` | installed with FBI | 178 MB memory mode, New 3DS / New 2DS XL |
 | `w3dproto0.8.1-124.cia` | installed with FBI | 124 MB mode; own title ID, installs next to the 178 MB one |
 
@@ -161,29 +134,17 @@ sdmc:/3ds/w3dproto/
   sound/                                   sound and music
   *.txt, spelldesc.bin                     texts: spells, spell descriptions, talents, skills, factions, flight paths,
                                            area triggers (dungeon doors, the tram), glue texts, transports ...
-<<<<<<< HEAD
-  questdb.bin                              optional quest areas (see below)
-=======
   **questdb.bin**                              optional quest areas (see below)
->>>>>>> 4bfb5b35dc17c18488e5e6842832d68b3b776dba
 ```
 
 Packs of two different runs do not mix: after a new `all.bat` replace all `map*.w3dp` and `common*.w3dp` together.
 
 ### 5. Play
-<<<<<<< HEAD
-
-Start **w3dproto** from the Homebrew Launcher (or from the HOME menu for a CIA build). On the login screen enter the
-**server** (the realmlist address, e.g. `logon.example.com`), the **account** and the **password**, then choose the realm
-and your character. The server, the account, the last realm and character are remembered in `login.cfg`; **the password
-is never saved**.
-=======
  On the login screen enter the **server** (the realmlist address, e.g. `logon.example.com`), the **account** and the **password**, then choose the realm
 and your character. The server, the account, the last realm and character are remembered in `login.cfg`; **the password
 is never saved**.
 
 **FOR TURTLE WOW CHANGE YOUR PROTOCOL ON THE MAIN SCREEN**
->>>>>>> 4bfb5b35dc17c18488e5e6842832d68b3b776dba
 
 ### Updating
 
@@ -286,37 +247,7 @@ The detailed stage plan (`PLAN.md`) is kept with the project docs and is intenti
 
 ### Converter (PC, Linux or Windows)
 
-<<<<<<< HEAD
-Needs CMake 3.20+, a C++20 compiler and `git` (the dependencies are fetched at configure time): glm, meshoptimizer,
-rg-etc1 and WoWee (format parsers only). StormLib (`-DW3D_STORMLIB=ON`, the default) reads the MPQ archives directly;
-CascLib (`-DW3D_CASC=ON`, the default, vendored in `net/forever/extern/casclib`) reads modern CASC archives. Turn
-either off if you do not need it.
 
-```
-cd converter
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j
-```
-
-`w3dgui` is built only on Windows.
-
-### 3DS application
-
-Needs devkitPro with devkitARM, libctru and citro3d (`DEVKITARM` set).
-
-```
-cd proto3ds
-make            # produces w3dproto.3dsx
-make cia        # produces w3dproto.cia (178 MB memory mode)
-```
-
-`make cia` needs `makerom` and `bannertool` in `PATH` (or set `MAKEROM=` / `BANNERTOOL=`). Add
-`CIA_MEMORY=124MB` for the 124 MB build (`w3dproto-124.cia`) and `CIA_VERSION="0 8 1"` for the version in the title.
-Details (Russian): [`proto3ds/cia/README_RU.md`](proto3ds/cia/README_RU.md).
-
-=======
-
->>>>>>> 4bfb5b35dc17c18488e5e6842832d68b3b776dba
 ## Windows GUI converter
 
 `w3dgui.exe` runs the whole conversion in one window. Keep it in the same folder as `w3dconv.exe` (and `w3dpreview.exe`);
@@ -342,11 +273,7 @@ it starts `w3dconv.exe` once per step and shows its output. Use paths without no
    files (`spells.txt`, `factions.txt`, `talents.txt`, `taxi.txt`, ...). Without `ui.w3dp` the 3DS draws a plain stub
    skin. **Game language** picks the language of the game texts taken from your client's DBC files (spell, talent, skill,
    taxi, zone and glue names/descriptions): `enUS`, `enGB`, `koKR`, `frFR`, `deDE`, `zhCN`, `zhTW`, `esES`, `esMX` or
-<<<<<<< HEAD
-   `ruRU` (a Russian fan client that replaced the English column). **Check available languages** asks
-=======
    `ruRU`. **Check available languages** asks
->>>>>>> 4bfb5b35dc17c18488e5e6842832d68b3b776dba
    `w3dconv --list-locales` which languages the client really carries (DBC text columns and `Data\<code>\` folders) and
    leaves only those in the dropdown; the line below lists them (`Available languages: enUS, ruRU`). The language from
    the client's `WTF\Config.wtf` is preselected when available, and only the selected language is written. It is also the
@@ -418,45 +345,11 @@ Therefore `questdb.bin` is distributed under **GPL-3.0** as well, with credit to
 and the script that makes it is included: `tools/questdb/questie_import.py`
 (`python3 questie_import.py <QuestieDB>/data/Classic questdb.bin`). The GPL-3.0 covers this data file and the script
 only; the rest of the project is not changed by it as long as the file stays a separate file on the SD card.
-<<<<<<< HEAD
 
 `tools/questdb/tdb_import.py` makes the same file from the world SQL of a WoW Forever database (TrinityCore,
 GPL-2.0-or-later), with world coordinates instead of zone percentages. Details:
 [`tools/questdb/README.txt`](tools/questdb/README.txt).
 
-## Tests
-
-No console and no game data are needed. The scripts are bash; on Windows run them from Git Bash, WSL or MSYS2.
-
-| Script | Checks |
-|---|---|
-| `converter/tests/run_pool_tests.sh <build dir>` | shared pool and `--all` |
-| `converter/tests/run_wmo_tests.sh <build dir>` | buildings, collision, previews |
-| `converter/tests/run_dungeon_tests.sh <build dir>` | instance maps, loading screens |
-| `converter/tests/run_player_tests.sh <build dir>` | player models |
-| `converter/tests/run_transport_tests.sh <build dir>` | ships and zeppelins |
-| `converter/tests/run_water_tests.sh <build dir>` | liquids |
-| `converter/tests/run_gui_tests.sh <build dir>` | GUI settings logic |
-| `proto3ds/tests/run_glue.sh [ui.w3dp] [glue.txt]` | login / character screens (screenshots and input checks) |
-| `proto3ds/tests/run_streaming.sh <build dir>` | streaming order (a synthetic city read at SD-card speed) |
-| `proto3ds/tests/run_fx.sh [wmo.w3dp]` | particles and lamp glows (run after `run_wmo_tests.sh`) |
-| `proto3ds/tests/run_spellfx.sh <build dir>` | spell effects |
-| `proto3ds/tests/run_swim.sh` | swimming with the liquid data |
-| `proto3ds/tests/run_streamer.sh <pack.w3dp>` | the streamer on the PC with sanitizers |
-| `proto3ds/tests/run_ui.sh`, `run_hud.sh`, `run_anim.sh` | UI, HUD and animation checks |
-| `net/tests/run_stage5.sh` | protocol tests against an independent Python server (includes `water_test`) |
-| `net/tests/run_713.sh` | weapon icons, Feed Pet, Cannibalize, Charge splines |
-| `tools/armcheck/armcheck.sh <files>` | ARM compile check (needs a devkitPro-like sysroot) |
-
-More `run_*.sh` scripts in those folders cover individual features (ground, terrain, world objects, PVS, quests, ...).
-Some net and UI tests replay a recorded real-server session that is not part of this repository.
-=======
-
-`tools/questdb/tdb_import.py` makes the same file from the world SQL of a WoW Forever database (TrinityCore,
-GPL-2.0-or-later), with world coordinates instead of zone percentages. Details:
-[`tools/questdb/README.txt`](tools/questdb/README.txt).
-
->>>>>>> 4bfb5b35dc17c18488e5e6842832d68b3b776dba
 
 ## Legal
 
